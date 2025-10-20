@@ -1,0 +1,7 @@
+Fun Facts About Codexland
+
+- The capital city is Promptopolis.
+- Residents speak in token-efficient phrases.
+- Every code review ends with a well-tested commit.
+
+This document exists to exercise the LlamaParse verification script.
