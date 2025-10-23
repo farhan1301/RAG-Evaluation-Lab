@@ -217,13 +217,16 @@ export function HomePage({ darkMode, onNavigate }: HomePageProps) {
             {features.map((feature, idx) => {
               const Icon = feature.icon;
               return (
-                <Card key={idx} className={`${darkMode ? 'bg-zinc-800 border-zinc-700' : 'border-zinc-200'} hover:shadow-lg transition-shadow`}>
-                  <CardHeader>
-                    <div className={`w-12 h-12 rounded-xl bg-gradient-to-br ${feature.color} flex items-center justify-center mb-4`}>
+                <Card
+                  key={idx}
+                  className={`h-full ${darkMode ? 'bg-zinc-800 border-zinc-700' : 'border-zinc-200'} hover:shadow-lg transition-shadow`}
+                >
+                  <CardHeader className="items-center justify-items-center text-center justify-center gap-3 h-full">
+                    <div className={`w-12 h-12 rounded-xl bg-gradient-to-br ${feature.color} flex items-center justify-center mb-4 mx-auto`}>
                       <Icon className="text-white" size={24} />
                     </div>
                     <CardTitle>{feature.title}</CardTitle>
-                    <CardDescription className={darkMode ? 'text-zinc-400' : ''}>
+                    <CardDescription className={`${darkMode ? 'text-zinc-400' : ''} text-center`}>
                       {feature.description}
                     </CardDescription>
                   </CardHeader>
