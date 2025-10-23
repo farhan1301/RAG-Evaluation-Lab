@@ -28,6 +28,9 @@ const createPipelineTemplate = (index: number, overrides: Partial<Pipeline> = {}
       overrides.name ??
       (index === 0 ? 'Baseline Config' : `Configuration ${index + 1}`),
     description: overrides.description ?? '',
+    parsing: {
+      strategy: overrides.parsing?.strategy ?? 'llama-parse',
+    },
     chunking: {
       strategy: overrides.chunking?.strategy ?? 'recursive',
       chunkSize: overrides.chunking?.chunkSize ?? 300,
@@ -63,6 +66,7 @@ const mergePipeline = (pipeline: Pipeline, updates: Partial<Pipeline>): Pipeline
   return {
     ...pipeline,
     ...updates,
+    parsing: updates.parsing ? { ...pipeline.parsing, ...updates.parsing } : pipeline.parsing,
     chunking: updates.chunking
       ? { ...pipeline.chunking, ...updates.chunking }
       : pipeline.chunking,
@@ -114,6 +118,7 @@ export function PipelineProvider({ children }: { children: ReactNode }) {
       duplicate = createPipelineTemplate(prev.length, {
         name: `${source.name} Copy`,
         description: source.description,
+        parsing: { ...source.parsing },
         chunking: { ...source.chunking },
         embedding: { ...source.embedding },
         retriever: { ...source.retriever },

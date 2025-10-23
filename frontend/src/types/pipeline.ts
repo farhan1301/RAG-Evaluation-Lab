@@ -1,5 +1,11 @@
 export type ChunkingStrategy = 'recursive' | 'semantic' | 'layout' | 'table';
 
+export type ParsingStrategy = 'llama-parse';
+
+export interface PipelineParsingConfig {
+  strategy: ParsingStrategy;
+}
+
 export interface PipelineChunkingConfig {
   strategy: ChunkingStrategy;
   chunkSize: number;
@@ -31,6 +37,7 @@ export interface PipelineJudgeConfig {
 }
 
 export type PipelineStageKey =
+  | 'parsing'
   | 'chunking'
   | 'embedding'
   | 'vectordb'
@@ -43,6 +50,7 @@ export interface Pipeline {
   id: string;
   name: string;
   description?: string;
+  parsing: PipelineParsingConfig;
   chunking: PipelineChunkingConfig;
   embedding: PipelineEmbeddingConfig;
   retriever: PipelineRetrieverConfig;

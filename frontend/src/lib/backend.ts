@@ -23,6 +23,13 @@ interface SearchMatchesResponse {
   }>;
 }
 
+interface SearchRequest {
+  pipelineId: string;
+  question: string;
+  topK?: number;
+  collectionName?: string;
+}
+
 interface AnswerResponse {
   answer: string;
   matches: Array<{
@@ -127,6 +134,25 @@ export const upsertChunks = async (
   }
 
   return parseJson(response) as Promise<UpsertChunksResponse>;
+};
+
+export const searchMatches = async (
+  payload: SearchRequest
+): Promise<SearchMatchesResponse> => {
+  const response = await fetch(withBase('/api/search'), {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const detail = await parseJson(response);
+    throw new Error(detail?.error || `Failed to search chunks (${response.status})`);
+  }
+
+  return parseJson(response) as Promise<SearchMatchesResponse>;
 };
 
 export const answerQuestion = async (

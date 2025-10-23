@@ -1,1 +1,16 @@
 /.env
+
+# Node dependencies
+node_modules/
+
+# Build outputs
+dist/
+build/
+backend/dist/
+frontend/build/
+frontend/node_modules/.vite/
+
+# Logs and runtime artifacts
+*.log
+logs/
+backend/logs/

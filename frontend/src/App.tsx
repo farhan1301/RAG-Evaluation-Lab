@@ -6,7 +6,8 @@ import { ExperimentsPage } from './components/ExperimentsPage';
 import { ReportsPage } from './components/ReportsPage';
 import { HistoryPage } from './components/HistoryPage';
 import { SettingsPage } from './components/SettingsPage';
-import { FlaskConical, Database, Zap, FileText, Settings, Clock, Moon, Sun, Home } from 'lucide-react';
+import { DocumentationPage } from './components/DocumentationPage';
+import { FlaskConical, Database, Zap, FileText, Settings, Clock, Moon, Sun, Home, Book } from 'lucide-react';
 import { Button } from './components/ui/button';
 import {
   DropdownMenu,
@@ -15,7 +16,7 @@ import {
   DropdownMenuTrigger,
 } from './components/ui/dropdown-menu';
 
-type Page = 'home' | 'datasets' | 'pipelines' | 'experiments' | 'reports' | 'history' | 'settings';
+type Page = 'home' | 'datasets' | 'pipelines' | 'experiments' | 'reports' | 'history' | 'settings' | 'docs';
 
 export default function App() {
   const [currentPage, setCurrentPage] = useState<Page>('home');
@@ -27,6 +28,7 @@ export default function App() {
     { id: 'pipelines' as Page, label: 'Pipelines', icon: FlaskConical },
     { id: 'experiments' as Page, label: 'Experiments', icon: Zap },
     { id: 'reports' as Page, label: 'Reports', icon: FileText },
+    { id: 'docs' as Page, label: 'Documentation', icon: Book },
   ];
 
   return (
@@ -143,6 +145,7 @@ export default function App() {
           {currentPage === 'reports' && <ReportsPage darkMode={darkMode} />}
           {currentPage === 'history' && <HistoryPage darkMode={darkMode} onViewReport={(id) => setCurrentPage('reports')} />}
           {currentPage === 'settings' && <SettingsPage darkMode={darkMode} />}
+          {currentPage === 'docs' && <DocumentationPage darkMode={darkMode} />}
         </div>
       </div>
     </div>

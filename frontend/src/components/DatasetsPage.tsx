@@ -6,8 +6,8 @@ import { Input } from './ui/input';
 import { Textarea } from './ui/textarea';
 import { Progress } from './ui/progress';
 import { useDataset } from '../state/dataset';
-import { parseDocument } from '../lib/backend';
 import type { DatasetDocument, DatasetTask } from '../types/dataset';
+import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 
 interface DatasetsPageProps {
   darkMode: boolean;
@@ -25,13 +25,8 @@ const arrayBufferToBase64 = (buffer: ArrayBuffer) => {
   return btoa(binary);
 };
 
-const buildSnippet = (text: string) => {
-  if (!text) {
-    return 'Parser did not return readable text for this file.';
-  }
-  const normalized = text.replace(/\s+/g, ' ').trim();
-  return normalized.length > 400 ? `${normalized.slice(0, 400)}…` : normalized;
-};
+const UPLOAD_SNIPPET =
+  'Ready for parsing. Configure parsing strategy in the Pipelines step.';
 
 export function DatasetsPage({ darkMode, onNext }: DatasetsPageProps) {
   const { documents, setDocuments, tasks, setTasks } = useDataset();
@@ -74,41 +69,19 @@ export function DatasetsPage({ darkMode, onNext }: DatasetsPageProps) {
         });
 
         const arrayBuffer = await file.arrayBuffer();
-        updateDocument({
-          progress: 30,
-          statusMessage: 'Uploading to LlamaParse…',
-        });
-
         const contentBase64 = arrayBufferToBase64(arrayBuffer);
-        updateDocument({
-          progress: 55,
-          statusMessage: 'Parsing with LlamaParse…',
-        });
-
-        const parsed = await parseDocument({
-          filename: file.name,
-          mimeType: file.type || 'application/octet-stream',
-          contentBase64,
-        });
-
-        const text = parsed.text ?? '';
-        const snippet = buildSnippet(text);
-
         updateDocument({
           status: 'complete',
           progress: 100,
-          snippet,
-          content: text,
-          statusMessage:
-            parsed.pageCount && parsed.pageCount > 0
-              ? `Parsed ${parsed.pageCount} page${parsed.pageCount === 1 ? '' : 's'} via LlamaParse.`
-              : 'Parsing complete.',
-          pageCount: parsed.pageCount,
-          parserJobId: parsed.jobId,
+          snippet: UPLOAD_SNIPPET,
+          statusMessage: 'Uploaded successfully. Parsing will run per pipeline configuration.',
+          fileBase64: contentBase64,
+          mimeType: file.type || 'application/octet-stream',
+          uploadedAt: new Date().toISOString(),
         });
       } catch (error) {
         const message =
-          error instanceof Error ? error.message : 'Unknown error while parsing document.';
+          error instanceof Error ? error.message : 'Unknown error while processing document.';
 
         setDocuments((prev) =>
           prev.map((doc) =>
@@ -117,7 +90,7 @@ export function DatasetsPage({ darkMode, onNext }: DatasetsPageProps) {
                   ...doc,
                   status: 'error',
                   progress: 100,
-                  snippet: 'Failed to parse this file.',
+                  snippet: 'Failed to process this file.',
                   statusMessage: message,
                   error: message,
                 }
@@ -131,6 +104,10 @@ export function DatasetsPage({ darkMode, onNext }: DatasetsPageProps) {
     if (e.target) {
       e.target.value = '';
     }
+  };
+
+  const removeDocument = (id: string) => {
+    setDocuments((prev) => prev.filter((doc) => doc.id !== id));
   };
 
   const loadSampleDataset = () => {
@@ -167,7 +144,13 @@ export function DatasetsPage({ darkMode, onNext }: DatasetsPageProps) {
       },
     ];
 
-    setDocuments(sampleDocs);
+    setDocuments(
+      sampleDocs.map((doc) => ({
+        ...doc,
+        statusMessage: 'Sample content provided for quick experimentation.',
+        uploadedAt: new Date().toISOString(),
+      }))
+    );
 
     setTasks([
       {
@@ -267,7 +250,17 @@ export function DatasetsPage({ darkMode, onNext }: DatasetsPageProps) {
                       <div className="flex-1">
                         <div className="flex items-center justify-between mb-2">
                           <span>{doc.name}</span>
-                          <span className="text-sm opacity-60">{doc.progress}%</span>
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm opacity-60">{doc.progress}%</span>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={() => removeDocument(doc.id)}
+                              aria-label="Remove document"
+                            >
+                              <Trash2 size={16} />
+                            </Button>
+                          </div>
                         </div>
                         <Progress value={doc.progress} className="mb-2" />
                         {doc.statusMessage && (
@@ -297,14 +290,17 @@ export function DatasetsPage({ darkMode, onNext }: DatasetsPageProps) {
               </div>
             )}
 
-            <Button
-              variant="outline"
-              onClick={loadSampleDataset}
-              className="gap-2"
-            >
-              <Sparkles size={16} />
-              Load Sample Dataset
-            </Button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="outline" onClick={loadSampleDataset} className="gap-2">
+                  <Sparkles size={16} />
+                  Load Sample Dataset
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="top">
+                Replace the current documents and tasks with a curated demo set for quick exploration.
+              </TooltipContent>
+            </Tooltip>
           </CardContent>
         </Card>
 

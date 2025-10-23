@@ -1,9 +1,16 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Play, FileText } from 'lucide-react';
 import { Button } from './ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from './ui/card';
 import { Progress } from './ui/progress';
 import { Badge } from './ui/badge';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from './ui/select';
 import {
   Table,
   TableBody,
@@ -22,8 +29,8 @@ import {
   type DocumentChunkGroup,
   type DocumentChunk,
 } from '../lib/chunking';
-import { upsertChunks, answerQuestion, judgeAnswers } from '../lib/backend';
-import type { DatasetTask } from '../types/dataset';
+import { upsertChunks, answerQuestion, judgeAnswers, parseDocument } from '../lib/backend';
+import type { DatasetDocument, DatasetTask } from '../types/dataset';
 import type { Pipeline } from '../types/pipeline';
 import type {
   AnswerDetail,
@@ -40,7 +47,7 @@ interface ExperimentsPageProps {
   onNext: () => void;
 }
 
-type Stage = 'idle' | 'chunking' | 'answering' | 'judging' | 'complete';
+type Stage = 'idle' | 'parsing' | 'chunking' | 'answering' | 'judging' | 'complete';
 
 const EMBEDDING_COST_PER_1K_TOKENS: Record<string, number> = {
   'text-embedding-3-small': 0.00002,
@@ -141,7 +148,7 @@ const getEmbeddingVectorDim = (model: string) => {
 };
 
 export function ExperimentsPage({ darkMode, onNext }: ExperimentsPageProps) {
-  const { documents, tasks } = useDataset();
+  const { documents, setDocuments, tasks } = useDataset();
   const { pipelines } = usePipelines();
   const { setLatestRun } = useExperimentResults();
 
@@ -152,16 +159,37 @@ export function ExperimentsPage({ darkMode, onNext }: ExperimentsPageProps) {
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
-  const activePipeline = pipelines[0] ?? DEFAULT_PIPELINE;
-  const chunkConfig = activePipeline.chunking ?? DEFAULT_PIPELINE.chunking;
-  const retrieverK = activePipeline.retriever?.topK ?? DEFAULT_PIPELINE.retriever.topK;
-  const pipelineId = activePipeline.id ?? DEFAULT_PIPELINE.id;
+  const experimentPipelines = pipelines.length ? pipelines : [DEFAULT_PIPELINE];
+  const baselinePipelineId =
+    pipelines.find((pipeline) => pipeline.isBaseline)?.id ?? experimentPipelines[0].id;
+  const baselinePipeline =
+    pipelines.find((pipeline) => pipeline.id === baselinePipelineId) ?? experimentPipelines[0];
+
+  const [selectedPipelineId, setSelectedPipelineId] = useState(baselinePipelineId);
+  const [taskResultsByPipeline, setTaskResultsByPipeline] = useState<
+    Record<string, TaskResult[]>
+  >({});
+
+  useEffect(() => {
+    setSelectedPipelineId((prev) => {
+      if (pipelines.some((pipeline) => pipeline.id === prev)) {
+        return prev;
+      }
+      return baselinePipelineId;
+    });
+  }, [baselinePipelineId, pipelines]);
 
   const readyDocuments = useMemo(
     () =>
-      documents.filter(
-        (doc) => doc.status === 'complete' && typeof doc.content === 'string' && doc.content.trim()
-      ),
+      documents.filter((doc) => {
+        if (doc.status !== 'complete') {
+          return false;
+        }
+        const hasContent = typeof doc.content === 'string' && doc.content.trim().length > 0;
+        const hasFile =
+          typeof doc.fileBase64 === 'string' && doc.fileBase64.trim().length > 0;
+        return hasContent || hasFile;
+      }),
     [documents]
   );
 
@@ -170,11 +198,48 @@ export function ExperimentsPage({ darkMode, onNext }: ExperimentsPageProps) {
     [tasks]
   );
 
+  const pipelineOptions = useMemo(
+    () =>
+      experimentPipelines.map((pipeline, index) => ({
+        id: pipeline.id ?? `pipeline-${index}`,
+        name: pipeline.name ?? `Pipeline ${index + 1}`,
+      })),
+    [experimentPipelines]
+  );
+
+  const pipelineNameLookup = useMemo(
+    () =>
+      pipelineOptions.reduce<Record<string, string>>((acc, option) => {
+        acc[option.id] = option.name;
+        return acc;
+      }, {}),
+    [pipelineOptions]
+  );
+
+  const activePipelineId =
+    selectedPipelineId && pipelineNameLookup[selectedPipelineId]
+      ? selectedPipelineId
+      : pipelineOptions[0]?.id ?? '';
+
+  const displayedTaskResults =
+    taskResultsByPipeline[activePipelineId] ??
+    (activePipelineId === baselinePipelineId ? taskResults : []);
+
+  const buildSnippet = (text: string) => {
+    const normalized = text.replace(/\s+/g, ' ').trim();
+    if (!normalized) {
+      return 'Parsed document is empty.';
+    }
+    return normalized.length > 200 ? `${normalized.slice(0, 200)}…` : normalized;
+  };
+
   const resetState = () => {
     setStatusLog([]);
     setTaskResults([]);
+    setTaskResultsByPipeline({});
     setProgress(0);
     setError(null);
+    setSelectedPipelineId(baselinePipelineId);
   };
 
   const runExperiment = async () => {
@@ -204,299 +269,522 @@ export function ExperimentsPage({ darkMode, onNext }: ExperimentsPageProps) {
 
     const startedAt = new Date().toISOString();
 
+    const pipelineOverview = experimentPipelines.map((pipeline, index) => ({
+      pipeline,
+      id: pipeline.id ?? `pipeline-${index}`,
+      name: pipeline.name ?? `Pipeline ${index + 1}`,
+    }));
+
+    const pipelineNames = pipelineOverview.map((entry) => entry.name);
+
+    let latestDocuments: DatasetDocument[] = documents;
+    const applyDocuments = (updater: (prev: DatasetDocument[]) => DatasetDocument[]) => {
+      latestDocuments = updater(latestDocuments);
+      setDocuments(latestDocuments);
+    };
+
     appendLog(`Experiment started at ${formatTimestamp()}.`);
-    appendLog(`Using pipeline: ${activePipeline.name}.`);
-    appendLog(`Preparing ${readyDocuments.length} document${readyDocuments.length === 1 ? '' : 's'} for chunking.`);
+    if (pipelineNames.length === 1) {
+      appendLog(`Running pipeline: ${pipelineNames[0]}.`);
+    } else {
+      appendLog(`Running ${pipelineNames.length} pipelines: ${pipelineNames.join(', ')}.`);
+    }
+    appendLog(
+      `Preparing ${readyDocuments.length} document${readyDocuments.length === 1 ? '' : 's'} for chunking.`
+    );
 
     try {
       const taskById = new Map(readyTasks.map((task) => [task.id, task]));
 
-      const parsedDocuments: ParsedDocument[] = readyDocuments.map((doc) => ({
+      const documentsNeedingParse = latestDocuments.filter(
+        (doc) =>
+          doc.status === 'complete' &&
+          (!doc.content || !doc.content.trim()) &&
+          typeof doc.fileBase64 === 'string' &&
+          doc.fileBase64.trim()
+      );
+
+      if (documentsNeedingParse.length > 0) {
+        setStage('parsing');
+        appendLog(
+          `Parsing ${documentsNeedingParse.length} document${documentsNeedingParse.length === 1 ? '' : 's'} using ${baselinePipeline.parsing.strategy}…`
+        );
+
+        let parsedCount = 0;
+        for (const doc of documentsNeedingParse) {
+          appendLog(`→ Parsing "${doc.name}"`);
+          applyDocuments((prev) =>
+            prev.map((item) =>
+              item.id === doc.id
+                ? {
+                    ...item,
+                    status: 'processing',
+                    statusMessage: 'Parsing document…',
+                    error: undefined,
+                  }
+                : item
+            )
+          );
+
+          try {
+            const response = await parseDocument({
+              filename: doc.name ?? 'Document',
+              mimeType: doc.mimeType,
+              contentBase64: doc.fileBase64 ?? '',
+            });
+
+            const trimmedText = (response.text ?? '').trim();
+            if (!trimmedText) {
+              const message = 'Parsing completed, but no text could be extracted.';
+              applyDocuments((prev) =>
+                prev.map((item) =>
+                  item.id === doc.id
+                    ? {
+                        ...item,
+                        status: 'error',
+                        statusMessage: message,
+                        snippet: 'No text available from this document.',
+                        error: message,
+                      }
+                    : item
+                )
+              );
+              appendLog(`✗ Failed to extract text from "${doc.name}".`);
+            } else {
+              const snippet = buildSnippet(trimmedText);
+              applyDocuments((prev) =>
+                prev.map((item) =>
+                  item.id === doc.id
+                    ? {
+                        ...item,
+                        status: 'complete',
+                        statusMessage: 'Parsed for experiment run.',
+                        content: trimmedText,
+                        snippet,
+                        pageCount: response.pageCount,
+                        parserJobId: response.jobId,
+                      }
+                    : item
+                )
+              );
+              appendLog(
+                `✓ Parsed "${doc.name}"${
+                  response.pageCount
+                    ? ` (${response.pageCount} page${response.pageCount === 1 ? '' : 's'})`
+                    : ''
+                }`
+              );
+            }
+          } catch (error) {
+            const message =
+              error instanceof Error ? error.message : 'Unknown error while parsing document.';
+            applyDocuments((prev) =>
+              prev.map((item) =>
+                item.id === doc.id
+                  ? {
+                      ...item,
+                      status: 'error',
+                      statusMessage: message,
+                      error: message,
+                    }
+                  : item
+              )
+            );
+            appendLog(`✗ Failed to parse "${doc.name}": ${message}`);
+            setError(`Failed to parse document "${doc.name}". ${message}`);
+            setIsRunning(false);
+            setStage('idle');
+            return;
+          }
+
+          parsedCount += 1;
+          const parseProgress =
+            10 + Math.round((parsedCount / documentsNeedingParse.length) * 20);
+          setProgress(Math.min(30, parseProgress));
+        }
+      }
+
+      const readyDocs = latestDocuments.filter(
+        (doc) =>
+          doc.status === 'complete' &&
+          typeof doc.content === 'string' &&
+          doc.content.trim().length > 0
+      );
+
+      if (!readyDocs.length) {
+        const message =
+          'Document parsing produced no usable text. Try re-uploading the file or selecting a different parser.';
+        appendLog(`✗ ${message}`);
+        setError(message);
+        setIsRunning(false);
+        setStage('idle');
+        return;
+      }
+
+      const parsedDocuments: ParsedDocument[] = readyDocs.map((doc) => ({
         id: doc.id,
         name: doc.name,
         source: doc.source,
         content: doc.content ?? '',
       }));
 
-      const chunkGroups: DocumentChunkGroup[] = chunkDocumentsWithConfig(parsedDocuments, chunkConfig);
-      const chunkSummary = summarizeChunkGroups(chunkGroups);
-      const chunks: DocumentChunk[] = chunkGroups.flatMap((group) => group.chunks);
-      const chunkCount = chunks.length;
+      const pipelineCount = pipelineOverview.length || 1;
+      const computePipelineProgress = (index: number, fraction: number) => {
+        const clamped = Math.min(1, Math.max(0, fraction));
+        const value = Math.round(30 + ((index + clamped) / pipelineCount) * 70);
+        setProgress(Math.min(99, value));
+      };
+      const updatePipelineProgress = (
+        index: number,
+        startFraction: number,
+        endFraction: number,
+        portion: number
+      ) => {
+        const clampedPortion = Math.min(1, Math.max(0, portion));
+        const fraction = startFraction + (endFraction - startFraction) * clampedPortion;
+        computePipelineProgress(index, fraction);
+      };
 
-      if (!chunks.length) {
-        throw new Error('No chunks were generated from the uploaded documents.');
-      }
+      const pipelineResults: ExperimentPipelineResult[] = [];
+      let completedAt: string | undefined;
 
-      appendLog(
-        `Generated ${chunkSummary.totalChunks} chunk${chunkSummary.totalChunks === 1 ? '' : 's'} ` +
-          `(avg ${chunkSummary.averageChars} chars). Uploading to Qdrant…`
-      );
+      for (const [index, entry] of pipelineOverview.entries()) {
+        const { pipeline: currentPipeline, id: pipelineId, name: pipelineName } = entry;
+        const chunkConfig = currentPipeline.chunking ?? DEFAULT_PIPELINE.chunking;
+        const retrieverK = currentPipeline.retriever?.topK ?? DEFAULT_PIPELINE.retriever.topK;
+        const isBaselinePipeline = pipelineId === baselinePipelineId;
 
-      const chunkLookup = new Map<string, DocumentChunk>();
-      chunkGroups.forEach((group) => {
-        group.chunks.forEach((chunk) => {
-          chunkLookup.set(chunk.id, chunk);
-        });
-      });
+        setStage('chunking');
+        computePipelineProgress(index, 0);
+        appendLog(
+          `[${pipelineName}] Chunking documents with strategy "${chunkConfig.strategy}".`
+        );
 
-      await upsertChunks({
-        pipelineId,
-        chunks: chunks.map((chunk) => ({
-          id: chunk.id,
-          text: chunk.content,
-          metadata: {
-            documentId: chunk.documentId,
-            documentName: chunk.documentName,
-            documentSource: chunk.documentSource,
-            charCount: chunk.charCount,
-            tokenEstimate: chunk.tokenEstimate,
-            strategy: chunk.strategy,
-            chunkIndex: chunk.index,
-          },
-        })),
-      });
+        const chunkGroups: DocumentChunkGroup[] = chunkDocumentsWithConfig(parsedDocuments, chunkConfig);
+        const chunkSummary = summarizeChunkGroups(chunkGroups);
+        const chunks: DocumentChunk[] = chunkGroups.flatMap((group) => group.chunks);
+        const chunkCount = chunks.length;
 
-      appendLog('Chunks embedded and stored in Qdrant successfully.');
-      setProgress(30);
-
-      setStage('answering');
-      appendLog(`Retrieving answers for ${readyTasks.length} task${readyTasks.length === 1 ? '' : 's'}…`);
-
-      const results: TaskResult[] = [];
-      const answerDetails: AnswerDetail[] = [];
-      const aggregatedSources = new Map<string, RetrievedChunk>();
-      const uniqueChunkIds = new Set<string>();
-      const answerLatencyByTask = new Map<string, number>();
-      let totalAnswerPromptTokens = 0;
-      let totalAnswerCompletionTokens = 0;
-      let totalAnswerTokens = 0;
-      let completed = 0;
-
-      for (const task of readyTasks) {
-        appendLog(`→ Retrieving context for: "${task.question}"`);
-
-        const response = await answerQuestion({
-          pipelineId,
-          question: task.question,
-          topK: retrieverK,
-          model: activePipeline.llm?.model,
-        });
-
-        const matches = response.matches.map((match) => {
-          const chunk = chunkLookup.get(match.id);
-          const text = chunk?.content ?? (typeof match.payload?.text === 'string' ? match.payload.text : '');
-          const documentName =
-            chunk?.documentName ??
-            (typeof match.payload?.documentName === 'string' ? match.payload.documentName : undefined);
-
-          const retrievedChunk: RetrievedChunk = {
-            id: match.id,
-            documentId: chunk?.documentId ?? String(match.payload?.documentId ?? ''),
-            documentName,
-            documentSource: chunk?.documentSource,
-            content: text,
-            charCount: chunk?.charCount ?? text.length,
-            tokenEstimate: chunk?.tokenEstimate ?? Math.max(1, Math.round(text.length / 4)),
-            score: match.score ?? 0,
-          };
-
-          aggregatedSources.set(retrievedChunk.id, retrievedChunk);
-          uniqueChunkIds.add(retrievedChunk.id);
-
-          return {
-            id: retrievedChunk.id,
-            score: retrievedChunk.score,
-            text,
-            documentName,
-          };
-        });
-
-        answerDetails.push({
-          taskId: task.id,
-          question: task.question,
-          expectedAnswer: task.expectedAnswer,
-          acceptanceRule: task.acceptanceRule,
-          response: response.answer,
-          citedChunkIds: matches.map((match) => match.id),
-          latencyMs: response.latencyMs ?? 0,
-          usage: response.usage,
-        });
-
-        results.push({
-          taskId: task.id,
-          question: task.question,
-          expectedAnswer: task.expectedAnswer,
-          answer: response.answer,
-          matches,
-          latencyMs: response.latencyMs ?? 0,
-          usage: response.usage,
-        });
-
-        if (response.usage) {
-          totalAnswerPromptTokens += response.usage.promptTokens ?? 0;
-          totalAnswerCompletionTokens += response.usage.completionTokens ?? 0;
-          totalAnswerTokens += response.usage.totalTokens ?? 0;
+        if (!chunkCount) {
+          throw new Error(`No chunks were generated for pipeline "${pipelineName}".`);
         }
 
-        answerLatencyByTask.set(task.id, response.latencyMs ?? 0);
-        completed += 1;
-        const taskProgress = 30 + Math.round((completed / readyTasks.length) * 50);
-        setProgress(taskProgress);
-        appendLog(`✓ Answer drafted for task "${task.question}"`);
-      }
+        appendLog(
+          `[${pipelineName}] Generated ${chunkSummary.totalChunks} chunk${chunkSummary.totalChunks === 1 ? '' : 's'} (avg ${chunkSummary.averageChars} chars). Uploading to Qdrant…`
+        );
 
-      setTaskResults(results);
-      setStage('judging');
-      appendLog('Scoring answers with judge model for quality and groundedness…');
-      setProgress(85);
+        const chunkLookup = new Map<string, DocumentChunk>();
+        chunkGroups.forEach((group) => {
+          group.chunks.forEach((chunk) => {
+            chunkLookup.set(chunk.id, chunk);
+          });
+        });
 
-      const judgeResponse = await judgeAnswers({
-        pipelineId,
-        model: activePipeline.judge?.model,
-        evaluations: results.map((result) => {
-          const task = taskById.get(result.taskId);
-          return {
-            taskId: result.taskId,
-            question: result.question,
-            answer: result.answer,
-            expectedAnswer: task?.expectedAnswer,
-            acceptanceRule: task?.acceptanceRule,
-            context: result.matches.map((match) => match.text),
-          };
-        }),
-      });
+        await upsertChunks({
+          pipelineId,
+          chunks: chunks.map((chunk) => ({
+            id: chunk.id,
+            text: chunk.content,
+            metadata: {
+              documentId: chunk.documentId,
+              documentName: chunk.documentName,
+              documentSource: chunk.documentSource,
+              charCount: chunk.charCount,
+              tokenEstimate: chunk.tokenEstimate,
+              strategy: chunk.strategy,
+              chunkIndex: chunk.index,
+            },
+          })),
+        });
 
-      appendLog(
-        `Judge verdict: ${(judgeResponse.passRate * 100).toFixed(0)}% pass rate, ` +
-          `groundedness ${(judgeResponse.averageScores.groundedness * 100).toFixed(0)}%.`
-      );
+        appendLog(`[${pipelineName}] Chunks embedded and stored in Qdrant successfully.`);
+        computePipelineProgress(index, 0.25);
 
-      const completedAt = new Date().toISOString();
+        setStage('answering');
+        appendLog(
+          `[${pipelineName}] Retrieving answers for ${readyTasks.length} task${readyTasks.length === 1 ? '' : 's'}…`
+        );
 
-      const totalQuestions = readyTasks.length;
-      const embeddingModel = activePipeline.embedding?.model ?? 'text-embedding-3-small';
-      const vectorDim = getEmbeddingVectorDim(embeddingModel);
-      const totalEmbeddingTokens = chunks.reduce((sum, chunk) => sum + chunk.tokenEstimate, 0);
-      const embeddingCost = estimateEmbeddingCost(embeddingModel, totalEmbeddingTokens);
+        const results: TaskResult[] = [];
+        const answerDetails: AnswerDetail[] = [];
+        const aggregatedSources = new Map<string, RetrievedChunk>();
+        const uniqueChunkIds = new Set<string>();
+        const answerLatencyByTask = new Map<string, number>();
+        let totalAnswerPromptTokens = 0;
+        let totalAnswerCompletionTokens = 0;
+        let totalAnswerTokens = 0;
+        let completed = 0;
 
-      const judgePromptTokens = judgeResponse.details.reduce(
-        (sum, detail) => sum + (detail.usage?.promptTokens ?? 0),
-        0
-      );
-      const judgeCompletionTokens = judgeResponse.details.reduce(
-        (sum, detail) => sum + (detail.usage?.completionTokens ?? 0),
-        0
-      );
-      const judgeTotalTokens = judgeResponse.details.reduce(
-        (sum, detail) => sum + (detail.usage?.totalTokens ?? 0),
-        0
-      );
+        for (const task of readyTasks) {
+          appendLog(`[${pipelineName}] → Retrieving context for: "${task.question}"`);
 
-      const answerLatencyP95Ms = computePercentile(Array.from(answerLatencyByTask.values()), 0.95);
-      const perTaskTotalLatencies = judgeResponse.details.map((detail) => {
-        const answerLatency = answerLatencyByTask.get(detail.taskId) ?? 0;
-        return answerLatency + detail.latencyMs;
-      });
-      const latencyP95Ms = computePercentile(perTaskTotalLatencies, 0.95);
+          const response = await answerQuestion({
+            pipelineId,
+            question: task.question,
+            topK: retrieverK,
+            model: currentPipeline.llm?.model,
+          });
 
-      const answerUsageTotals = {
-        promptTokens: totalAnswerPromptTokens,
-        completionTokens: totalAnswerCompletionTokens,
-      };
-      const judgeUsageTotals = {
-        promptTokens: judgePromptTokens,
-        completionTokens: judgeCompletionTokens,
-      };
+          const matches = (response.matches ?? []).map((match) => {
+            const chunk = chunkLookup.get(match.id);
+            const payload = match.payload ?? {};
+            const payloadText = typeof payload.text === 'string' ? payload.text : '';
+            const payloadDocumentName =
+              typeof payload.documentName === 'string' ? payload.documentName : undefined;
+            const payloadDocumentId = payload.documentId;
+            const text = chunk?.content ?? payloadText;
+            const documentName = chunk?.documentName ?? payloadDocumentName;
 
-      const answerModel = activePipeline.llm?.model ?? 'gpt-4o-mini';
-      const judgeModel = activePipeline.judge?.model ?? answerModel;
+            const retrieved: RetrievedChunk = {
+              id: match.id,
+              documentId:
+                chunk?.documentId ??
+                (typeof payloadDocumentId === 'string'
+                  ? payloadDocumentId
+                  : payloadDocumentId !== undefined && payloadDocumentId !== null
+                  ? String(payloadDocumentId)
+                  : ''),
+              documentName,
+              documentSource: chunk?.documentSource,
+              content: text,
+              charCount: chunk?.charCount ?? text.length,
+              tokenEstimate: chunk?.tokenEstimate ?? Math.max(1, Math.round(text.length / 4)),
+              score: typeof match.score === 'number' ? match.score : 0,
+            };
 
-      const answerCost = estimateChatCost(answerModel, answerUsageTotals);
-      const judgeCost = estimateChatCost(judgeModel, judgeUsageTotals);
+            aggregatedSources.set(retrieved.id, retrieved);
+            uniqueChunkIds.add(retrieved.id);
 
-      const tokensUsed = totalAnswerTokens + judgeTotalTokens;
-      const latencyP95Seconds = latencyP95Ms / 1000;
-      const costPerQuery = totalQuestions
-        ? (embeddingCost + answerCost + judgeCost) / totalQuestions
-        : 0;
+            return {
+              id: retrieved.id,
+              score: retrieved.score,
+              text: retrieved.content,
+              documentName: retrieved.documentName,
+            };
+          });
 
-      const pipelineMetrics: PipelineMetrics = {
-        precisionAt5: Number(judgeResponse.passRate.toFixed(2)),
-        recallAt5: Number(judgeResponse.averageScores.contextPrecision.toFixed(2)),
-        latencyP95: Number(latencyP95Seconds.toFixed(2)),
-        groundedness: Number(judgeResponse.averageScores.groundedness.toFixed(2)),
-        costPerQuery: Number(costPerQuery.toFixed(3)),
-        tokensUsed: Math.round(tokensUsed),
-      };
+          answerDetails.push({
+            taskId: task.id,
+            question: task.question,
+            expectedAnswer: task.expectedAnswer,
+            acceptanceRule: task.acceptanceRule,
+            response: response.answer,
+            citedChunkIds: matches.map((match) => match.id),
+            latencyMs: response.latencyMs ?? 0,
+            usage: response.usage,
+          });
 
-      const judgingSummary: JudgingSummary = {
-        verdict: judgeResponse.verdict,
-        passRate: Number(judgeResponse.passRate.toFixed(2)),
-        averageScores: {
-          relevance: Number(judgeResponse.averageScores.relevance.toFixed(2)),
-          contextPrecision: Number(judgeResponse.averageScores.contextPrecision.toFixed(2)),
+          results.push({
+            taskId: task.id,
+            question: task.question,
+            expectedAnswer: task.expectedAnswer,
+            answer: response.answer,
+            matches,
+            latencyMs: response.latencyMs ?? 0,
+            usage: response.usage,
+          });
+
+          if (response.usage) {
+            totalAnswerPromptTokens += response.usage.promptTokens ?? 0;
+            totalAnswerCompletionTokens += response.usage.completionTokens ?? 0;
+            totalAnswerTokens += response.usage.totalTokens ?? 0;
+          }
+
+          answerLatencyByTask.set(task.id, response.latencyMs ?? 0);
+          completed += 1;
+          updatePipelineProgress(index, 0.25, 0.85, completed / readyTasks.length);
+          appendLog(`[${pipelineName}] ✓ Answer drafted for task "${task.question}"`);
+        }
+
+        setTaskResultsByPipeline((prev) => ({
+          ...prev,
+          [pipelineId]: results,
+        }));
+
+        if (isBaselinePipeline) {
+          setTaskResults(results);
+        }
+
+        setStage('judging');
+        appendLog(
+          `[${pipelineName}] Scoring answers with judge model for quality and groundedness…`
+        );
+        computePipelineProgress(index, 0.9);
+
+        const judgeResponse = await judgeAnswers({
+          pipelineId,
+          model: currentPipeline.judge?.model ?? currentPipeline.llm?.model,
+          evaluations: results.map((result) => {
+            const task = taskById.get(result.taskId);
+            return {
+              taskId: result.taskId,
+              question: result.question,
+              answer: result.answer,
+              expectedAnswer: task?.expectedAnswer,
+              acceptanceRule: task?.acceptanceRule,
+              context: result.matches.map((match) => match.text),
+            };
+          }),
+        });
+
+        appendLog(
+          `[${pipelineName}] Judge verdict: ${(judgeResponse.passRate * 100).toFixed(0)}% pass rate, ` +
+            `groundedness ${(judgeResponse.averageScores.groundedness * 100).toFixed(0)}%.`
+        );
+
+        const normalizedJudgeDetails: JudgingSummary['details'] = judgeResponse.details.map(
+          (detail) => ({
+            taskId: detail.taskId,
+            verdict: detail.verdict,
+            scores: {
+              relevance: Number(detail.scores.relevance.toFixed(2)),
+              contextPrecision: Number(detail.scores.contextPrecision.toFixed(2)),
+              groundedness: Number(detail.scores.groundedness.toFixed(2)),
+            },
+            rationale: detail.rationale,
+            missingCriteria: detail.missingCriteria ?? [],
+            latencyMs: detail.latencyMs,
+            usage: detail.usage,
+          })
+        );
+
+        const totalQuestions = readyTasks.length;
+        const embeddingModel = currentPipeline.embedding?.model ?? 'text-embedding-3-small';
+        const vectorDim = getEmbeddingVectorDim(embeddingModel);
+        const totalEmbeddingTokens = chunks.reduce((sum, chunk) => sum + chunk.tokenEstimate, 0);
+        const embeddingCost = estimateEmbeddingCost(embeddingModel, totalEmbeddingTokens);
+
+        const judgePromptTokens = judgeResponse.details.reduce(
+          (sum, detail) => sum + (detail.usage?.promptTokens ?? 0),
+          0
+        );
+        const judgeCompletionTokens = judgeResponse.details.reduce(
+          (sum, detail) => sum + (detail.usage?.completionTokens ?? 0),
+          0
+        );
+        const judgeTotalTokens = judgeResponse.details.reduce(
+          (sum, detail) => sum + (detail.usage?.totalTokens ?? 0),
+          0
+        );
+
+        const answerLatencyP95Ms = computePercentile(Array.from(answerLatencyByTask.values()), 0.95);
+        const perTaskTotalLatencies = judgeResponse.details.map((detail) => {
+          const answerLatency = answerLatencyByTask.get(detail.taskId) ?? 0;
+          return answerLatency + detail.latencyMs;
+        });
+        const latencyP95Ms = computePercentile(perTaskTotalLatencies, 0.95);
+
+        const answerUsageTotals = {
+          promptTokens: totalAnswerPromptTokens,
+          completionTokens: totalAnswerCompletionTokens,
+        };
+        const judgeUsageTotals = {
+          promptTokens: judgePromptTokens,
+          completionTokens: judgeCompletionTokens,
+        };
+
+        const answerModel = currentPipeline.llm?.model ?? 'gpt-4o-mini';
+        const judgeModel = currentPipeline.judge?.model ?? answerModel;
+
+        const answerCost = estimateChatCost(answerModel, answerUsageTotals);
+        const judgeCost = estimateChatCost(judgeModel, judgeUsageTotals);
+
+        const tokensUsed = totalAnswerTokens + judgeTotalTokens;
+        const latencyP95Seconds = latencyP95Ms / 1000;
+        const costPerQuery = totalQuestions
+          ? (embeddingCost + answerCost + judgeCost) / totalQuestions
+          : 0;
+
+        const pipelineMetrics: PipelineMetrics = {
+          precisionAt5: Number(judgeResponse.passRate.toFixed(2)),
+          recallAt5: Number(judgeResponse.averageScores.contextPrecision.toFixed(2)),
+          latencyP95: Number(latencyP95Seconds.toFixed(2)),
           groundedness: Number(judgeResponse.averageScores.groundedness.toFixed(2)),
-        },
-        tokensUsed: Math.round(judgeTotalTokens),
-        latencyMs: judgeResponse.latencyMs,
-        costUsd: Number(judgeCost.toFixed(3)),
-        details: judgeResponse.details.map((detail) => ({
-          taskId: detail.taskId,
-          verdict: detail.verdict,
-          scores: {
-            relevance: Number(detail.scores.relevance.toFixed(2)),
-            contextPrecision: Number(detail.scores.contextPrecision.toFixed(2)),
-            groundedness: Number(detail.scores.groundedness.toFixed(2)),
+          costPerQuery: Number(costPerQuery.toFixed(3)),
+          tokensUsed: Math.round(tokensUsed),
+        };
+
+        const judgingSummary: JudgingSummary = {
+          verdict: judgeResponse.verdict,
+          passRate: Number(judgeResponse.passRate.toFixed(2)),
+          averageScores: {
+            relevance: Number(judgeResponse.averageScores.relevance.toFixed(2)),
+            contextPrecision: Number(judgeResponse.averageScores.contextPrecision.toFixed(2)),
+            groundedness: Number(judgeResponse.averageScores.groundedness.toFixed(2)),
           },
-          rationale: detail.rationale,
-          missingCriteria: detail.missingCriteria,
-          latencyMs: detail.latencyMs,
-          usage: detail.usage,
-        })),
-      };
+          tokensUsed: Math.round(judgeTotalTokens),
+          latencyMs: judgeResponse.latencyMs,
+          costUsd: Number(judgeCost.toFixed(3)),
+          details: normalizedJudgeDetails,
+        };
 
-      const baselinePipelineId = pipelines.find((pipeline) => pipeline.isBaseline)?.id ?? pipelineId;
+        const pipelineResult: ExperimentPipelineResult = {
+          pipelineId,
+          pipelineName,
+          pipelineSnapshot: currentPipeline,
+          metrics: pipelineMetrics,
+          chunkingSummary: chunkSummary,
+          embeddingSummary: {
+            model: embeddingModel,
+            vectorDim,
+            totalChunks: chunkSummary.totalChunks,
+            totalTokens: totalEmbeddingTokens,
+            estimatedCostUsd: Number(embeddingCost.toFixed(4)),
+          },
+          retrievalSummary: {
+            topK: retrieverK,
+            deduplicate: currentPipeline.retriever?.deduplicate ?? true,
+            candidatePool: chunkCount,
+            uniqueResults: uniqueChunkIds.size,
+          },
+          answeringSummary: {
+            answer: results
+              .map((result, answerIndex) => `Q${answerIndex + 1}: ${result.answer}`)
+              .join('\n\n'),
+            sources: Array.from(aggregatedSources.values()),
+            tokensUsed: Math.round(totalAnswerTokens),
+            latencyMs: Math.round(answerLatencyP95Ms),
+            costUsd: Number(answerCost.toFixed(3)),
+            details: answerDetails,
+          },
+          judgingSummary,
+        };
 
-      const pipelineResult: ExperimentPipelineResult = {
-        pipelineId,
-        pipelineName: activePipeline.name,
-        pipelineSnapshot: activePipeline,
-        metrics: pipelineMetrics,
-        chunkingSummary: chunkSummary,
-        embeddingSummary: {
-          model: activePipeline.embedding?.model ?? 'text-embedding-3-small',
-          vectorDim,
-          totalChunks: chunkSummary.totalChunks,
-          totalTokens: totalEmbeddingTokens,
-          estimatedCostUsd: Number(embeddingCost.toFixed(4)),
-        },
-        retrievalSummary: {
-          topK: retrieverK,
-          deduplicate: activePipeline.retriever?.deduplicate ?? true,
-          candidatePool: chunkCount,
-          uniqueResults: uniqueChunkIds.size,
-        },
-        answeringSummary: {
-          answer: results
-            .map((result, index) => `Q${index + 1}: ${result.answer}`)
-            .join('\n\n'),
-          sources: Array.from(aggregatedSources.values()),
-          tokensUsed: Math.round(totalAnswerTokens),
-          latencyMs: Math.round(answerLatencyP95Ms),
-          costUsd: Number(answerCost.toFixed(3)),
-          details: answerDetails,
-        },
-        judgingSummary,
-      };
+        pipelineResults.push(pipelineResult);
+        completedAt = new Date().toISOString();
+
+        appendLog(
+          `[${pipelineName}] Evaluation complete. Pass rate ${(judgeResponse.passRate * 100).toFixed(0)}%.`
+        );
+        computePipelineProgress(index, 1);
+      }
 
       setStage('complete');
       setProgress(100);
       appendLog('Experiment complete. Review the answers below.');
 
-      const bestByMetric = METRIC_DEFINITIONS.reduce<ExperimentRun['bestByMetric']>((acc, metric) => {
-        acc[metric.key] = pipelineId;
-        return acc;
-      }, {});
+      const bestByMetric =
+        pipelineResults.length > 0
+          ? METRIC_DEFINITIONS.reduce<ExperimentRun['bestByMetric']>((acc, metric) => {
+              let bestResult = pipelineResults[0];
+              for (let i = 1; i < pipelineResults.length; i += 1) {
+                const candidate = pipelineResults[i];
+                if (metric.better === 'higher') {
+                  if (candidate.metrics[metric.key] > bestResult.metrics[metric.key]) {
+                    bestResult = candidate;
+                  }
+                } else if (candidate.metrics[metric.key] < bestResult.metrics[metric.key]) {
+                  bestResult = candidate;
+                }
+              }
+              acc[metric.key] = bestResult.pipelineId;
+              return acc;
+            }, {})
+          : {};
+
+      const baselinePipelineIdForRun =
+        pipelineResults.find((result) => result.pipelineId === baselinePipelineId)?.pipelineId ??
+        pipelineResults[0]?.pipelineId;
 
       const runSummary: ExperimentRun = {
         id: `run-${Date.now()}`,
@@ -504,9 +792,9 @@ export function ExperimentsPage({ darkMode, onNext }: ExperimentsPageProps) {
         startedAt,
         completedAt,
         statusLog: [...localLog],
-        pipelines: [pipelineResult],
+        pipelines: pipelineResults,
         bestByMetric,
-        baselinePipelineId,
+        baselinePipelineId: baselinePipelineIdForRun,
         tasksUsed: readyTasks,
       };
 
@@ -588,11 +876,39 @@ export function ExperimentsPage({ darkMode, onNext }: ExperimentsPageProps) {
         </Card>
 
         <Card className={darkMode ? 'bg-zinc-800 border-zinc-700' : ''}>
-          <CardHeader>
-            <CardTitle>Question &amp; Answer Review</CardTitle>
+          <CardHeader className="space-y-3">
+            <div className="flex items-start justify-between gap-3">
+              <CardTitle>Question &amp; Answer Review</CardTitle>
+              {pipelineOptions.length > 1 ? (
+                <div className="flex items-center gap-2 text-sm">
+                  <span className="opacity-70">Pipeline</span>
+                  <Select
+                    value={activePipelineId}
+                    onValueChange={(value) => {
+                      setSelectedPipelineId(value);
+                    }}
+                  >
+                    <SelectTrigger
+                      className={`${darkMode ? 'bg-zinc-900 border-zinc-700' : ''} w-48`}
+                    >
+                      <SelectValue placeholder="Choose pipeline">
+                        {pipelineNameLookup[activePipelineId] ?? 'Choose pipeline'}
+                      </SelectValue>
+                    </SelectTrigger>
+                    <SelectContent className={darkMode ? 'bg-zinc-900 border-zinc-700' : ''}>
+                      {pipelineOptions.map((option) => (
+                        <SelectItem key={option.id} value={option.id}>
+                          {option.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              ) : null}
+            </div>
           </CardHeader>
           <CardContent>
-            {taskResults.length === 0 ? (
+            {displayedTaskResults.length === 0 ? (
               <p className={darkMode ? 'text-zinc-400' : 'text-zinc-600'}>
                 Run an experiment to generate answers for your evaluation tasks.
               </p>
@@ -607,7 +923,7 @@ export function ExperimentsPage({ darkMode, onNext }: ExperimentsPageProps) {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {taskResults.map((result) => (
+                  {displayedTaskResults.map((result) => (
                     <TableRow key={result.taskId}>
                       <TableCell className="align-top w-[25%]">
                         <div className="space-y-1">
@@ -653,11 +969,8 @@ export function ExperimentsPage({ darkMode, onNext }: ExperimentsPageProps) {
         </Card>
 
         {stage === 'complete' && (
-          <div className="flex justify-end gap-3">
-            <Button variant="outline" onClick={onNext}>
-              View Report
-            </Button>
-            <Button onClick={onNext}>Continue</Button>
+          <div className="flex justify-end">
+            <Button onClick={onNext}>View Report</Button>
           </div>
         )}
       </div>

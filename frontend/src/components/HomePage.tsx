@@ -47,8 +47,8 @@ export function HomePage({ darkMode, onNavigate }: HomePageProps) {
   const features = [
     {
       icon: Sparkles,
-      title: 'Auto-Compare',
-      description: 'Automatically test all pipeline combinations to find optimal configurations',
+      title: 'Compare',
+      description: 'Quickly evaluate pipeline configurations side-by-side to find optimal setups',
       color: 'from-blue-500 to-cyan-500',
     },
     {
@@ -75,7 +75,7 @@ export function HomePage({ darkMode, onNavigate }: HomePageProps) {
     { label: 'Pipeline Stages', value: '6+', description: 'Configurable components' },
     { label: 'Metrics Tracked', value: '10+', description: 'Comprehensive evaluation' },
     { label: 'Model Options', value: '15+', description: 'LLMs & embeddings' },
-    { label: 'Auto-Compare', value: '100+', description: 'Test combinations' },
+    { label: 'Compare', value: '100+', description: 'Pipeline variants tested' },
   ];
 
   return (
