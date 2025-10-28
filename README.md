@@ -28,7 +28,7 @@ cd ../backend
 npm install
 ```
 
-> **Security reminder:** The committed `.env` file currently contains live-looking API keys. Rotate them immediately and replace the contents with safe placeholders. Prefer storing real secrets outside of version control (e.g., `.env.local`, your shell profile, or a secrets manager).
+> **Security reminder:** The committed `.env` file contains safe placeholders only. Put real secrets in `.env.local` (gitignored) or inject them via your shell/secret manager to keep production credentials out of version control.
 
 ## Environment Variables
 Both apps read environment variables from the repository root. The backend hydrates via `dotenv` and the frontend points Vite to the same directory (`envDir`). Create a safe `.env` (or `.env.local` to override locally) with the following keys:
@@ -44,7 +44,7 @@ Both apps read environment variables from the repository root. The backend hydra
 | `LLAMA_CLOUD_API_KEY` | ✅ | API key for LlamaParse document parsing | – |
 | `LLAMA_CLOUD_BASE_URL` | ⬜️ | Override LlamaParse API host | `https://api.llamaindex.ai` |
 | `PORT` | ⬜️ | Backend HTTP port | `7070` |
-| `CORS_ORIGINS` | ⬜️ | Comma-separated list of allowed browser origins | (accept all) |
+| `CORS_ORIGINS` | ⬜️ | Comma-separated list of allowed browser origins | `http://localhost:5173` |
 
 Frontend-only environment overrides still need the `VITE_` prefix; set them in the root `.env` as well (or `.env.local`) and they will be surfaced to the Vite dev server.
 

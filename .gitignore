@@ -1,4 +1,5 @@
 /.env
+/.env.local
 
 # Node dependencies
 node_modules/

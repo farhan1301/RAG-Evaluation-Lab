@@ -42,8 +42,12 @@ const parseAllowedOrigins = (value: string | undefined) =>
     .map((origin) => origin.trim())
     .filter(Boolean) ?? [];
 
-const allowedOrigins = parseAllowedOrigins(process.env.CORS_ORIGINS);
-const allowAnyOrigin = allowedOrigins.length === 0;
+const parsedOrigins = parseAllowedOrigins(process.env.CORS_ORIGINS);
+const allowAnyOrigin = parsedOrigins.includes('*');
+const allowedOrigins =
+  allowAnyOrigin || parsedOrigins.length > 0
+    ? parsedOrigins.filter((origin) => origin !== '*')
+    : ['http://localhost:5173'];
 
 app.use((req, res, next) => {
   const origin = req.headers.origin;
@@ -57,6 +61,12 @@ app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Credentials', 'true');
   } else if (origin) {
     res.setHeader('Vary', 'Origin');
+    if (req.method === 'OPTIONS') {
+      res.status(403).end();
+    } else {
+      res.status(403).json({ error: 'Origin not allowed.' });
+    }
+    return;
   }
 
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
