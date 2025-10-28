@@ -24,6 +24,18 @@ interface PipelineStageProps {
   darkMode: boolean;
 }
 
+const MODEL_OPTIONS = [
+  { value: 'gpt-5-chat-latest', label: 'GPT-5 Chat (Latest)' },
+  { value: 'gpt-5-mini', label: 'GPT-5 Mini' },
+  { value: 'gpt-5-nano', label: 'GPT-5 Nano' },
+  { value: 'gpt-4.1', label: 'GPT-4.1' },
+  { value: 'gpt-4.1-mini', label: 'GPT-4.1 Mini' },
+  { value: 'gpt-4.1-nano', label: 'GPT-4.1 Nano' },
+  { value: 'gpt-4o', label: 'GPT-4o (Balanced, $$)' },
+  { value: 'gpt-4o-mini', label: 'GPT-4o Mini (Fast, $)' },
+  { value: 'gpt-4-turbo', label: 'GPT-4 Turbo (Advanced, $$$)' },
+];
+
 function PipelineStage({ title, description, isExpanded, onToggle, children, darkMode }: PipelineStageProps) {
   return (
     <div
@@ -440,19 +452,21 @@ export function PipelinesPage({ darkMode, onNext }: PipelinesPageProps) {
                         onValueChange={(value) =>
                           handleUpdatePipeline(pipeline.id, { llm: { ...pipeline.llm, model: value } })
                         }
-                      >
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="gpt-4o-mini">GPT-4o Mini (Fast, $)</SelectItem>
-                          <SelectItem value="gpt-4o">GPT-4o (Balanced, $$)</SelectItem>
-                          <SelectItem value="gpt-4-turbo">GPT-4 Turbo (Advanced, $$$)</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <div>
-                      <label className="text-sm opacity-60 block mb-2">
+                    >
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {MODEL_OPTIONS.map((option) => (
+                          <SelectItem key={option.value} value={option.value}>
+                            {option.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div>
+                    <label className="text-sm opacity-60 block mb-2">
                         Temperature: {pipeline.llm.temperature}
                       </label>
                       <Slider
@@ -500,7 +514,11 @@ export function PipelinesPage({ darkMode, onNext }: PipelinesPageProps) {
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="gpt-4o">GPT-4o (Recommended)</SelectItem>
+                          {MODEL_OPTIONS.map((option) => (
+                            <SelectItem key={option.value} value={option.value}>
+                              {option.label}
+                            </SelectItem>
+                          ))}
                         </SelectContent>
                       </Select>
                     </div>

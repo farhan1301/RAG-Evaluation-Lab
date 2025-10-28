@@ -13,6 +13,7 @@ End-to-end workspace for building and evaluating retrieval-augmented generation 
 - npm 9 or newer
 - Qdrant cluster + API key (or local instance)
 - OpenAI API key with access to the specified models
+- LlamaParse (Llama Cloud) account and API key for document ingestion
 
 ## Initial Setup
 Install dependencies for each app:
@@ -40,7 +41,7 @@ Both apps read environment variables from the repository root. The backend hydra
 | `QDRANT_URL` | ✅ | Base URL for your Qdrant cluster | – |
 | `QDRANT_API_KEY` | ⬜️ | API key if Qdrant requires auth | – |
 | `QDRANT_COLLECTION` | ⬜️ | Default collection name for vectors | `rag-eval-chunks` |
-| `LLAMA_CLOUD_API_KEY` | ⬜️ | API key for LlamaParse document parsing | – |
+| `LLAMA_CLOUD_API_KEY` | ✅ | API key for LlamaParse document parsing | – |
 | `LLAMA_CLOUD_BASE_URL` | ⬜️ | Override LlamaParse API host | `https://api.llamaindex.ai` |
 | `PORT` | ⬜️ | Backend HTTP port | `7070` |
 | `CORS_ORIGINS` | ⬜️ | Comma-separated list of allowed browser origins | (accept all) |

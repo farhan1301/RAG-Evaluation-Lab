@@ -284,7 +284,7 @@ export function DocumentationPage({ darkMode }: DocumentationPageProps) {
                       </li>
                       <li className="flex items-center gap-2">
                         <CheckCircle2 size={14} className="text-green-500" />
-                        LLM generators (GPT-4o, GPT-4o-mini, GPT-4-turbo)
+                        LLM generators (GPT-5 Chat, GPT-5 Mini, GPT-4.1 family, GPT-4o series)
                       </li>
                       <li className="flex items-center gap-2">
                         <CheckCircle2 size={14} className="text-green-500" />
@@ -309,7 +309,7 @@ response = openai.embeddings.create(
 
 # Use GPT for generation
 response = openai.chat.completions.create(
-    model="gpt-4o",
+    model="gpt-5-chat-latest",
     messages=[{"role": "user", "content": "Hello!"}]
 )`}
                     />
@@ -589,9 +589,10 @@ response = co.rerank(
                       stage: 'Generation Model',
                       description: 'Produces answers based on retrieved context',
                       options: [
-                        'GPT-4o: Best-in-class reasoning and grounding',
-                        'GPT-4o-mini: Cost-effective alternative',
-                        'Claude 3 Haiku: Fast and reliable',
+                        'GPT-5 Chat Latest: Flagship reasoning and grounding',
+                        'GPT-5 Mini: Balanced cost-to-quality',
+                        'GPT-4.1 Mini: Efficient for bulk experimentation',
+                        'GPT-4o Mini: Proven cost-effective baseline',
                       ],
                       params: 'Temperature (0-1), Max tokens (100-1000)',
                     },
@@ -602,7 +603,7 @@ response = co.rerank(
                         'Exact Match',
                         'Semantic Similarity',
                         'Context Recall',
-                        'LLM Judge (GPT-4o)',
+                        'LLM Judge (GPT-5 Chat Latest)',
                       ],
                       params: 'Weights for composite scoring',
                     },
@@ -680,7 +681,7 @@ response = co.rerank(
                   <Sparkles className="h-4 w-4" />
                   <AlertTitle>Tip</AlertTitle>
                   <AlertDescription>
-                    Enable automatic prompt optimization to have GPT-4o suggest improvements after each run based on the latest results.
+                    Enable automatic prompt optimization to have GPT-5 Chat suggest improvements after each run based on the latest results.
                   </AlertDescription>
                 </Alert>
               </CardContent>
@@ -718,7 +719,7 @@ response = co.rerank(
                       {
                         title: 'AI Recommendations',
                         description:
-                          'GPT-4o analyzes your results and provides actionable suggestions for improvement, including specific parameter adjustments.',
+                          'GPT-5 Chat analyzes your results and provides actionable suggestions for improvement, including specific parameter adjustments.',
                       },
                       {
                         title: 'Export Options',
@@ -774,4 +775,3 @@ response = co.rerank(
     </div>
   );
 }
-

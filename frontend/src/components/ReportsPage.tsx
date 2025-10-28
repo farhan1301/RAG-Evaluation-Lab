@@ -4,21 +4,6 @@ import { Button } from './ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
 import { Badge } from './ui/badge';
 import {
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  Legend,
-  ResponsiveContainer,
-  RadarChart,
-  PolarGrid,
-  PolarAngleAxis,
-  PolarRadiusAxis,
-  Radar,
-} from 'recharts';
-import {
   Table,
   TableBody,
   TableCell,
@@ -27,7 +12,13 @@ import {
   TableRow,
 } from './ui/table';
 import { useExperimentResults } from '../state/experimentResults';
-import { METRIC_DEFINITIONS, type MetricKey } from '../types/experiment';
+import { cn } from './ui/utils';
+import {
+  METRIC_DEFINITIONS,
+  type MetricKey,
+  type PipelineMetrics,
+  type ExperimentPipelineResult,
+} from '../types/experiment';
 
 interface ReportsPageProps {
   darkMode: boolean;
@@ -49,7 +40,6 @@ const METRIC_LOOKUP = METRIC_DEFINITIONS.reduce(
   {} as Record<MetricKey, (typeof METRIC_DEFINITIONS)[number]>
 );
 
-const LOWER_IS_BETTER: MetricKey[] = ['latencyP95', 'costPerQuery', 'tokensUsed'];
 
 const formatMetricValue = (key: MetricKey, value: number) =>
   METRIC_LOOKUP[key]?.format ? METRIC_LOOKUP[key].format(value) : value.toString();
@@ -59,15 +49,73 @@ const capitalize = (text: string) => text.charAt(0).toUpperCase() + text.slice(1
 const boolLabel = (value: boolean) => (value ? 'Enabled' : 'Disabled');
 const dedupeLabel = (value: boolean) => (value ? 'On' : 'Off');
 
-const computeDiff = (value: number, baseline: number, metric: MetricKey) => {
-  if (!baseline) {
-    return null;
+const roundValue = (value: number | undefined, decimals: number) => {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return 0;
   }
-  const diff = ((value - baseline) / baseline) * 100;
-  const lowerIsBetter = LOWER_IS_BETTER.includes(metric);
-  const isPositive = lowerIsBetter ? diff < 0 : diff > 0;
-  return { diff: Math.abs(diff), isPositive };
+  const factor = 10 ** decimals;
+  return Math.round(value * factor) / factor;
 };
+
+const VALUE_EPSILON = 1e-6;
+
+const deriveMetricValue = (pipeline: ExperimentPipelineResult, key: MetricKey): number => {
+  const baseValue = pipeline.metrics?.[key];
+  if (typeof baseValue === 'number' && Number.isFinite(baseValue)) {
+    return baseValue;
+  }
+
+  switch (key) {
+    case 'precisionAt5':
+      return roundValue(pipeline.judgingSummary?.passRate, 2);
+    case 'recallAt5':
+      return roundValue(pipeline.judgingSummary?.averageScores.contextPrecision, 2);
+    case 'groundedness':
+      return roundValue(pipeline.judgingSummary?.averageScores.groundedness, 2);
+    case 'latencyP95': {
+      const answerLatencyMs = pipeline.answeringSummary?.latencyMs;
+      if (typeof answerLatencyMs === 'number' && Number.isFinite(answerLatencyMs)) {
+        return roundValue(answerLatencyMs / 1000, 2);
+      }
+      const averageJudgeLatencyMs =
+        typeof pipeline.judgingSummary?.latencyMs === 'number' &&
+        pipeline.judgingSummary?.details.length
+          ? pipeline.judgingSummary.latencyMs / pipeline.judgingSummary.details.length
+          : 0;
+      return roundValue(averageJudgeLatencyMs / 1000, 2);
+    }
+    case 'costPerQuery': {
+      const questionCount =
+        pipeline.judgingSummary?.details.length ??
+        pipeline.answeringSummary?.details.length ??
+        0;
+      if (!questionCount) {
+        return 0;
+      }
+      const embeddingCost = pipeline.embeddingSummary?.estimatedCostUsd ?? 0;
+      const answerCost = pipeline.answeringSummary?.costUsd ?? 0;
+      const judgeCost = pipeline.judgingSummary?.costUsd ?? 0;
+      return roundValue((embeddingCost + answerCost + judgeCost) / questionCount, 3);
+    }
+    case 'tokensUsed': {
+      const answerTokens = pipeline.answeringSummary?.tokensUsed ?? 0;
+      const judgeTokens = pipeline.judgingSummary?.tokensUsed ?? 0;
+      const totalTokens = answerTokens + judgeTokens;
+      return Number.isFinite(totalTokens) ? Math.round(totalTokens) : 0;
+    }
+    default:
+      return 0;
+  }
+};
+
+const buildPipelineMetrics = (pipeline: ExperimentPipelineResult): PipelineMetrics =>
+  (['precisionAt5', 'recallAt5', 'latencyP95', 'groundedness', 'costPerQuery', 'tokensUsed'] as MetricKey[]).reduce(
+    (acc, key) => {
+      acc[key] = deriveMetricValue(pipeline, key);
+      return acc;
+    },
+    {} as PipelineMetrics,
+  );
 
 export function ReportsPage({ darkMode }: ReportsPageProps) {
   const { latestRun } = useExperimentResults();
@@ -155,7 +203,7 @@ export function ReportsPage({ darkMode }: ReportsPageProps) {
 
       acc[id] = {
         name: pipeline.pipelineName,
-        metrics: pipeline.metrics,
+        metrics: buildPipelineMetrics(pipeline),
       };
 
       return acc;
@@ -164,17 +212,20 @@ export function ReportsPage({ darkMode }: ReportsPageProps) {
       string,
       {
         name: string;
-        metrics: (typeof recommendedPipeline)['metrics'];
+        metrics: PipelineMetrics;
       }
     >
   );
 
   const baselineMetrics = baselineId ? pipelineMetrics[baselineId]?.metrics : undefined;
+  const recommendedMetrics = recommendedPipeline
+    ? pipelineMetrics[recommendedPipeline.pipelineId]?.metrics
+    : undefined;
 
   const highlightMetrics =
-    recommendedPipeline && baselineMetrics
+    recommendedMetrics && baselineMetrics
       ? METRIC_DEFINITIONS.filter((definition) => {
-          const recommendedValue = recommendedPipeline.metrics[definition.key];
+          const recommendedValue = recommendedMetrics[definition.key];
           const baselineValue = baselineMetrics[definition.key];
           if (recommendedValue === undefined || baselineValue === undefined) {
             return false;
@@ -194,95 +245,46 @@ export function ReportsPage({ darkMode }: ReportsPageProps) {
         }.`
       : 'It maintains parity with your baseline configuration while ensuring consistent quality.';
 
-  const barMetrics: MetricKey[] = ['precisionAt5', 'recallAt5', 'groundedness'];
-  const barChartData = barMetrics.map((key) => {
-    const row: Record<string, number | string> = {
-      name: METRIC_LOOKUP[key]?.label ?? key,
+  const COMPARISON_METRICS: MetricKey[] = [
+    'precisionAt5',
+    'recallAt5',
+    'groundedness',
+    'latencyP95',
+    'costPerQuery',
+    'tokensUsed',
+  ];
+
+  const pipelineComparisonRows = pipelineEntries.map(({ id, pipeline, color }) => {
+    const metrics = pipelineMetrics[id]?.metrics;
+    return {
+      id,
+      name: pipeline?.pipelineName ?? `Pipeline ${id}`,
+      color,
+      metrics,
+      isBaseline: id === baselineId,
+      isRecommended: id === recommendedId,
     };
-
-    pipelineEntries.forEach(({ id, pipeline }) => {
-      row[id] = pipeline?.metrics[key] ?? 0;
-    });
-
-    return row;
   });
 
-  const costLatencyData = [
-    {
-      name: 'Latency (s)',
-      ...pipelineEntries.reduce(
-        (acc, { id, pipeline }) => ({
-          ...acc,
-          [id]: pipeline?.metrics.latencyP95 ?? 0,
-        }),
-        {},
-      ),
-    },
-    {
-      name: 'Cost (USD)',
-      ...pipelineEntries.reduce(
-        (acc, { id, pipeline }) => ({
-          ...acc,
-          [id]: pipeline?.metrics.costPerQuery ?? 0,
-        }),
-        {},
-      ),
-    },
-  ];
+  const metricExtremes = COMPARISON_METRICS.reduce(
+    (acc, metric) => {
+      const values = pipelineComparisonRows
+        .map((row) => row.metrics?.[metric])
+        .filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
 
-  const radarMetrics: Array<{ key: MetricKey; label: string; lowerIsBetter?: boolean }> = [
-    { key: 'precisionAt5', label: 'Pass Rate' },
-    { key: 'recallAt5', label: 'Context Precision' },
-    { key: 'groundedness', label: 'Groundedness' },
-    { key: 'latencyP95', label: 'Speed', lowerIsBetter: true },
-    { key: 'costPerQuery', label: 'Cost Efficiency', lowerIsBetter: true },
-  ];
-
-  const radarData = radarMetrics.map(({ key, label, lowerIsBetter }) => {
-    const values = pipelineEntries.map(({ pipeline }) => pipeline?.metrics[key] ?? 0);
-    const filteredValues = values.filter((value) => value > 0);
-    const bestValue =
-      filteredValues.length === 0
-        ? 0
-        : lowerIsBetter
-        ? Math.min(...filteredValues)
-        : Math.max(...filteredValues);
-
-    const row: Record<string, number | string> = { metric: label };
-    pipelineEntries.forEach(({ id, pipeline }) => {
-      const value = pipeline?.metrics[key] ?? 0;
-      let normalized = 0;
-
-      if (lowerIsBetter) {
-        normalized = value > 0 && bestValue > 0 ? (bestValue / value) * 100 : 0;
-      } else {
-        normalized = bestValue > 0 ? (value / bestValue) * 100 : 0;
+      if (!values.length) {
+        return acc;
       }
 
-      row[id] = Math.round(Math.min(normalized, 100));
-    });
-    return row;
-  });
+      const betterDirection = METRIC_LOOKUP[metric]?.better ?? 'higher';
+      const best = betterDirection === 'higher' ? Math.max(...values) : Math.min(...values);
+      const worst = betterDirection === 'higher' ? Math.min(...values) : Math.max(...values);
 
-  const passRateValues = pipelineEntries.map(({ pipeline }) => pipeline?.metrics.precisionAt5 ?? 0);
-  const contextPrecisionValues = pipelineEntries.map(({ pipeline }) => pipeline?.metrics.recallAt5 ?? 0);
-  const groundedValues = pipelineEntries.map(
-    ({ pipeline }) => pipeline?.metrics.groundedness ?? 0
+      acc[metric] = { best, worst };
+      return acc;
+    },
+    {} as Record<MetricKey, { best: number; worst: number }>
   );
-  const latencyValues = pipelineEntries
-    .map(({ pipeline }) => pipeline?.metrics.latencyP95 ?? Infinity)
-    .filter((value) => Number.isFinite(value));
-  const costValues = pipelineEntries
-    .map(({ pipeline }) => pipeline?.metrics.costPerQuery ?? Infinity)
-    .filter((value) => Number.isFinite(value));
-
-  const bestPassRate = passRateValues.length ? Math.max(...passRateValues) : 0;
-  const bestContextPrecision = contextPrecisionValues.length
-    ? Math.max(...contextPrecisionValues)
-    : 0;
-  const bestGroundedness = groundedValues.length ? Math.max(...groundedValues) : 0;
-  const bestLatency = latencyValues.length ? Math.min(...latencyValues) : 0;
-  const bestCost = costValues.length ? Math.min(...costValues) : 0;
 
   return (
     <div className={`p-8 ${darkMode ? 'bg-zinc-900' : 'bg-zinc-50'}`}>
@@ -388,436 +390,195 @@ export function ReportsPage({ darkMode }: ReportsPageProps) {
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <div className="space-y-4">
-              {pipelineEntries.map(({ id, pipeline }) => {
-                if (!pipeline) {
-                  return null;
-                }
-
-                const isBaseline = id === baselineId;
-                const entry = pipelineMetrics[id];
-                const baselineEntry = baselineId ? pipelineMetrics[baselineId] : undefined;
-
-                const metrics = entry?.metrics;
-                const baselineMetricValues = baselineEntry?.metrics;
-
-                return (
-                  <div
-                    key={id}
-                    className={`p-4 rounded-lg border ${
-                      darkMode ? 'border-zinc-700 bg-zinc-900/50' : 'border-zinc-200 bg-white'
-                    }`}
-                  >
-                    <div className="flex items-start justify-between mb-3">
-                      <div>
-                        <h4 className={darkMode ? 'text-zinc-100' : 'text-zinc-900'}>
-                          {pipeline.pipelineName}
-                        </h4>
-                        <p className={`text-sm ${darkMode ? 'text-zinc-400' : 'text-zinc-600'}`}>
-                          {pipeline.pipelineSnapshot.description ?? 'No description provided.'}
-                        </p>
+            {pipelineComparisonRows.length > 0 ? (
+              <div className="overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Pipeline</TableHead>
+                      {COMPARISON_METRICS.map((metric) => (
+                        <TableHead key={metric} className="text-right">
+                          {METRIC_LOOKUP[metric]?.label ?? capitalize(metric)}
+                        </TableHead>
+                      ))}
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {pipelineComparisonRows.map((row) => (
+                      <TableRow key={row.id}>
+                        <TableCell className="font-medium">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: row.color }} />
+                            <span>{row.name}</span>
+                            {row.isBaseline && <Badge variant="outline">Baseline</Badge>}
+                            {row.isRecommended && !row.isBaseline && (
+                              <Badge variant="outline">Recommended</Badge>
+                            )}
                       </div>
-                      {isBaseline && <Badge variant="outline">Baseline</Badge>}
-                    </div>
+                    </TableCell>
+                    {COMPARISON_METRICS.map((metric) => (
+                      <TableCell key={metric} className="text-right">
+                        {row.metrics && typeof row.metrics[metric] === 'number' ? (
+                          <div className="flex flex-col items-end gap-1">
+                            {(() => {
+                              const value = row.metrics?.[metric];
+                              if (typeof value !== 'number') {
+                                return null;
+                              }
+                              const extremes = metricExtremes[metric];
+                              const baselineValue = baselineMetrics?.[metric];
+                              const betterDirection = METRIC_LOOKUP[metric]?.better ?? 'higher';
 
-                    <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-                      <div>
-                        <p className={`text-xs mb-1 ${darkMode ? 'text-zinc-400' : 'text-zinc-600'}`}>
-                          Pass Rate
-                        </p>
-                        <div className="flex items-center gap-2">
-                          <span
-                            className={
-                              metrics?.precisionAt5 === bestPassRate
-                                ? darkMode
-                                  ? 'text-green-400'
-                                  : 'text-green-600'
-                                : darkMode
-                                ? 'text-zinc-300'
-                                : 'text-zinc-900'
-                            }
-                          >
-                            {formatMetricValue('precisionAt5', metrics?.precisionAt5 ?? 0)}
-                          </span>
-                          {!isBaseline && baselineMetricValues && metrics && (
-                            <span
-                              className={`text-xs flex items-center ${
-                                computeDiff(metrics.precisionAt5, baselineMetricValues.precisionAt5, 'precisionAt5')
-                                  ?.isPositive
+                              const difference =
+                                typeof baselineValue === 'number' ? value - baselineValue : undefined;
+
+                              const percentChange =
+                                typeof difference === 'number' &&
+                                typeof baselineValue === 'number' &&
+                                Math.abs(baselineValue) > VALUE_EPSILON
+                                  ? (difference / baselineValue) * 100
+                                  : undefined;
+
+                              const isBest =
+                                extremes &&
+                                Math.abs(value - extremes.best) < VALUE_EPSILON &&
+                                !(extremes && Math.abs(extremes.best - extremes.worst) < VALUE_EPSILON);
+
+                              const isWorst =
+                                extremes &&
+                                Math.abs(value - extremes.worst) < VALUE_EPSILON &&
+                                !(extremes && Math.abs(extremes.best - extremes.worst) < VALUE_EPSILON);
+
+                              const highlightState: 'best' | 'worst' | 'neutral' = (() => {
+                                if (isBest && isWorst) {
+                                  return 'neutral';
+                                }
+                                if (isBest) {
+                                  return 'best';
+                                }
+                                if (isWorst) {
+                                  return 'worst';
+                                }
+                                return 'neutral';
+                              })();
+
+                              const valueColorClass =
+                                highlightState === 'neutral'
                                   ? darkMode
-                                    ? 'text-green-400'
-                                    : 'text-green-600'
-                                  : darkMode
-                                  ? 'text-red-400'
-                                  : 'text-red-600'
-                              }`}
-                            >
-                              {computeDiff(metrics.precisionAt5, baselineMetricValues.precisionAt5, 'precisionAt5')
-                                ?.isPositive
-                                ? '↑'
-                                : '↓'}
-                              {computeDiff(metrics.precisionAt5, baselineMetricValues.precisionAt5, 'precisionAt5')
-                                ?.diff.toFixed(0)}
-                              %
-                            </span>
-                          )}
-                        </div>
-                      </div>
+                                    ? 'text-zinc-100'
+                                    : 'text-zinc-700'
+                                  : '';
 
-                      <div>
-                        <p className={`text-xs mb-1 ${darkMode ? 'text-zinc-400' : 'text-zinc-600'}`}>
-                          Context Precision
-                        </p>
-                        <div className="flex items-center gap-2">
-                          <span
-                            className={
-                              metrics?.recallAt5 === bestContextPrecision
-                                ? darkMode
-                                  ? 'text-green-400'
-                                  : 'text-green-600'
-                                : darkMode
-                                ? 'text-zinc-300'
-                                : 'text-zinc-900'
-                            }
-                          >
-                            {formatMetricValue('recallAt5', metrics?.recallAt5 ?? 0)}
-                          </span>
-                          {!isBaseline && baselineMetricValues && metrics && (
-                            <span
-                              className={`text-xs flex items-center ${
-                                computeDiff(metrics.recallAt5, baselineMetricValues.recallAt5, 'recallAt5')?.isPositive
-                                  ? darkMode
-                                    ? 'text-green-400'
-                                    : 'text-green-600'
-                                  : darkMode
-                                  ? 'text-red-400'
-                                  : 'text-red-600'
-                              }`}
-                            >
-                              {computeDiff(metrics.recallAt5, baselineMetricValues.recallAt5, 'recallAt5')?.isPositive
-                                ? '↑'
-                                : '↓'}
-                              {computeDiff(metrics.recallAt5, baselineMetricValues.recallAt5, 'recallAt5')?.diff.toFixed(0)}
-                              %
-                            </span>
-                          )}
-                        </div>
-                      </div>
+                              const valueStyle =
+                                highlightState === 'best'
+                                  ? { color: darkMode ? '#4ade80' : '#16a34a' }
+                                  : highlightState === 'worst'
+                                  ? { color: darkMode ? '#f87171' : '#dc2626' }
+                                  : undefined;
 
-                      <div>
-                        <p className={`text-xs mb-1 ${darkMode ? 'text-zinc-400' : 'text-zinc-600'}`}>
-                          Groundedness
-                        </p>
-                        <div className="flex items-center gap-2">
-                          <span
-                            className={
-                              metrics?.groundedness === bestGroundedness
-                                ? darkMode
-                                  ? 'text-green-400'
-                                  : 'text-green-600'
-                                : darkMode
-                                ? 'text-zinc-300'
-                                : 'text-zinc-900'
-                            }
-                          >
-                            {formatMetricValue('groundedness', metrics?.groundedness ?? 0)}
-                          </span>
-                          {!isBaseline && baselineMetricValues && metrics && (
-                            <span
-                              className={`text-xs flex items-center ${
-                                computeDiff(
-                                  metrics.groundedness,
-                                  baselineMetricValues.groundedness,
-                                  'groundedness'
-                                )?.isPositive
-                                  ? darkMode
-                                    ? 'text-green-400'
-                                    : 'text-green-600'
-                                  : darkMode
-                                  ? 'text-red-400'
-                                  : 'text-red-600'
-                              }`}
-                            >
-                              {computeDiff(
-                                metrics.groundedness,
-                                baselineMetricValues.groundedness,
-                                'groundedness'
-                              )?.isPositive
-                                ? '↑'
-                                : '↓'}
-                              {computeDiff(
-                                metrics.groundedness,
-                                baselineMetricValues.groundedness,
-                                'groundedness'
-                              )?.diff.toFixed(0)}
-                              %
-                            </span>
-                          )}
-                        </div>
-                      </div>
+                              const valueClasses = cn('font-semibold', valueColorClass);
 
-                      <div>
-                        <p className={`text-xs mb-1 ${darkMode ? 'text-zinc-400' : 'text-zinc-600'}`}>
-                          Latency p95
-                        </p>
-                        <div className="flex items-center gap-2">
-                          <span
-                            className={
-                              metrics?.latencyP95 === bestLatency
-                                ? darkMode
-                                  ? 'text-green-400'
-                                  : 'text-green-600'
-                                : darkMode
-                                ? 'text-zinc-300'
-                                : 'text-zinc-900'
-                            }
-                          >
-                            {formatMetricValue('latencyP95', metrics?.latencyP95 ?? 0)}
-                          </span>
-                          {!isBaseline && baselineMetricValues && metrics && (
-                            <span
-                              className={`text-xs flex items-center ${
-                                computeDiff(metrics.latencyP95, baselineMetricValues.latencyP95, 'latencyP95')
-                                  ?.isPositive
-                                  ? darkMode
-                                    ? 'text-green-400'
-                                    : 'text-green-600'
-                                  : darkMode
-                                  ? 'text-red-400'
-                                  : 'text-red-600'
-                              }`}
-                            >
-                              {computeDiff(metrics.latencyP95, baselineMetricValues.latencyP95, 'latencyP95')
-                                ?.isPositive
-                                ? '↓'
-                                : '↑'}
-                              {computeDiff(metrics.latencyP95, baselineMetricValues.latencyP95, 'latencyP95')
-                                ?.diff.toFixed(0)}
-                              %
-                            </span>
-                          )}
-                        </div>
-                      </div>
+                              const arrowSymbol =
+                                typeof percentChange === 'number'
+                                  ? percentChange > 0
+                                    ? '↑'
+                                    : percentChange < 0
+                                    ? '↓'
+                                    : '→'
+                                  : typeof difference === 'number'
+                                  ? difference > 0
+                                    ? '↑'
+                                    : difference < 0
+                                    ? '↓'
+                                    : '→'
+                                  : null;
 
-                      <div>
-                        <p className={`text-xs mb-1 ${darkMode ? 'text-zinc-400' : 'text-zinc-600'}`}>
-                          Cost / Query
-                        </p>
-                        <div className="flex items-center gap-2">
-                          <span
-                            className={
-                              metrics?.costPerQuery === bestCost
-                                ? darkMode
-                                  ? 'text-green-400'
-                                  : 'text-green-600'
-                                : darkMode
-                                ? 'text-zinc-300'
-                                : 'text-zinc-900'
-                            }
-                          >
-                            {formatMetricValue('costPerQuery', metrics?.costPerQuery ?? 0)}
-                          </span>
-                          {!isBaseline && baselineMetricValues && metrics && (
-                            <span
-                              className={`text-xs flex items-center ${
-                                computeDiff(metrics.costPerQuery, baselineMetricValues.costPerQuery, 'costPerQuery')
-                                  ?.isPositive
-                                  ? darkMode
-                                    ? 'text-green-400'
-                                    : 'text-green-600'
-                                  : darkMode
-                                  ? 'text-red-400'
-                                  : 'text-red-600'
-                              }`}
-                            >
-                              {computeDiff(metrics.costPerQuery, baselineMetricValues.costPerQuery, 'costPerQuery')
-                                ?.isPositive
-                                ? '↓'
-                                : '↑'}
-                              {computeDiff(metrics.costPerQuery, baselineMetricValues.costPerQuery, 'costPerQuery')
-                                ?.diff.toFixed(0)}
-                              %
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </CardContent>
-        </Card>
+                              const percentMagnitude =
+                                typeof percentChange === 'number'
+                                  ? Math.abs(percentChange) >= 10
+                                    ? Math.abs(percentChange).toFixed(0)
+                                    : Math.abs(percentChange).toFixed(1)
+                                  : null;
 
-        {/* Charts */}
-        <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-          <Card className={darkMode ? 'bg-zinc-800 border-zinc-700' : ''}>
-            <CardHeader>
-              <CardTitle className={darkMode ? 'text-zinc-100' : 'text-zinc-900'}>
-                Quality Metrics
-              </CardTitle>
-              <CardDescription className={darkMode ? 'text-zinc-400' : 'text-zinc-600'}>
-                Pass rate, context precision, and groundedness across pipelines
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="h-80">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={barChartData}>
-                  <CartesianGrid
-                    strokeDasharray="3 3"
-                    className={darkMode ? 'stroke-zinc-700' : 'stroke-zinc-200'}
-                  />
-                  <XAxis
-                    dataKey="name"
-                    tick={{ fill: darkMode ? '#a1a1aa' : '#71717a' }}
-                    axisLine={false}
-                    tickLine={false}
-                  />
-                  <YAxis
-                    tick={{ fill: darkMode ? '#a1a1aa' : '#71717a' }}
-                    axisLine={false}
-                    tickLine={false}
-                  />
-                  <Tooltip
-                    contentStyle={{
-                      backgroundColor: darkMode ? '#18181b' : '#fff',
-                      borderColor: darkMode ? '#3f3f46' : '#e4e4e7',
-                      borderRadius: '8px',
-                    }}
-                  />
-                  <Legend />
-                  {pipelineEntries.map(({ id, pipeline, color }) => (
-                    <Bar
-                      key={id}
-                      dataKey={id}
-                      name={pipeline?.pipelineName ?? `Pipeline ${id}`}
-                      fill={color}
-                      radius={4}
-                    />
-                  ))}
-                </BarChart>
-              </ResponsiveContainer>
-            </CardContent>
-          </Card>
+                              const improvement =
+                                typeof difference === 'number'
+                                  ? betterDirection === 'higher'
+                                    ? difference > 0
+                                    : difference < 0
+                                  : false;
 
-          <Card className={darkMode ? 'bg-zinc-800 border-zinc-700' : ''}>
-            <CardHeader>
-              <CardTitle className={darkMode ? 'text-zinc-100' : 'text-zinc-900'}>
-                Latency & Cost
-              </CardTitle>
-              <CardDescription className={darkMode ? 'text-zinc-400' : 'text-zinc-600'}>
-                Comparing latency and cost per query across pipelines
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="h-80">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={costLatencyData}>
-                  <CartesianGrid
-                    strokeDasharray="3 3"
-                    className={darkMode ? 'stroke-zinc-700' : 'stroke-zinc-200'}
-                  />
-                  <XAxis
-                    dataKey="name"
-                    tick={{ fill: darkMode ? '#a1a1aa' : '#71717a' }}
-                    axisLine={false}
-                    tickLine={false}
-                  />
-                  <YAxis
-                    tick={{ fill: darkMode ? '#a1a1aa' : '#71717a' }}
-                    axisLine={false}
-                    tickLine={false}
-                  />
-                  <Tooltip
-                    contentStyle={{
-                      backgroundColor: darkMode ? '#18181b' : '#fff',
-                      borderColor: darkMode ? '#3f3f46' : '#e4e4e7',
-                      borderRadius: '8px',
-                    }}
-                  />
-                  <Legend />
-                  {pipelineEntries.map(({ id, pipeline, color }) => (
-                    <Bar
-                      key={id}
-                      dataKey={id}
-                      name={pipeline?.pipelineName ?? `Pipeline ${id}`}
-                      fill={color}
-                      radius={4}
-                    />
-                  ))}
-                </BarChart>
-              </ResponsiveContainer>
-            </CardContent>
-          </Card>
-        </div>
+                              const regression =
+                                typeof difference === 'number'
+                                  ? betterDirection === 'higher'
+                                    ? difference < 0
+                                    : difference > 0
+                                  : false;
 
-        <Card className={darkMode ? 'bg-zinc-800 border-zinc-700' : ''}>
-          <CardHeader>
-            <CardTitle className={darkMode ? 'text-zinc-100' : 'text-zinc-900'}>
-              Overall Performance Radar
-            </CardTitle>
-            <CardDescription className={darkMode ? 'text-zinc-400' : 'text-zinc-600'}>
-              Normalized score across quality, speed, and cost dimensions
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="h-80">
-            <ResponsiveContainer width="100%" height="100%">
-              <RadarChart data={radarData}>
-                <PolarGrid stroke={darkMode ? '#3f3f46' : '#e4e4e7'} />
-                <PolarAngleAxis dataKey="metric" tick={{ fill: darkMode ? '#a1a1aa' : '#71717a' }} />
-                <PolarRadiusAxis tick={{ fill: darkMode ? '#a1a1aa' : '#71717a' }} angle={30} domain={[0, 100]} />
-                {pipelineEntries.map(({ id, pipeline, color }) => (
-                  <Radar
-                    key={id}
-                    name={pipeline?.pipelineName ?? `Pipeline ${id}`}
-                    dataKey={id}
-                    stroke={color}
-                    fill={color}
-                    fillOpacity={0.2}
-                  />
-                ))}
-                <Legend />
-              </RadarChart>
-            </ResponsiveContainer>
-          </CardContent>
-        </Card>
+                              let deltaText: string | null = null;
+                              let deltaClass = 'text-xs font-medium text-muted-foreground';
 
-        {/* Summary Table */}
-        <Card className={darkMode ? 'bg-zinc-800 border-zinc-700' : ''}>
-          <CardHeader>
-            <CardTitle className={darkMode ? 'text-zinc-100' : 'text-zinc-900'}>
-              Metric Summary
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Metric</TableHead>
-                  {pipelineEntries.map(({ id, pipeline }) => (
-                    <TableHead key={id}>{pipeline?.pipelineName ?? `Pipeline ${id}`}</TableHead>
-                  ))}
-                  <TableHead>Best Pipeline</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {METRIC_DEFINITIONS.map((definition) => (
-                  <TableRow key={definition.key}>
-                    <TableCell>{definition.label}</TableCell>
-                    {pipelineEntries.map(({ id, pipeline }) => (
-                      <TableCell key={id}>
-                        {pipeline ? formatMetricValue(definition.key, pipeline.metrics[definition.key]) : '—'}
+                              if (row.isBaseline) {
+                                deltaText = 'Baseline';
+                              } else if (typeof percentChange === 'number') {
+                                deltaText = `${arrowSymbol} ${percentMagnitude ?? '0'}%`;
+                                if (percentChange === 0) {
+                                  deltaClass = 'text-xs font-medium text-muted-foreground';
+                                } else if (improvement) {
+                                  deltaClass = darkMode
+                                    ? 'text-xs font-medium text-green-400'
+                                    : 'text-xs font-medium text-green-600';
+                                } else if (regression) {
+                                  deltaClass = darkMode
+                                    ? 'text-xs font-medium text-red-400'
+                                    : 'text-xs font-medium text-red-600';
+                                }
+                              } else if (
+                                typeof difference === 'number' &&
+                                typeof baselineValue === 'number'
+                              ) {
+                                const formattedDiff = formatMetricValue(metric, Math.abs(difference));
+                                deltaText =
+                                  arrowSymbol && formattedDiff
+                                    ? `${arrowSymbol} ${formattedDiff}`
+                                    : null;
+                                if (difference === 0) {
+                                  deltaClass = 'text-xs font-medium text-muted-foreground';
+                                } else if (improvement) {
+                                  deltaClass = darkMode
+                                    ? 'text-xs font-medium text-green-400'
+                                    : 'text-xs font-medium text-green-600';
+                                } else if (regression) {
+                                  deltaClass = darkMode
+                                    ? 'text-xs font-medium text-red-400'
+                                    : 'text-xs font-medium text-red-600';
+                                }
+                              }
+
+                              return (
+                                <>
+                                  <span className={valueClasses} style={valueStyle}>
+                                    {formatMetricValue(metric, value)}
+                                  </span>
+                                  {deltaText ? <span className={deltaClass}>{deltaText}</span> : null}
+                                </>
+                              );
+                            })()}
+                          </div>
+                        ) : (
+                          '—'
+                        )}
                       </TableCell>
                     ))}
-                    <TableCell>
-                      {latestRun?.bestByMetric[definition.key]
-                        ? pipelineMap[latestRun.bestByMetric[definition.key]]?.pipelineName ??
-                          latestRun.bestByMetric[definition.key]
-                        : '—'}
-                    </TableCell>
                   </TableRow>
                 ))}
               </TableBody>
             </Table>
+              </div>
+            ) : (
+              <p className={darkMode ? 'text-zinc-400' : 'text-zinc-600'}>
+                No pipeline results detected in the latest experiment.
+              </p>
+            )}
           </CardContent>
         </Card>
 

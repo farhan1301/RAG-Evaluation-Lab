@@ -56,6 +56,13 @@ const EMBEDDING_COST_PER_1K_TOKENS: Record<string, number> = {
 };
 
 const CHAT_COST_PER_1K_TOKENS: Record<string, { input: number; output: number }> = {
+  // TODO: Replace placeholder pricing when official rates are published.
+  'gpt-5-chat-latest': { input: 0.00150, output: 0.00200 },
+  'gpt-5-mini': { input: 0.00150, output: 0.00200 },
+  'gpt-5-nano': { input: 0.00150, output: 0.00200 },
+  'gpt-4.1': { input: 0.00150, output: 0.00200 },
+  'gpt-4.1-mini': { input: 0.00150, output: 0.00200 },
+  'gpt-4.1-nano': { input: 0.00150, output: 0.00200 },
   'gpt-4o-mini': { input: 0.00015, output: 0.00060 },
   'gpt-4o': { input: 0.00250, output: 0.01000 },
   'gpt-4o-mini-2024-07-18': { input: 0.00015, output: 0.00060 },
@@ -150,7 +157,7 @@ const getEmbeddingVectorDim = (model: string) => {
 export function ExperimentsPage({ darkMode, onNext }: ExperimentsPageProps) {
   const { documents, setDocuments, tasks } = useDataset();
   const { pipelines } = usePipelines();
-  const { setLatestRun } = useExperimentResults();
+  const { latestRun, setLatestRun } = useExperimentResults();
 
   const [stage, setStage] = useState<Stage>('idle');
   const [statusLog, setStatusLog] = useState<string[]>([]);
@@ -216,14 +223,69 @@ export function ExperimentsPage({ darkMode, onNext }: ExperimentsPageProps) {
     [pipelineOptions]
   );
 
+  const previousRunTaskResults = useMemo(() => {
+    if (!latestRun) {
+      return {};
+    }
+
+    return latestRun.pipelines.reduce<Record<string, TaskResult[]>>((acc, pipeline) => {
+      const answeringSummary = pipeline.answeringSummary;
+      if (!answeringSummary) {
+        return acc;
+      }
+
+      const chunkLookup = new Map(
+        (answeringSummary.sources ?? []).map((chunk) => [chunk.id, chunk])
+      );
+
+      const convertedResults = (answeringSummary.details ?? []).map((detail) => {
+        const matches = detail.citedChunkIds
+          .map((chunkId) => {
+            const chunk = chunkLookup.get(chunkId);
+            if (!chunk) {
+              return null;
+            }
+            return {
+              id: chunk.id,
+              score: chunk.score,
+              text: chunk.content,
+              documentName: chunk.documentName,
+            };
+          })
+          .filter((match): match is TaskResult['matches'][number] => Boolean(match));
+
+        return {
+          taskId: detail.taskId,
+          question: detail.question,
+          expectedAnswer: detail.expectedAnswer ?? '',
+          answer: detail.response,
+          matches,
+          latencyMs: detail.latencyMs,
+          usage: detail.usage,
+        };
+      });
+
+      acc[pipeline.pipelineId] = convertedResults;
+      return acc;
+    }, {});
+  }, [latestRun]);
+
   const activePipelineId =
     selectedPipelineId && pipelineNameLookup[selectedPipelineId]
       ? selectedPipelineId
       : pipelineOptions[0]?.id ?? '';
 
-  const displayedTaskResults =
+  const localTaskResults =
     taskResultsByPipeline[activePipelineId] ??
-    (activePipelineId === baselinePipelineId ? taskResults : []);
+    (activePipelineId === baselinePipelineId ? taskResults : undefined);
+
+  const displayedTaskResults =
+    localTaskResults && localTaskResults.length > 0
+      ? localTaskResults
+      : previousRunTaskResults[activePipelineId] ?? [];
+
+  const canViewReport =
+    !isRunning && Boolean(latestRun && latestRun.pipelines && latestRun.pipelines.length > 0);
 
   const buildSnippet = (text: string) => {
     const normalized = text.replace(/\s+/g, ' ').trim();
@@ -860,14 +922,16 @@ export function ExperimentsPage({ darkMode, onNext }: ExperimentsPageProps) {
               <span className="capitalize">{stage}</span>
             </div>
 
-            <div className={`max-h-48 overflow-y-auto text-sm ${darkMode ? 'text-zinc-300' : 'text-zinc-700'}`}>
+            <div
+              className={`max-h-48 overflow-y-auto overflow-x-hidden text-sm pr-2 ${darkMode ? 'text-zinc-300' : 'text-zinc-700'}`}
+            >
               {statusLog.length === 0 ? (
                 <p className="opacity-60">Status updates will appear here once the experiment starts.</p>
               ) : (
                 statusLog.map((entry, index) => (
                   <div key={index} className="flex items-start gap-2 py-1">
-                    <span className="opacity-40">•</span>
-                    <span>{entry}</span>
+                    <span className="opacity-40 flex-none">•</span>
+                    <span className="flex-1 min-w-0 break-words">{entry}</span>
                   </div>
                 ))
               )}
@@ -968,7 +1032,7 @@ export function ExperimentsPage({ darkMode, onNext }: ExperimentsPageProps) {
           </CardContent>
         </Card>
 
-        {stage === 'complete' && (
+        {canViewReport && (
           <div className="flex justify-end">
             <Button onClick={onNext}>View Report</Button>
           </div>
