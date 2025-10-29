@@ -38,6 +38,7 @@ export default defineConfig(({ mode }) => {
     define: {
       __LLAMA_DEFAULT_API_KEY__: JSON.stringify(apiKey),
     },
+    publicDir: path.resolve(__dirname, '../favicon'),
     resolve: {
       extensions: ['.js', '.jsx', '.ts', '.tsx', '.json'],
       alias: {

@@ -1,4 +1,4 @@
-# RAG Evaluation Lab
+# <img src="favicon/favicon-32x32.png" alt="RAG Evaluation Lab icon" width="28" height="28" /> RAG Evaluation Lab
 
 End-to-end workspace for building and evaluating retrieval-augmented generation (RAG) pipelines. The repository is now split into a `frontend` Vite/React application and a `backend` Express service that proxies OpenAI and Qdrant.
 
