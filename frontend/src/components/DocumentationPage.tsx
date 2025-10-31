@@ -21,11 +21,7 @@ import { Button } from './ui/button';
 import { Separator } from './ui/separator';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from './ui/accordion';
 
-interface DocumentationPageProps {
-  darkMode: boolean;
-}
-
-export function DocumentationPage({ darkMode }: DocumentationPageProps) {
+export function DocumentationPage() {
   const [copiedText, setCopiedText] = useState<string | null>(null);
 
   const copyToClipboard = (text: string, id: string) => {
@@ -35,11 +31,7 @@ export function DocumentationPage({ darkMode }: DocumentationPageProps) {
   };
 
   const CodeBlock = ({ code, id }: { code: string; id: string }) => (
-    <div
-      className={`relative rounded-lg border ${
-        darkMode ? 'bg-zinc-950 border-zinc-700' : 'bg-zinc-50 border-zinc-200'
-      } p-4 mt-3`}
-    >
+    <div className="relative rounded-lg border bg-zinc-50 border-zinc-200 p-4 mt-3">
       <pre className="text-sm overflow-x-auto">
         <code>{code}</code>
       </pre>
@@ -50,14 +42,14 @@ export function DocumentationPage({ darkMode }: DocumentationPageProps) {
   );
 
   return (
-    <div className={`p-8 ${darkMode ? 'bg-zinc-900' : 'bg-zinc-50'} min-h-screen`}>
+    <div className="p-8 bg-zinc-50 min-h-screen">
       <div className="max-w-6xl mx-auto space-y-6">
         <div>
           <div className="flex items-center gap-3 mb-2">
             <Book className="text-blue-500" size={32} />
             <h1 className="text-3xl">Documentation</h1>
           </div>
-          <p className={`text-lg ${darkMode ? 'text-zinc-400' : 'text-zinc-600'}`}>Complete guide to using the RAG Evaluation Lab</p>
+          <p className="text-lg text-zinc-600">Complete guide to using the RAG Evaluation Lab</p>
         </div>
 
         <Tabs defaultValue="overview" className="space-y-6">
@@ -71,10 +63,10 @@ export function DocumentationPage({ darkMode }: DocumentationPageProps) {
           </TabsList>
 
           <TabsContent value="overview" className="space-y-6">
-            <Card className={darkMode ? 'bg-zinc-800 border-zinc-700' : ''}>
+            <Card>
               <CardHeader>
                 <CardTitle>What is RAG Evaluation Lab?</CardTitle>
-                <CardDescription className={darkMode ? 'text-zinc-400' : ''}>
+                <CardDescription>
                   A comprehensive platform for testing and optimizing Retrieval-Augmented Generation systems
                 </CardDescription>
               </CardHeader>
@@ -85,7 +77,7 @@ export function DocumentationPage({ darkMode }: DocumentationPageProps) {
                   this platform gives you the tools to make data-driven decisions.
                 </p>
 
-                <Alert className={darkMode ? 'bg-blue-950/30 border-blue-900' : 'bg-blue-50 border-blue-200'}>
+                <Alert className="bg-blue-50 border-blue-200">
                   <AlertCircle className="h-4 w-4" />
                   <AlertTitle>Key Philosophy</AlertTitle>
                   <AlertDescription>
@@ -105,14 +97,10 @@ export function DocumentationPage({ darkMode }: DocumentationPageProps) {
                     ].map((step) => (
                       <div
                         key={step.num}
-                        className={`flex gap-3 p-3 rounded-lg border ${
-                          darkMode ? 'border-zinc-700 bg-zinc-900/50' : 'border-zinc-200 bg-white'
-                        }`}
+                        className="flex gap-3 p-3 rounded-lg border border-zinc-200 bg-white"
                       >
                         <div
-                          className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 ${
-                            darkMode ? 'bg-blue-500/20 text-blue-400' : 'bg-blue-100 text-blue-600'
-                          }`}
+                          className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 bg-blue-100 text-blue-600"
                         >
                           {step.num}
                         </div>
@@ -140,7 +128,7 @@ export function DocumentationPage({ darkMode }: DocumentationPageProps) {
                   items: ['Choosing the best embedding model', 'Optimizing chunking strategies', 'Benchmarking retrieval techniques'],
                 },
               ].map((card, index) => (
-                <Card key={index} className={darkMode ? 'bg-zinc-800 border-zinc-700' : ''}>
+                <Card key={index}>
                   <CardHeader className="flex flex-row items-center gap-3">
                     <div className="p-2 rounded-md bg-blue-500/10">{card.icon}</div>
                     <div>
@@ -161,7 +149,7 @@ export function DocumentationPage({ darkMode }: DocumentationPageProps) {
               ))}
             </div>
 
-            <Card className={darkMode ? 'bg-zinc-800 border-zinc-700' : ''}>
+            <Card>
               <CardHeader>
                 <CardTitle>Quick Start</CardTitle>
               </CardHeader>
@@ -208,18 +196,18 @@ export function DocumentationPage({ darkMode }: DocumentationPageProps) {
           </TabsContent>
 
           <TabsContent value="api-keys" className="space-y-6">
-            <Card className={darkMode ? 'bg-zinc-800 border-zinc-700' : ''}>
+            <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
                   <Key size={20} />
                   Setting Up API Keys
                 </CardTitle>
-                <CardDescription className={darkMode ? 'text-zinc-400' : ''}>
+                <CardDescription>
                   Configure your API credentials for embeddings, LLMs, and other services.
                 </CardDescription>
               </CardHeader>
               <CardContent>
-                <Alert className={darkMode ? 'bg-yellow-950/30 border-yellow-900' : 'bg-yellow-50 border-yellow-200'}>
+                <Alert className="bg-yellow-50 border-yellow-200">
                   <AlertCircle className="h-4 w-4" />
                   <AlertTitle>Security Note</AlertTitle>
                   <AlertDescription>
@@ -233,14 +221,12 @@ export function DocumentationPage({ darkMode }: DocumentationPageProps) {
             <Accordion type="single" collapsible className="space-y-3">
               <AccordionItem
                 value="openai"
-                className={`border rounded-lg px-4 ${darkMode ? 'border-zinc-700 bg-zinc-800' : 'border-zinc-200'}`}
+                className="border rounded-lg px-4 border-zinc-200"
               >
                 <AccordionTrigger>
                   <div className="flex items-center gap-3">
                     <div
-                      className={`w-10 h-10 rounded-lg flex items-center justify-center ${
-                        darkMode ? 'bg-green-500/20' : 'bg-green-100'
-                      }`}
+                      className="w-10 h-10 rounded-lg flex items-center justify-center bg-green-100"
                     >
                       <Key className="text-green-500" size={20} />
                     </div>
@@ -319,14 +305,12 @@ response = openai.chat.completions.create(
 
               <AccordionItem
                 value="cohere"
-                className={`border rounded-lg px-4 ${darkMode ? 'border-zinc-700 bg-zinc-800' : 'border-zinc-200'}`}
+                className="border rounded-lg px-4 border-zinc-200"
               >
                 <AccordionTrigger>
                   <div className="flex items-center gap-3">
                     <div
-                      className={`w-10 h-10 rounded-lg flex items-center justify-center ${
-                        darkMode ? 'bg-purple-500/20' : 'bg-purple-100'
-                      }`}
+                      className="w-10 h-10 rounded-lg flex items-center justify-center bg-purple-100"
                     >
                       <Key className="text-purple-500" size={20} />
                     </div>
@@ -402,14 +386,12 @@ response = co.rerank(
 
               <AccordionItem
                 value="anthropic"
-                className={`border rounded-lg px-4 ${darkMode ? 'border-zinc-700 bg-zinc-800' : 'border-zinc-200'}`}
+                className="border rounded-lg px-4 border-zinc-200"
               >
                 <AccordionTrigger>
                   <div className="flex items-center gap-3">
                     <div
-                      className={`w-10 h-10 rounded-lg flex items-center justify-center ${
-                        darkMode ? 'bg-orange-500/20' : 'bg-orange-100'
-                      }`}
+                      className="w-10 h-10 rounded-lg flex items-center justify-center bg-orange-100"
                     >
                       <Key className="text-orange-500" size={20} />
                     </div>
@@ -462,13 +444,13 @@ response = co.rerank(
           </TabsContent>
 
           <TabsContent value="datasets" className="space-y-6">
-            <Card className={darkMode ? 'bg-zinc-800 border-zinc-700' : ''}>
+            <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
                   <Database size={20} />
                   Datasets &amp; Tasks
                 </CardTitle>
-                <CardDescription className={darkMode ? 'text-zinc-400' : ''}>Upload documents and create evaluation questions.</CardDescription>
+                <CardDescription>Upload documents and create evaluation questions.</CardDescription>
               </CardHeader>
               <CardContent className="space-y-6">
                 <div>
@@ -477,7 +459,7 @@ response = co.rerank(
                     The Datasets page allows you to upload documents that will serve as your knowledge base for RAG evaluation.
                   </p>
                   <div
-                    className={`p-4 rounded-lg border ${darkMode ? 'border-zinc-700 bg-zinc-900/50' : 'border-zinc-200 bg-zinc-50'}`}
+                    className="p-4 rounded-lg border border-zinc-200 bg-zinc-50"
                   >
                     <h5 className="text-sm font-medium mb-2">Supported Formats:</h5>
                     <ul className="text-sm space-y-1">
@@ -511,7 +493,7 @@ response = co.rerank(
                         description: 'Specific passages that contain the answer',
                       },
                     ].map((card) => (
-                      <div key={card.title} className={`p-3 rounded-lg border ${darkMode ? 'border-zinc-700' : 'border-zinc-200'}`}>
+                    <div key={card.title} className="p-3 rounded-lg border border-zinc-200">
                         <div className="font-medium text-sm mb-1">{card.title}</div>
                         <div className="text-sm opacity-60">{card.description}</div>
                       </div>
@@ -519,7 +501,7 @@ response = co.rerank(
                   </div>
                 </div>
 
-                <Alert className={darkMode ? 'bg-blue-950/30 border-blue-900' : 'bg-blue-50 border-blue-200'}>
+                <Alert className="bg-blue-50 border-blue-200">
                   <AlertCircle className="h-4 w-4" />
                   <AlertTitle>Best Practice</AlertTitle>
                   <AlertDescription>
@@ -532,13 +514,13 @@ response = co.rerank(
           </TabsContent>
 
           <TabsContent value="pipelines" className="space-y-6">
-            <Card className={darkMode ? 'bg-zinc-800 border-zinc-700' : ''}>
+            <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
                   <Workflow size={20} />
                   Pipeline Configuration
                 </CardTitle>
-                <CardDescription className={darkMode ? 'text-zinc-400' : ''}>Design RAG pipelines with configurable stages.</CardDescription>
+                <CardDescription>Design RAG pipelines with configurable stages.</CardDescription>
               </CardHeader>
               <CardContent className="space-y-6">
                 <p className="text-sm opacity-80">
@@ -608,14 +590,14 @@ response = co.rerank(
                       params: 'Weights for composite scoring',
                     },
                   ].map((item) => (
-                    <Card key={item.stage} className={darkMode ? 'bg-zinc-900 border-zinc-700' : 'bg-white'}>
+                    <Card key={item.stage} className="bg-white">
                       <CardContent className="p-6 space-y-3">
                         <div className="flex items-center justify-between">
                           <div>
                             <h4 className="font-medium">{item.stage}</h4>
                             <p className="text-sm opacity-70">{item.description}</p>
                           </div>
-                          <Badge variant="secondary" className={darkMode ? 'bg-blue-500/20 text-blue-300 border-blue-500/30' : ''}>
+                          <Badge variant="secondary">
                             Stage
                           </Badge>
                         </div>
@@ -642,13 +624,13 @@ response = co.rerank(
           </TabsContent>
 
           <TabsContent value="experiments" className="space-y-6">
-            <Card className={darkMode ? 'bg-zinc-800 border-zinc-700' : ''}>
+            <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
                   <FlaskConical size={20} />
                   Running Experiments
                 </CardTitle>
-                <CardDescription className={darkMode ? 'text-zinc-400' : ''}>Execute and monitor RAG experiments.</CardDescription>
+                <CardDescription>Execute and monitor RAG experiments.</CardDescription>
               </CardHeader>
               <CardContent className="space-y-6">
                 <div className="grid md:grid-cols-3 gap-3">
@@ -669,7 +651,7 @@ response = co.rerank(
                   ].map((item) => (
                     <div
                       key={item.title}
-                      className={`p-4 rounded-lg border ${darkMode ? 'border-zinc-700 bg-zinc-900/50' : 'border-zinc-200 bg-zinc-50'}`}
+                      className="p-4 rounded-lg border border-zinc-200 bg-zinc-50"
                     >
                       <div className="font-medium mb-1">{item.title}</div>
                       <div className="text-sm opacity-80">{item.description}</div>
@@ -677,7 +659,7 @@ response = co.rerank(
                   ))}
                 </div>
 
-                <Alert className={darkMode ? 'bg-purple-950/30 border-purple-900' : 'bg-purple-50 border-purple-200'}>
+                <Alert className="bg-purple-50 border-purple-200">
                   <Sparkles className="h-4 w-4" />
                   <AlertTitle>Tip</AlertTitle>
                   <AlertDescription>
@@ -689,13 +671,13 @@ response = co.rerank(
           </TabsContent>
 
           <TabsContent value="reports" className="space-y-6">
-            <Card className={darkMode ? 'bg-zinc-800 border-zinc-700' : ''}>
+            <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
                   <FileText size={20} />
                   Understanding Reports
                 </CardTitle>
-                <CardDescription className={darkMode ? 'text-zinc-400' : ''}>Analyze results and get AI-generated recommendations.</CardDescription>
+                <CardDescription>Analyze results and get AI-generated recommendations.</CardDescription>
               </CardHeader>
               <CardContent className="space-y-6">
                 <div>
@@ -728,9 +710,7 @@ response = co.rerank(
                     ].map((section) => (
                       <div
                         key={section.title}
-                        className={`p-4 rounded-lg border ${
-                          darkMode ? 'border-zinc-700 bg-zinc-900/50' : 'border-zinc-200 bg-zinc-50'
-                        }`}
+                        className="p-4 rounded-lg border border-zinc-200 bg-zinc-50"
                       >
                         <h5 className="font-medium mb-2">{section.title}</h5>
                         <p className="text-sm opacity-80">{section.description}</p>
@@ -759,7 +739,7 @@ response = co.rerank(
                   </div>
                 </div>
 
-                <Alert className={darkMode ? 'bg-green-950/30 border-green-900' : 'bg-green-50 border-green-200'}>
+                <Alert className="bg-green-50 border-green-200">
                   <CheckCircle2 className="h-4 w-4" />
                   <AlertTitle>Best Practice</AlertTitle>
                   <AlertDescription>

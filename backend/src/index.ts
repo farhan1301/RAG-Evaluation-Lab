@@ -44,10 +44,21 @@ const parseAllowedOrigins = (value: string | undefined) =>
 
 const parsedOrigins = parseAllowedOrigins(process.env.CORS_ORIGINS);
 const allowAnyOrigin = parsedOrigins.includes('*');
-const allowedOrigins =
-  allowAnyOrigin || parsedOrigins.length > 0
-    ? parsedOrigins.filter((origin) => origin !== '*')
-    : ['http://localhost:5173'];
+const defaultLocalOrigins = [
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+];
+const configuredOrigins = parsedOrigins.filter((origin) => origin !== '*');
+const allowedOrigins = allowAnyOrigin
+  ? []
+  : Array.from(
+      new Set([
+        ...(configuredOrigins.length > 0 ? configuredOrigins : defaultLocalOrigins),
+        ...defaultLocalOrigins,
+      ])
+    );
 
 app.use((req, res, next) => {
   const origin = req.headers.origin;

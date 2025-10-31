@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Plus, ChevronDown, ChevronUp, Trash2, Copy } from 'lucide-react';
 import { Button } from './ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
@@ -11,7 +11,6 @@ import { usePipelines } from '../state/pipelines';
 import type { Pipeline } from '../types/pipeline';
 
 interface PipelinesPageProps {
-  darkMode: boolean;
   onNext: () => void;
 }
 
@@ -21,7 +20,6 @@ interface PipelineStageProps {
   isExpanded: boolean;
   onToggle: () => void;
   children: React.ReactNode;
-  darkMode: boolean;
 }
 
 const MODEL_OPTIONS = [
@@ -36,20 +34,21 @@ const MODEL_OPTIONS = [
   { value: 'gpt-4-turbo', label: 'GPT-4 Turbo (Advanced, $$$)' },
 ];
 
-function PipelineStage({ title, description, isExpanded, onToggle, children, darkMode }: PipelineStageProps) {
+const EMBEDDING_MODEL_COSTS: Record<string, string> = {
+  'text-embedding-3-small': '$0.02 / 1M tokens',
+  'text-embedding-3-large': '$0.13 / 1M tokens',
+};
+
+function PipelineStage({ title, description, isExpanded, onToggle, children }: PipelineStageProps) {
   return (
-    <div
-      className={`border rounded-lg ${
-        darkMode ? 'border-zinc-700 bg-zinc-900/50' : 'border-zinc-200 bg-white'
-      }`}
-    >
+    <div className="border border-zinc-200 bg-white rounded-lg">
       <button
         onClick={onToggle}
         className="w-full p-4 flex items-center justify-between hover:opacity-80 transition-opacity"
       >
         <div className="text-left">
           <h4>{title}</h4>
-          <p className={`text-sm ${darkMode ? 'text-zinc-400' : 'text-zinc-600'}`}>{description}</p>
+          <p className="text-sm text-zinc-600">{description}</p>
         </div>
         {isExpanded ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
       </button>
@@ -58,7 +57,7 @@ function PipelineStage({ title, description, isExpanded, onToggle, children, dar
   );
 }
 
-export function PipelinesPage({ darkMode, onNext }: PipelinesPageProps) {
+export function PipelinesPage({ onNext }: PipelinesPageProps) {
   const {
     pipelines,
     addPipeline: addPipelineToContext,
@@ -71,11 +70,19 @@ export function PipelinesPage({ darkMode, onNext }: PipelinesPageProps) {
     return firstPipelineId ? { [firstPipelineId]: 'parsing' } : {};
   });
   const [expandAllStages, setExpandAllStages] = useState(false);
+  const [expandedPipelines, setExpandedPipelines] = useState<Record<string, boolean>>({});
+
+  const pipelineIds = useMemo(() => pipelines.map((pipeline) => pipeline.id), [pipelines]);
 
   const toggleStage = (pipelineId: string, stage: string) => {
     if (expandAllStages) {
       setExpandAllStages(false);
       setExpandedStages({ [pipelineId]: stage });
+      return;
+    }
+    if (expandedPipelines[pipelineId]) {
+      setExpandedPipelines((prev) => ({ ...prev, [pipelineId]: false }));
+      setExpandedStages((prev) => ({ ...prev, [pipelineId]: stage }));
       return;
     }
     setExpandedStages((prev) => ({
@@ -147,22 +154,44 @@ export function PipelinesPage({ darkMode, onNext }: PipelinesPageProps) {
   }, [pipelines, updatePipelineInContext]);
 
   const isStageExpanded = (pipelineId: string, stage: string) =>
-    expandAllStages || expandedStages[pipelineId] === stage;
+    expandAllStages || expandedPipelines[pipelineId] || expandedStages[pipelineId] === stage;
 
   const handleToggleExpandAll = () => {
     setExpandAllStages((prev) => !prev);
   };
 
+  const handleTogglePipelineExpansion = (pipelineId: string) => {
+    setExpandedPipelines((prev) => ({
+      ...prev,
+      [pipelineId]: !prev[pipelineId],
+    }));
+  };
+
+  useEffect(() => {
+    setExpandedPipelines((prev) => {
+      const updated = pipelineIds.reduce<Record<string, boolean>>((acc, id) => {
+        acc[id] = prev[id] ?? false;
+        return acc;
+      }, {});
+      return updated;
+    });
+  }, [pipelineIds]);
+
+  useEffect(() => {
+    if (!expandAllStages) {
+      return;
+    }
+    setExpandedPipelines({});
+  }, [expandAllStages]);
+
   return (
-    <div className={`p-8 ${darkMode ? 'bg-zinc-900' : 'bg-zinc-50'}`}>
+    <div className="p-8 bg-zinc-50">
       <div className="max-w-7xl mx-auto space-y-6">
         {/* Header */}
         <div className="flex items-center justify-between">
           <div>
             <h2>Pipeline Configuration</h2>
-            <p className={`${darkMode ? 'text-zinc-400' : 'text-zinc-600'}`}>
-              Design RAG pipelines step-by-step
-            </p>
+            <p className="text-zinc-600">Design RAG pipelines step-by-step</p>
           </div>
           <div className="flex items-center gap-2">
             <Button variant="outline" onClick={handleToggleExpandAll}>
@@ -178,13 +207,21 @@ export function PipelinesPage({ darkMode, onNext }: PipelinesPageProps) {
         {/* Pipelines Grid */}
         <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6">
           {pipelines.map((pipeline) => (
-            <Card key={pipeline.id} className={darkMode ? 'bg-zinc-800 border-zinc-700' : ''}>
+            <Card key={pipeline.id}>
               <CardHeader>
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2">
                     <Badge variant="outline">{pipeline.isBaseline ? 'Baseline' : 'Variant'}</Badge>
                   </div>
                   <div className="flex items-center gap-1">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => handleTogglePipelineExpansion(pipeline.id)}
+                      aria-label={expandedPipelines[pipeline.id] ? 'Collapse pipeline' : 'Expand pipeline'}
+                    >
+                      {expandedPipelines[pipeline.id] ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                    </Button>
                     <Button
                       variant="ghost"
                       size="sm"
@@ -219,7 +256,6 @@ export function PipelinesPage({ darkMode, onNext }: PipelinesPageProps) {
                   description="Convert uploaded files into text before chunking"
                   isExpanded={isStageExpanded(pipeline.id, 'parsing')}
                   onToggle={() => toggleStage(pipeline.id, 'parsing')}
-                  darkMode={darkMode}
                 >
                   <div>
                     <label className="text-sm opacity-60 block mb-2">Parsing Strategy</label>
@@ -250,7 +286,6 @@ export function PipelinesPage({ darkMode, onNext }: PipelinesPageProps) {
                   description="How documents are split into pieces"
                   isExpanded={isStageExpanded(pipeline.id, 'chunking')}
                   onToggle={() => toggleStage(pipeline.id, 'chunking')}
-                  darkMode={darkMode}
                 >
                   <div className="space-y-3">
                     <div>
@@ -315,7 +350,6 @@ export function PipelinesPage({ darkMode, onNext }: PipelinesPageProps) {
                   description="Converts text to vectors"
                   isExpanded={isStageExpanded(pipeline.id, 'embedding')}
                   onToggle={() => toggleStage(pipeline.id, 'embedding')}
-                  darkMode={darkMode}
                 >
                   <div>
                     <Select
@@ -329,10 +363,10 @@ export function PipelinesPage({ darkMode, onNext }: PipelinesPageProps) {
                       </SelectTrigger>
                       <SelectContent>
                         <SelectItem value="text-embedding-3-small">
-                          text-embedding-3-small (1536d, Fast, $)
+                          {`text-embedding-3-small (${EMBEDDING_MODEL_COSTS['text-embedding-3-small']}, 1536d, Fast)`}
                         </SelectItem>
                         <SelectItem value="text-embedding-3-large">
-                          text-embedding-3-large (3072d, Accurate, $$)
+                          {`text-embedding-3-large (${EMBEDDING_MODEL_COSTS['text-embedding-3-large']}, 3072d, Accurate)`}
                         </SelectItem>
                       </SelectContent>
                     </Select>
@@ -345,9 +379,8 @@ export function PipelinesPage({ darkMode, onNext }: PipelinesPageProps) {
                   description="Stores document embeddings"
                   isExpanded={isStageExpanded(pipeline.id, 'vectordb')}
                   onToggle={() => toggleStage(pipeline.id, 'vectordb')}
-                  darkMode={darkMode}
                 >
-                  <div className={`p-3 rounded border ${darkMode ? 'border-zinc-700 bg-zinc-800' : 'border-zinc-200 bg-zinc-50'}`}>
+                  <div className="p-3 rounded border border-zinc-200 bg-zinc-50">
                     <p className="text-sm">
                       <span className="opacity-60">Using:</span> Qdrant
                     </p>
@@ -363,7 +396,6 @@ export function PipelinesPage({ darkMode, onNext }: PipelinesPageProps) {
                   description="Finds relevant chunks"
                   isExpanded={isStageExpanded(pipeline.id, 'retriever')}
                   onToggle={() => toggleStage(pipeline.id, 'retriever')}
-                  darkMode={darkMode}
                 >
                   <div className="space-y-3">
                     <div>
@@ -400,7 +432,6 @@ export function PipelinesPage({ darkMode, onNext }: PipelinesPageProps) {
                   description="Refines retrieval results"
                   isExpanded={isStageExpanded(pipeline.id, 'reranker')}
                   onToggle={() => toggleStage(pipeline.id, 'reranker')}
-                  darkMode={darkMode}
                 >
                   <div className="space-y-3">
                     <div className="flex items-center gap-2">
@@ -442,7 +473,6 @@ export function PipelinesPage({ darkMode, onNext }: PipelinesPageProps) {
                   description="Generates final answers"
                   isExpanded={isStageExpanded(pipeline.id, 'llm')}
                   onToggle={() => toggleStage(pipeline.id, 'llm')}
-                  darkMode={darkMode}
                 >
                   <div className="space-y-3">
                     <div>
@@ -500,7 +530,6 @@ export function PipelinesPage({ darkMode, onNext }: PipelinesPageProps) {
                   description="Evaluates response quality"
                   isExpanded={isStageExpanded(pipeline.id, 'judge')}
                   onToggle={() => toggleStage(pipeline.id, 'judge')}
-                  darkMode={darkMode}
                 >
                   <div className="space-y-3">
                     <div>
@@ -522,7 +551,7 @@ export function PipelinesPage({ darkMode, onNext }: PipelinesPageProps) {
                         </SelectContent>
                       </Select>
                     </div>
-                    <div className={`p-3 rounded text-sm space-y-1 ${darkMode ? 'bg-zinc-800' : 'bg-zinc-50'}`}>
+                    <div className="p-3 rounded text-sm space-y-1 bg-zinc-50">
                       <p className="opacity-60">Evaluation Rubric:</p>
                       <p>✓ Groundedness in context</p>
                       <p>✓ Faithfulness to sources</p>

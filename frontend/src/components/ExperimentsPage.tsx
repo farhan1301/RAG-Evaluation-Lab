@@ -43,43 +43,33 @@ import type {
 import { METRIC_DEFINITIONS } from '../types/experiment';
 
 interface ExperimentsPageProps {
-  darkMode: boolean;
   onNext: () => void;
 }
 
 type Stage = 'idle' | 'parsing' | 'chunking' | 'answering' | 'judging' | 'complete';
 
-const EMBEDDING_COST_PER_1K_TOKENS: Record<string, number> = {
-  'text-embedding-3-small': 0.00002,
-  'text-embedding-3-large': 0.00013,
-  'text-embedding-ada-002': 0.00010,
-};
-
 const CHAT_COST_PER_1K_TOKENS: Record<string, { input: number; output: number }> = {
-  // TODO: Replace placeholder pricing when official rates are published.
-  'gpt-5-chat-latest': { input: 0.00150, output: 0.00200 },
-  'gpt-5-mini': { input: 0.00150, output: 0.00200 },
-  'gpt-5-nano': { input: 0.00150, output: 0.00200 },
-  'gpt-4.1': { input: 0.00150, output: 0.00200 },
-  'gpt-4.1-mini': { input: 0.00150, output: 0.00200 },
-  'gpt-4.1-nano': { input: 0.00150, output: 0.00200 },
+  // Rates reflect the Standard tier prices (per 1M tokens) normalized to a 1K token basis.
+  'gpt-5': { input: 0.00125, output: 0.0100 },
+  'gpt-5-chat-latest': { input: 0.00125, output: 0.0100 },
+  'gpt-5-codex': { input: 0.00125, output: 0.0100 },
+  'gpt-5-mini': { input: 0.00025, output: 0.0020 },
+  'gpt-5-nano': { input: 0.00005, output: 0.0004 },
+  'gpt-5-pro': { input: 0.0150, output: 0.1200 },
+  'gpt-4.1': { input: 0.0020, output: 0.0080 },
+  'gpt-4.1-mini': { input: 0.0004, output: 0.0016 },
+  'gpt-4.1-nano': { input: 0.0001, output: 0.0004 },
+  'gpt-4o': { input: 0.0025, output: 0.0100 },
+  'gpt-4o-2024-05-13': { input: 0.0050, output: 0.0150 },
   'gpt-4o-mini': { input: 0.00015, output: 0.00060 },
-  'gpt-4o': { input: 0.00250, output: 0.01000 },
   'gpt-4o-mini-2024-07-18': { input: 0.00015, output: 0.00060 },
-  'gpt-4-turbo': { input: 0.01000, output: 0.03000 },
-  'gpt-3.5-turbo': { input: 0.00050, output: 0.00150 },
+  'gpt-4-turbo': { input: 0.0100, output: 0.0300 },
+  'gpt-3.5-turbo': { input: 0.0005, output: 0.0015 },
 };
 
-const DEFAULT_EMBEDDING_RATE = 0.0001;
-const DEFAULT_CHAT_PRICING = { input: 0.0015, output: 0.0020 };
+const DEFAULT_CHAT_PRICING = { input: 0.0025, output: 0.0100 };
 
 const normalizeModelKey = (model?: string) => model?.toLowerCase().trim() ?? '';
-
-const estimateEmbeddingCost = (model: string, tokens: number) => {
-  const rate =
-    EMBEDDING_COST_PER_1K_TOKENS[normalizeModelKey(model)] ?? DEFAULT_EMBEDDING_RATE;
-  return (tokens / 1000) * rate;
-};
 
 const estimateChatCost = (
   model: string,
@@ -154,7 +144,7 @@ const getEmbeddingVectorDim = (model: string) => {
   return 1536;
 };
 
-export function ExperimentsPage({ darkMode, onNext }: ExperimentsPageProps) {
+export function ExperimentsPage({ onNext }: ExperimentsPageProps) {
   const { documents, setDocuments, tasks } = useDataset();
   const { pipelines } = usePipelines();
   const { latestRun, setLatestRun } = useExperimentResults();
@@ -515,6 +505,7 @@ export function ExperimentsPage({ darkMode, onNext }: ExperimentsPageProps) {
         const chunkConfig = currentPipeline.chunking ?? DEFAULT_PIPELINE.chunking;
         const retrieverK = currentPipeline.retriever?.topK ?? DEFAULT_PIPELINE.retriever.topK;
         const isBaselinePipeline = pipelineId === baselinePipelineId;
+        const pipelineEmbeddingModel = currentPipeline.embedding?.model;
 
         setStage('chunking');
         computePipelineProgress(index, 0);
@@ -542,8 +533,10 @@ export function ExperimentsPage({ darkMode, onNext }: ExperimentsPageProps) {
           });
         });
 
-        await upsertChunks({
+        const upsertResponse = await upsertChunks({
           pipelineId,
+          resetCollection: true,
+          embeddingModel: pipelineEmbeddingModel,
           chunks: chunks.map((chunk) => ({
             id: chunk.id,
             text: chunk.content,
@@ -559,7 +552,15 @@ export function ExperimentsPage({ darkMode, onNext }: ExperimentsPageProps) {
           })),
         });
 
-        appendLog(`[${pipelineName}] Chunks embedded and stored in Qdrant successfully.`);
+        const targetCollectionName = upsertResponse.collection;
+        const vectorSize = upsertResponse.vectorSize;
+        appendLog(
+          `[${pipelineName}] Chunks embedded and stored in Qdrant${
+            targetCollectionName ? ` collection "${targetCollectionName}"` : ''
+          }${
+            vectorSize ? ` (vector size ${vectorSize})` : ''
+          } successfully.`
+        );
         computePipelineProgress(index, 0.25);
 
         setStage('answering');
@@ -585,6 +586,8 @@ export function ExperimentsPage({ darkMode, onNext }: ExperimentsPageProps) {
             question: task.question,
             topK: retrieverK,
             model: currentPipeline.llm?.model,
+            collectionName: targetCollectionName,
+            embeddingModel: pipelineEmbeddingModel,
           });
 
           const matches = (response.matches ?? []).map((match) => {
@@ -711,10 +714,9 @@ export function ExperimentsPage({ darkMode, onNext }: ExperimentsPageProps) {
         );
 
         const totalQuestions = readyTasks.length;
-        const embeddingModel = currentPipeline.embedding?.model ?? 'text-embedding-3-small';
-        const vectorDim = getEmbeddingVectorDim(embeddingModel);
+        const embeddingModelName = pipelineEmbeddingModel ?? 'text-embedding-3-small';
+        const vectorDim = getEmbeddingVectorDim(embeddingModelName);
         const totalEmbeddingTokens = chunks.reduce((sum, chunk) => sum + chunk.tokenEstimate, 0);
-        const embeddingCost = estimateEmbeddingCost(embeddingModel, totalEmbeddingTokens);
 
         const judgePromptTokens = judgeResponse.details.reduce(
           (sum, detail) => sum + (detail.usage?.promptTokens ?? 0),
@@ -753,16 +755,14 @@ export function ExperimentsPage({ darkMode, onNext }: ExperimentsPageProps) {
 
         const tokensUsed = totalAnswerTokens + judgeTotalTokens;
         const latencyP95Seconds = latencyP95Ms / 1000;
-        const costPerQuery = totalQuestions
-          ? (embeddingCost + answerCost + judgeCost) / totalQuestions
-          : 0;
+        const costPerQuery = totalQuestions ? answerCost / totalQuestions : 0;
 
         const pipelineMetrics: PipelineMetrics = {
           precisionAt5: Number(judgeResponse.passRate.toFixed(2)),
           recallAt5: Number(judgeResponse.averageScores.contextPrecision.toFixed(2)),
           latencyP95: Number(latencyP95Seconds.toFixed(2)),
           groundedness: Number(judgeResponse.averageScores.groundedness.toFixed(2)),
-          costPerQuery: Number(costPerQuery.toFixed(3)),
+          costPerQuery: Number(costPerQuery.toFixed(4)),
           tokensUsed: Math.round(tokensUsed),
         };
 
@@ -787,11 +787,10 @@ export function ExperimentsPage({ darkMode, onNext }: ExperimentsPageProps) {
           metrics: pipelineMetrics,
           chunkingSummary: chunkSummary,
           embeddingSummary: {
-            model: embeddingModel,
+            model: embeddingModelName,
             vectorDim,
             totalChunks: chunkSummary.totalChunks,
             totalTokens: totalEmbeddingTokens,
-            estimatedCostUsd: Number(embeddingCost.toFixed(4)),
           },
           retrievalSummary: {
             topK: retrieverK,
@@ -872,12 +871,12 @@ export function ExperimentsPage({ darkMode, onNext }: ExperimentsPageProps) {
   };
 
   return (
-    <div className={`p-8 ${darkMode ? 'bg-zinc-900' : 'bg-zinc-50'}`}>
+    <div className="p-8 bg-zinc-50">
       <div className="max-w-7xl mx-auto space-y-6">
         <div className="flex items-center justify-between">
           <div>
-            <h2 className={darkMode ? 'text-zinc-100' : 'text-zinc-900'}>Experiment Runner</h2>
-            <p className={`${darkMode ? 'text-zinc-400' : 'text-zinc-600'}`}>
+            <h2 className="text-zinc-900">Experiment Runner</h2>
+            <p className="text-zinc-600">
               Upload documents, embed them with Qdrant, and evaluate answers with the LLM.
             </p>
           </div>
@@ -888,18 +887,12 @@ export function ExperimentsPage({ darkMode, onNext }: ExperimentsPageProps) {
         </div>
 
         {error && (
-          <Card
-            className={
-              darkMode
-                ? 'bg-red-950/40 border-red-500/60 text-red-200'
-                : 'border-red-300 bg-red-50 text-red-700'
-            }
-          >
+          <Card className="border-red-300 bg-red-50 text-red-700">
             <CardContent className="py-4 text-sm">{error}</CardContent>
           </Card>
         )}
 
-        <Card className={darkMode ? 'bg-zinc-800 border-zinc-700' : ''}>
+        <Card>
           <CardHeader>
             <div className="flex items-center justify-between">
               <CardTitle>Experiment Progress</CardTitle>
@@ -922,9 +915,7 @@ export function ExperimentsPage({ darkMode, onNext }: ExperimentsPageProps) {
               <span className="capitalize">{stage}</span>
             </div>
 
-            <div
-              className={`max-h-48 overflow-y-auto overflow-x-hidden text-sm pr-2 ${darkMode ? 'text-zinc-300' : 'text-zinc-700'}`}
-            >
+            <div className="max-h-48 overflow-y-auto overflow-x-hidden text-sm pr-2 text-zinc-700">
               {statusLog.length === 0 ? (
                 <p className="opacity-60">Status updates will appear here once the experiment starts.</p>
               ) : (
@@ -939,7 +930,7 @@ export function ExperimentsPage({ darkMode, onNext }: ExperimentsPageProps) {
           </CardContent>
         </Card>
 
-        <Card className={darkMode ? 'bg-zinc-800 border-zinc-700' : ''}>
+        <Card>
           <CardHeader className="space-y-3">
             <div className="flex items-start justify-between gap-3">
               <CardTitle>Question &amp; Answer Review</CardTitle>
@@ -952,14 +943,12 @@ export function ExperimentsPage({ darkMode, onNext }: ExperimentsPageProps) {
                       setSelectedPipelineId(value);
                     }}
                   >
-                    <SelectTrigger
-                      className={`${darkMode ? 'bg-zinc-900 border-zinc-700' : ''} w-48`}
-                    >
+                    <SelectTrigger className="w-48">
                       <SelectValue placeholder="Choose pipeline">
                         {pipelineNameLookup[activePipelineId] ?? 'Choose pipeline'}
                       </SelectValue>
                     </SelectTrigger>
-                    <SelectContent className={darkMode ? 'bg-zinc-900 border-zinc-700' : ''}>
+                    <SelectContent>
                       {pipelineOptions.map((option) => (
                         <SelectItem key={option.id} value={option.id}>
                           {option.name}
@@ -973,31 +962,31 @@ export function ExperimentsPage({ darkMode, onNext }: ExperimentsPageProps) {
           </CardHeader>
           <CardContent>
             {displayedTaskResults.length === 0 ? (
-              <p className={darkMode ? 'text-zinc-400' : 'text-zinc-600'}>
+              <p className="text-zinc-600">
                 Run an experiment to generate answers for your evaluation tasks.
               </p>
             ) : (
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Question</TableHead>
-                    <TableHead>Expected</TableHead>
-                    <TableHead>Model Answer</TableHead>
-                    <TableHead>Top Context</TableHead>
+                    <TableHead className="w-[22%]">Question</TableHead>
+                    <TableHead className="w-[15%]">Expected</TableHead>
+                    <TableHead className="w-[38%]">Model Answer</TableHead>
+                    <TableHead className="w-[25%]">Top Context</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {displayedTaskResults.map((result) => (
                     <TableRow key={result.taskId}>
-                      <TableCell className="align-top w-[25%]">
+                      <TableCell className="align-top w-[22%]">
                         <div className="space-y-1">
                           <div className="font-medium">{result.question}</div>
                         </div>
                       </TableCell>
-                      <TableCell className="align-top w-[20%]">
+                      <TableCell className="align-top w-[15%]">
                         {result.expectedAnswer || '—'}
                       </TableCell>
-                      <TableCell className="align-top w-[30%] whitespace-pre-wrap">
+                      <TableCell className="align-top w-[38%] whitespace-pre-wrap">
                         {result.answer}
                       </TableCell>
                       <TableCell className="align-top w-[25%]">
@@ -1008,7 +997,7 @@ export function ExperimentsPage({ darkMode, onNext }: ExperimentsPageProps) {
                             {result.matches.slice(0, 2).map((match) => (
                               <div
                                 key={match.id}
-                                className={`p-2 rounded border ${darkMode ? 'border-zinc-700' : 'border-zinc-200'}`}
+                                className="p-2 rounded border border-zinc-200"
                               >
                                 <div className="flex items-center gap-2 text-xs uppercase tracking-wide opacity-60 mb-1">
                                   <FileText size={12} />

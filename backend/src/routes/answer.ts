@@ -8,6 +8,7 @@ interface AnswerRequestBody {
   topK?: number;
   collectionName?: string;
   model?: string;
+  embeddingModel?: string;
 }
 
 const buildAnswerPrompt = (question: string, contextSnippets: string[]) => {
@@ -34,24 +35,36 @@ export const createAnswerHandler = (
   qdrant: QdrantClient
 ) =>
   async (req: Request<unknown, unknown, AnswerRequestBody>, res: Response) => {
-    const { pipelineId, question, topK = 5, collectionName, model } = req.body;
+    const { pipelineId, question, topK = 5, collectionName, model, embeddingModel } = req.body;
+    const normalizedPipelineId = typeof pipelineId === 'string' ? pipelineId.trim() : '';
+    const normalizedEmbeddingModel =
+      typeof embeddingModel === 'string' ? embeddingModel.trim() : undefined;
 
-    if (!pipelineId || !question || !question.trim()) {
+    if (!normalizedPipelineId || !question || !question.trim()) {
       return res.status(400).json({ error: 'pipelineId and question are required.' });
     }
 
     try {
       const startedAt = Date.now();
-      const { vectors } = await openai.createEmbeddings([question]);
+      const { vectors } = await openai.createEmbeddings([question], {
+        model: normalizedEmbeddingModel,
+      });
       if (!vectors.length) {
         throw new Error('Embedding API returned no vectors.');
       }
 
+      const vectorSize = vectors[0].length;
+      const targetCollection = qdrant.collectionNameForPipeline(
+        vectorSize,
+        normalizedPipelineId,
+        collectionName
+      );
+
       const matches = await qdrant.search(
         vectors[0],
         Math.max(1, Math.min(20, topK)),
-        { pipelineId },
-        collectionName
+        { pipelineId: normalizedPipelineId },
+        targetCollection
       );
 
       const contextSnippets = matches
@@ -70,6 +83,8 @@ export const createAnswerHandler = (
         matches,
         usage: completion.usage,
         latencyMs,
+        collection: targetCollection,
+        vectorSize,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unexpected error';

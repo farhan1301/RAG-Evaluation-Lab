@@ -22,7 +22,7 @@ export const METRIC_DEFINITIONS: MetricDefinition[] = [
   { key: 'recallAt5', label: 'Context Precision', better: 'higher', format: (value) => `${(value * 100).toFixed(0)}%` },
   { key: 'latencyP95', label: 'Latency p95 (s)', better: 'lower', format: (value) => `${value.toFixed(1)}s` },
   { key: 'groundedness', label: 'Groundedness', better: 'higher', format: (value) => value.toFixed(2) },
-  { key: 'costPerQuery', label: 'Cost per Query', better: 'lower', format: (value) => `$${value.toFixed(3)}` },
+  { key: 'costPerQuery', label: 'Cost per Query', better: 'lower', format: (value) => `$${value.toFixed(4)}` },
   { key: 'tokensUsed', label: 'Tokens Used', better: 'lower', format: (value) => Math.round(value).toLocaleString() },
 ];
 
@@ -33,7 +33,6 @@ export interface EmbeddingSummary {
   vectorDim: number;
   totalChunks: number;
   totalTokens: number;
-  estimatedCostUsd: number;
 }
 
 export interface RetrievalSummary {

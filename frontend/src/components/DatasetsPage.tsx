@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Upload, FileText, Plus, Trash2, Sparkles } from 'lucide-react';
+import { Upload, FileText, Plus, Trash2, Sparkles, AlertCircle, CheckCircle2, Info } from 'lucide-react';
 import { Button } from './ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
 import { Input } from './ui/input';
@@ -8,9 +8,10 @@ import { Progress } from './ui/progress';
 import { useDataset } from '../state/dataset';
 import type { DatasetDocument, DatasetTask } from '../types/dataset';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
+import { Alert, AlertDescription, AlertTitle } from './ui/alert';
+import { parseTaskCsv } from '../lib/taskCsv';
 
 interface DatasetsPageProps {
-  darkMode: boolean;
   onNext: () => void;
 }
 
@@ -28,9 +29,17 @@ const arrayBufferToBase64 = (buffer: ArrayBuffer) => {
 const UPLOAD_SNIPPET =
   'Ready for parsing. Configure parsing strategy in the Pipelines step.';
 
-export function DatasetsPage({ darkMode, onNext }: DatasetsPageProps) {
+type CsvFeedback = {
+  type: 'success' | 'warning' | 'error';
+  message: string;
+  details?: string[];
+};
+
+export function DatasetsPage({ onNext }: DatasetsPageProps) {
   const { documents, setDocuments, tasks, setTasks } = useDataset();
   const [uploading, setUploading] = useState(false);
+  const [csvImporting, setCsvImporting] = useState(false);
+  const [taskCsvFeedback, setTaskCsvFeedback] = useState<CsvFeedback | null>(null);
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const uploadedFiles = Array.from(e.target.files || []);
@@ -106,6 +115,50 @@ export function DatasetsPage({ darkMode, onNext }: DatasetsPageProps) {
     }
   };
 
+  const handleTaskCsvUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const [file] = Array.from(event.target.files ?? []);
+    if (!file) {
+      return;
+    }
+
+    setTaskCsvFeedback(null);
+    setCsvImporting(true);
+
+    try {
+      const text = await file.text();
+      const { tasks: parsedTasks, warnings } = parseTaskCsv(text);
+      const timestamp = Date.now();
+
+      setTasks(
+        parsedTasks.map((task, index) => ({
+          id: `${timestamp}-${index}`,
+          ...task,
+        }))
+      );
+
+      setTaskCsvFeedback({
+        type: warnings.length > 0 ? 'warning' : 'success',
+        message:
+          warnings.length > 0
+            ? `Imported ${parsedTasks.length} tasks from "${file.name}" with ${warnings.length} skipped row${warnings.length === 1 ? '' : 's'}.`
+            : `Imported ${parsedTasks.length} tasks from "${file.name}".`,
+        details: warnings.length > 0 ? warnings : undefined,
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Unable to parse CSV file.';
+      setTaskCsvFeedback({
+        type: 'error',
+        message,
+      });
+    } finally {
+      setCsvImporting(false);
+      if (event.target) {
+        event.target.value = '';
+      }
+    }
+  };
+
   const removeDocument = (id: string) => {
     setDocuments((prev) => prev.filter((doc) => doc.id !== id));
   };
@@ -171,7 +224,50 @@ export function DatasetsPage({ darkMode, onNext }: DatasetsPageProps) {
         expectedAnswer: 'Latency, scalability, and filtering capabilities',
         acceptanceRule: 'Must mention at least 2 factors',
       },
+      {
+        id: '4',
+        question: 'Why is it important to keep embeddings up to date?',
+        expectedAnswer: 'It ensures retrieval reflects the latest source information and avoids drift.',
+        acceptanceRule: 'Must mention refreshing or updating embeddings',
+      },
+      {
+        id: '5',
+        question: 'What chunk overlap pairs well with 256-512 token chunks to preserve context?',
+        expectedAnswer: 'Around 20% overlap keeps neighboring chunks connected',
+        acceptanceRule: 'Must mention 20% overlap',
+      },
+      {
+        id: '6',
+        question: 'Which evaluation dimensions should you compare when selecting an embedding model?',
+        expectedAnswer: 'Latency, accuracy, and cost should all be weighed',
+        acceptanceRule: 'Must mention at least two of latency, accuracy, or cost',
+      },
+      {
+        id: '7',
+        question: 'When would a larger embedding model be worth the extra cost?',
+        expectedAnswer: 'When the domain needs more semantic nuance or multilingual coverage',
+        acceptanceRule: 'Must reference nuance, multilingual, or higher accuracy requirements',
+      },
+      {
+        id: '8',
+        question: 'Besides similarity search, what capability should a vector database offer?',
+        expectedAnswer: 'Robust filtering or metadata-based queries to refine results',
+        acceptanceRule: 'Must mention filtering or metadata queries',
+      },
+      {
+        id: '9',
+        question: 'How do chunk size and overlap work together in retrieval pipelines?',
+        expectedAnswer: 'Larger chunks capture context while overlap prevents dropping linking details',
+        acceptanceRule: 'Must mention both chunk size and overlap',
+      },
+      {
+        id: '10',
+        question: 'What ecosystem consideration matters when choosing a vector database?',
+        expectedAnswer: 'Available tooling and integrations to streamline operations',
+        acceptanceRule: 'Must mention tooling, integrations, or ecosystem',
+      },
     ]);
+    setTaskCsvFeedback(null);
   };
 
   const addTask = () => {
@@ -195,18 +291,18 @@ export function DatasetsPage({ darkMode, onNext }: DatasetsPageProps) {
   };
 
   return (
-    <div className={`p-8 ${darkMode ? 'bg-zinc-900' : 'bg-zinc-50'}`}>
+    <div className="p-8 bg-zinc-50">
       <div className="max-w-6xl mx-auto space-y-6">
         {/* Header */}
         <div>
           <h2>Datasets & Tasks</h2>
-          <p className={`${darkMode ? 'text-zinc-400' : 'text-zinc-600'}`}>
+          <p className="text-zinc-600">
             Upload documents and define evaluation questions
           </p>
         </div>
 
         {/* Upload Section */}
-        <Card className={darkMode ? 'bg-zinc-800 border-zinc-700' : ''}>
+        <Card>
           <CardHeader>
             <CardTitle>Document Upload</CardTitle>
             <CardDescription>
@@ -214,11 +310,7 @@ export function DatasetsPage({ darkMode, onNext }: DatasetsPageProps) {
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div
-              className={`border-2 border-dashed rounded-lg p-8 text-center ${
-                darkMode ? 'border-zinc-700 bg-zinc-900/50' : 'border-zinc-300 bg-zinc-50'
-              }`}
-            >
+            <div className="border-2 border-dashed rounded-lg p-8 text-center border-zinc-300 bg-zinc-50">
               <Upload className="mx-auto mb-4 opacity-40" size={48} />
               <p className="mb-4">Drag and drop files here, or click to browse</p>
               <Input
@@ -241,9 +333,7 @@ export function DatasetsPage({ darkMode, onNext }: DatasetsPageProps) {
                 {documents.map((doc) => (
                   <div
                     key={doc.id}
-                    className={`p-4 rounded-lg border ${
-                      darkMode ? 'border-zinc-700 bg-zinc-900/50' : 'border-zinc-200 bg-white'
-                    }`}
+                    className="p-4 rounded-lg border border-zinc-200 bg-white"
                   >
                     <div className="flex items-start gap-3">
                       <FileText size={20} className="mt-1 opacity-60" />
@@ -266,20 +356,14 @@ export function DatasetsPage({ darkMode, onNext }: DatasetsPageProps) {
                         {doc.statusMessage && (
                           <p
                             className={`text-xs mb-2 ${
-                              doc.status === 'error'
-                                ? darkMode
-                                  ? 'text-red-300'
-                                  : 'text-red-600'
-                                : darkMode
-                                ? 'text-zinc-400'
-                                : 'text-zinc-600'
+                              doc.status === 'error' ? 'text-red-600' : 'text-zinc-600'
                             }`}
                           >
                             {doc.statusMessage}
                           </p>
                         )}
                         {doc.progress === 100 && doc.snippet && (
-                          <p className={`text-sm ${darkMode ? 'text-zinc-400' : 'text-zinc-600'}`}>
+                          <p className="text-sm text-zinc-600">
                             {doc.snippet}
                           </p>
                         )}
@@ -305,7 +389,7 @@ export function DatasetsPage({ darkMode, onNext }: DatasetsPageProps) {
         </Card>
 
         {/* Task Builder Section */}
-        <Card className={darkMode ? 'bg-zinc-800 border-zinc-700' : ''}>
+        <Card>
           <CardHeader>
             <div className="flex items-center justify-between">
               <div>
@@ -320,24 +404,68 @@ export function DatasetsPage({ darkMode, onNext }: DatasetsPageProps) {
               </Button>
             </div>
           </CardHeader>
-          <CardContent>
+          <CardContent className="space-y-4">
+            <div className="rounded-lg border border-dashed border-zinc-300 bg-zinc-50 p-4 md:flex md:items-center md:justify-between">
+              <div className="mb-3 md:mb-0 md:max-w-xl">
+                <p className="font-medium">Import from CSV</p>
+                <p className="text-sm text-zinc-600">
+                  Upload a CSV with the headers <code>question</code>, <code>expected_answer</code>, and{' '}
+                  <code>acceptance_rule</code>. Importing replaces the current task list.
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <Input
+                  type="file"
+                  accept=".csv"
+                  onChange={handleTaskCsvUpload}
+                  className="hidden"
+                  id="task-csv-upload"
+                />
+                <Button asChild variant="outline" disabled={csvImporting}>
+                  <label htmlFor="task-csv-upload" className="cursor-pointer">
+                    {csvImporting ? 'Importing…' : 'Upload CSV'}
+                  </label>
+                </Button>
+              </div>
+            </div>
+
+            {taskCsvFeedback && (
+              <Alert variant={taskCsvFeedback.type === 'error' ? 'destructive' : 'default'}>
+                {taskCsvFeedback.type === 'error' ? (
+                  <AlertCircle size={16} className="mt-0.5" />
+                ) : taskCsvFeedback.type === 'warning' ? (
+                  <Info size={16} className="mt-0.5" />
+                ) : (
+                  <CheckCircle2 size={16} className="mt-0.5" />
+                )}
+                <AlertTitle>{taskCsvFeedback.message}</AlertTitle>
+                {taskCsvFeedback.details && (
+                  <AlertDescription>
+                    {taskCsvFeedback.details.map((detail) => (
+                      <p key={detail}>{detail}</p>
+                    ))}
+                  </AlertDescription>
+                )}
+              </Alert>
+            )}
+
             {tasks.length === 0 ? (
-              <div className={`text-center py-8 ${darkMode ? 'text-zinc-500' : 'text-zinc-400'}`}>
+              <div className="text-center py-8 text-zinc-400">
                 No tasks yet. Add a question or load the sample dataset.
               </div>
             ) : (
               <div className="space-y-4">
-                {tasks.map((task) => (
+                {tasks.map((task, index) => (
                   <div
                     key={task.id}
-                    className={`p-4 rounded-lg border ${
-                      darkMode ? 'border-zinc-700 bg-zinc-900/50' : 'border-zinc-200 bg-white'
-                    }`}
+                    className="p-4 rounded-lg border border-zinc-200 bg-white"
                   >
                     <div className="flex items-start gap-3">
                       <div className="flex-1 space-y-3">
                         <div>
-                          <label className="text-sm opacity-60 block mb-1">Question</label>
+                          <label className="text-sm opacity-60 block mb-1">
+                            Question {index + 1}
+                          </label>
                           <Textarea
                             value={task.question}
                             onChange={(e) => updateTask(task.id, 'question', e.target.value)}

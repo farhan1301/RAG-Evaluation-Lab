@@ -7,6 +7,7 @@ interface SearchRequestBody {
   question: string;
   topK?: number;
   collectionName?: string;
+  embeddingModel?: string;
 }
 
 export const createSearchHandler = (
@@ -14,26 +15,38 @@ export const createSearchHandler = (
   qdrant: QdrantClient
 ) =>
   async (req: Request<unknown, unknown, SearchRequestBody>, res: Response) => {
-    const { pipelineId, question, topK = 5, collectionName } = req.body;
+    const { pipelineId, question, topK = 5, collectionName, embeddingModel } = req.body;
+    const normalizedPipelineId = typeof pipelineId === 'string' ? pipelineId.trim() : '';
+    const normalizedEmbeddingModel =
+      typeof embeddingModel === 'string' ? embeddingModel.trim() : undefined;
 
-    if (!pipelineId || !question || !question.trim()) {
+    if (!normalizedPipelineId || !question || !question.trim()) {
       return res.status(400).json({ error: 'pipelineId and question are required.' });
     }
 
     try {
-      const { vectors } = await openai.createEmbeddings([question]);
+      const { vectors } = await openai.createEmbeddings([question], {
+        model: normalizedEmbeddingModel,
+      });
       if (!vectors.length) {
         throw new Error('Embedding API returned no vectors.');
       }
 
-      const results = await qdrant.search(
-        vectors[0],
-        Math.max(1, Math.min(50, topK)),
-        { pipelineId },
+      const vectorSize = vectors[0].length;
+      const targetCollection = qdrant.collectionNameForPipeline(
+        vectorSize,
+        normalizedPipelineId,
         collectionName
       );
 
-      res.json({ matches: results });
+      const results = await qdrant.search(
+        vectors[0],
+        Math.max(1, Math.min(50, topK)),
+        { pipelineId: normalizedPipelineId },
+        targetCollection
+      );
+
+      res.json({ matches: results, collection: targetCollection, vectorSize });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unexpected error';
       res.status(500).json({ error: message });

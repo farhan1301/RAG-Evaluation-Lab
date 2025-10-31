@@ -8,11 +8,16 @@ interface UpsertChunksRequest {
   pipelineId: string;
   documentId?: string;
   collectionName?: string;
+  resetCollection?: boolean;
+  embeddingModel?: string;
   chunks: ChunkPayload[];
 }
 
 interface UpsertChunksResponse {
   upserted: number;
+  collection?: string;
+  vectorSize?: number;
+  embeddingModel?: string;
 }
 
 interface SearchMatchesResponse {
@@ -21,6 +26,8 @@ interface SearchMatchesResponse {
     score: number;
     payload: Record<string, unknown>;
   }>;
+  collection?: string;
+  vectorSize?: number;
 }
 
 interface SearchRequest {
@@ -28,6 +35,16 @@ interface SearchRequest {
   question: string;
   topK?: number;
   collectionName?: string;
+  embeddingModel?: string;
+}
+
+interface AnswerRequestPayload {
+  pipelineId: string;
+  question: string;
+  topK?: number;
+  collectionName?: string;
+  model?: string;
+  embeddingModel?: string;
 }
 
 interface AnswerResponse {
@@ -43,6 +60,8 @@ interface AnswerResponse {
     totalTokens: number;
   };
   latencyMs?: number;
+  collection?: string;
+  vectorSize?: number;
 }
 
 interface JudgeEvaluationInput {
@@ -156,13 +175,7 @@ export const searchMatches = async (
 };
 
 export const answerQuestion = async (
-  payload: {
-    pipelineId: string;
-    question: string;
-    topK?: number;
-    collectionName?: string;
-    model?: string;
-  }
+  payload: AnswerRequestPayload
 ): Promise<AnswerResponse> => {
   const response = await fetch(withBase('/api/answer'), {
     method: 'POST',

@@ -1,12 +1,13 @@
 # <img src="favicon/favicon-32x32.png" alt="RAG Evaluation Lab icon" width="28" height="28" /> RAG Evaluation Lab
 
-End-to-end workspace for building and evaluating retrieval-augmented generation (RAG) pipelines. The repository is now split into a `frontend` Vite/React application and a `backend` Express service that proxies OpenAI and Qdrant.
+End-to-end workspace for building, running, and evaluating retrieval-augmented generation (RAG) pipelines. The project is split into a `frontend` Vite/React application that orchestrates datasets, pipelines, experiments, reporting, history, documentation, and settings, and a `backend` Express service that handles OpenAI, Qdrant, and LlamaParse integrations.
 
 ## Repository Layout
-- `frontend/` – Vite + React UI, Tailwind styles, component library, and build assets.
-- `backend/` – TypeScript Express API with OpenAI + Qdrant helpers.
-- `reference/` – Sample datasets, mock evaluations, and design docs (read-only).
-- `.env` – Local secrets consumed by the backend (`dotenv` loads from the repo root).
+- `frontend/` – Vite + React UI with Tailwind styles, Radix components, and feature pages (Datasets, Pipelines, Experiments, Reports, History, Documentation, Settings).
+- `backend/` – TypeScript Express API with OpenAI + Qdrant helpers, LlamaParse ingestion, and evaluation endpoints.
+- `favicon/` – Application icons consumed by the frontend.
+- `.env.example` – Template with every environment variable the apps consume.
+- `.env.local` – Git-ignored overrides; copy from `.env.example` for local development.
 
 ## Prerequisites
 - Node.js 18 or newer
@@ -16,7 +17,12 @@ End-to-end workspace for building and evaluating retrieval-augmented generation 
 - LlamaParse (Llama Cloud) account and API key for document ingestion
 
 ## Initial Setup
-Install dependencies for each app:
+Copy the environment template and install dependencies for each app:
+
+```bash
+cp .env.example .env.local
+# edit .env.local with real endpoints and secrets
+```
 
 ```bash
 # frontend dependencies
@@ -28,7 +34,7 @@ cd ../backend
 npm install
 ```
 
-> **Security reminder:** The committed `.env` file contains safe placeholders only. Put real secrets in `.env.local` (gitignored) or inject them via your shell/secret manager to keep production credentials out of version control.
+> **Security reminder:** Never commit real API keys. Keep secrets in `.env.local` (gitignored) or inject them via your shell/secret manager. The backend loads `.env` first (if present) and then `.env.local` so you can layer per-machine overrides.
 
 ## Environment Variables
 Both apps read environment variables from the repository root. The backend hydrates via `dotenv` and the frontend points Vite to the same directory (`envDir`). Create a safe `.env` (or `.env.local` to override locally) with the following keys:
@@ -41,10 +47,11 @@ Both apps read environment variables from the repository root. The backend hydra
 | `QDRANT_URL` | ✅ | Base URL for your Qdrant cluster | – |
 | `QDRANT_API_KEY` | ⬜️ | API key if Qdrant requires auth | – |
 | `QDRANT_COLLECTION` | ⬜️ | Default collection name for vectors | `rag-eval-chunks` |
-| `LLAMA_CLOUD_API_KEY` | ✅ | API key for LlamaParse document parsing | – |
-| `LLAMA_CLOUD_BASE_URL` | ⬜️ | Override LlamaParse API host | `https://api.llamaindex.ai` |
+| `LLAMA_CLOUD_API_KEY` or `LLAMA_PARSE_API_KEY` | ✅ | API key for LlamaParse document parsing | – |
+| `LLAMA_CLOUD_BASE_URL` | ⬜️ | Override LlamaParse API host | `https://api.cloud.llamaindex.ai/api` |
 | `PORT` | ⬜️ | Backend HTTP port | `7070` |
-| `CORS_ORIGINS` | ⬜️ | Comma-separated list of allowed browser origins | `http://localhost:5173` |
+| `VITE_BACKEND_URL` | ✅ | Frontend base URL for backend requests | `http://localhost:7070` |
+| `CORS_ORIGINS` | ⬜️ | Comma-separated list of allowed browser origins | `http://127.0.0.1:3000,http://localhost:3000,http://localhost:5173,http://127.0.0.1:5173` |
 
 Frontend-only environment overrides still need the `VITE_` prefix; set them in the root `.env` as well (or `.env.local`) and they will be surfaced to the Vite dev server.
 
@@ -70,7 +77,7 @@ The backend exposes:
 - `POST /api/judge` – Score generated answers against expected outcomes and context using an LLM evaluator.
 - `POST /api/parse` – Send raw files to LlamaParse and return normalized text for downstream chunking.
 
-After an experiment run, the frontend now records metrics derived from these judge evaluations. Pass rate, context precision, groundedness, latency, cost, and token usage are all taken from real model calls rather than heuristics, giving the reports page production-ready quality signals.
+After an experiment run, the frontend records metrics derived from these judge evaluations. Pass rate, context precision, groundedness, latency, cost, and token usage are all calculated from real model calls rather than heuristics, powering the reports and history views with production-ready quality signals.
 
 ## Production Builds
 
@@ -99,6 +106,13 @@ npm run build:backend
 ```
 
 These scripts proxy into the respective `frontend`/`backend` packages via `npm --prefix`.
+
+## Key UI Areas
+- **Datasets & Tasks:** Upload documents, parse them through LlamaParse, and define evaluation questions.
+- **Pipelines:** Configure chunking, embedding, retrieval, reranking, answer generation, and judge settings per experiment pipeline.
+- **Experiments:** Run one or more pipelines end-to-end, stream progress, capture chunk previews, and persist detailed results.
+- **Reports & History:** Review aggregated metrics, cost estimates, per-question breakdowns, and revisit previous runs.
+- **Documentation & Settings:** In-app guides, API key reminders, and placeholders for future account/security controls.
 
 ## Troubleshooting
 - `ERR_UNKNOWN_FILE_EXTENSION ".ts"` – Occurs when Node tries to execute TypeScript directly. Use the provided `npm run dev` scripts so the loader/transpiler is applied.

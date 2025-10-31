@@ -30,10 +30,15 @@ export class OpenAIClient {
     this.config = config;
   }
 
-  async createEmbeddings(inputs: string[], signal?: AbortSignal): Promise<EmbeddingResponse> {
+  async createEmbeddings(
+    inputs: string[],
+    options: { model?: string; signal?: AbortSignal } = {}
+  ): Promise<EmbeddingResponse> {
     if (!inputs.length) {
       return { vectors: [] };
     }
+
+    const targetModel = options.model?.trim() || this.config.openaiEmbeddingModel;
 
     const response = await fetch('https://api.openai.com/v1/embeddings', {
       method: 'POST',
@@ -42,10 +47,10 @@ export class OpenAIClient {
         Authorization: `Bearer ${this.config.openaiApiKey}`,
       },
       body: JSON.stringify({
-        model: this.config.openaiEmbeddingModel,
+        model: targetModel,
         input: inputs,
       }),
-      signal,
+      signal: options.signal,
     });
 
     if (!response.ok) {
@@ -72,19 +77,32 @@ export class OpenAIClient {
   ): Promise<ChatResponse> {
     const { model, temperature, maxTokens, responseFormat } = options;
 
+    const resolvedModel = (model ?? this.config.openaiChatModel).trim();
+    const requiresDefaultTemperature =
+      resolvedModel.toLowerCase().startsWith('gpt-5') &&
+      (resolvedModel.toLowerCase().includes('mini') ||
+        resolvedModel.toLowerCase().includes('nano'));
+
+    const body: Record<string, unknown> = {
+      model: resolvedModel,
+      messages,
+      ...(typeof maxTokens === 'number' ? { max_tokens: maxTokens } : {}),
+      ...(responseFormat ? { response_format: responseFormat } : {}),
+    };
+
+    if (!requiresDefaultTemperature) {
+      body.temperature = typeof temperature === 'number' ? temperature : 0.2;
+    } else if (typeof temperature === 'number' && temperature === 1) {
+      body.temperature = 1;
+    }
+
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${this.config.openaiApiKey}`,
       },
-      body: JSON.stringify({
-        model: model ?? this.config.openaiChatModel,
-        temperature: temperature ?? 0.2,
-        messages,
-        ...(typeof maxTokens === 'number' ? { max_tokens: maxTokens } : {}),
-        ...(responseFormat ? { response_format: responseFormat } : {}),
-      }),
+      body: JSON.stringify(body),
       signal,
     });
 

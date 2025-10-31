@@ -36,9 +36,26 @@ const writeToFile = (level: string, message: string, context?: Record<string, un
   });
 };
 
+const shouldSuppressConsoleLog = (message: string): boolean => {
+  const suppressedPrefixes = [
+    { prefix: 'llama-parse ', envVar: 'LLAMA_PARSE_CONSOLE_LOGS' as const },
+    { prefix: 'parse-route ', envVar: 'PARSE_ROUTE_CONSOLE_LOGS' as const },
+  ];
+
+  for (const { prefix, envVar } of suppressedPrefixes) {
+    if (message.startsWith(prefix)) {
+      return process.env[envVar] !== 'true';
+    }
+  }
+
+  return false;
+};
+
 const log = (level: 'info' | 'warn' | 'error', message: string, context?: Record<string, unknown>) => {
-  const logger = console[level] ?? console.log;
-  logger(`[${level}] ${message}`, context ?? '');
+  if (!shouldSuppressConsoleLog(message)) {
+    const logger = console[level] ?? console.log;
+    logger(`[${level}] ${message}`, context ?? '');
+  }
   writeToFile(level, message, context);
 };
 

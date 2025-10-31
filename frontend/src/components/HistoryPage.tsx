@@ -4,11 +4,10 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/
 import { Badge } from './ui/badge';
 
 interface HistoryPageProps {
-  darkMode: boolean;
   onViewReport: (id: number) => void;
 }
 
-export function HistoryPage({ darkMode, onViewReport }: HistoryPageProps) {
+export function HistoryPage({ onViewReport }: HistoryPageProps) {
   const experiments = [
     {
       id: 12,
@@ -63,12 +62,12 @@ export function HistoryPage({ darkMode, onViewReport }: HistoryPageProps) {
   ];
 
   return (
-    <div className={`p-8 ${darkMode ? 'bg-zinc-900' : 'bg-zinc-50'}`}>
+    <div className="p-8 bg-zinc-50">
       <div className="max-w-7xl mx-auto space-y-6">
         {/* Header */}
         <div>
-          <h2 className={darkMode ? 'text-zinc-100' : 'text-zinc-900'}>Experiment History</h2>
-          <p className={`${darkMode ? 'text-zinc-400' : 'text-zinc-600'}`}>
+          <h2 className="text-zinc-900">Experiment History</h2>
+          <p className="text-zinc-600">
             View and manage your past experiments
           </p>
         </div>
@@ -78,18 +77,18 @@ export function HistoryPage({ darkMode, onViewReport }: HistoryPageProps) {
           {experiments.map((experiment) => (
             <Card
               key={experiment.id}
-              className={`${darkMode ? 'bg-zinc-800 border-zinc-700' : ''} hover:shadow-md transition-shadow`}
+              className="hover:shadow-md transition-shadow"
             >
               <CardContent className="pt-6">
                 <div className="flex items-center justify-between">
                   <div className="flex items-start gap-4 flex-1">
-                    <div className={`p-3 rounded-lg ${darkMode ? 'bg-zinc-900' : 'bg-zinc-100'}`}>
+                    <div className="p-3 rounded-lg bg-zinc-100">
                       <Clock size={24} className="opacity-60" />
                     </div>
                     
                     <div className="flex-1">
                       <div className="flex items-center gap-3 mb-2">
-                        <h3 className={darkMode ? 'text-zinc-100' : 'text-zinc-900'}>
+                        <h3 className="text-zinc-900">
                           {experiment.name}
                         </h3>
                         <Badge
@@ -99,42 +98,42 @@ export function HistoryPage({ darkMode, onViewReport }: HistoryPageProps) {
                         </Badge>
                       </div>
                       
-                      <p className={`text-sm mb-3 ${darkMode ? 'text-zinc-400' : 'text-zinc-600'}`}>
+                      <p className="text-sm mb-3 text-zinc-600">
                         {experiment.date}
                       </p>
                       
                       <div className="flex items-center gap-6 text-sm">
                         <div>
-                          <span className={darkMode ? 'text-zinc-400' : 'text-zinc-600'}>
+                          <span className="text-zinc-600">
                             Datasets:{' '}
                           </span>
-                          <span className={darkMode ? 'text-zinc-100' : 'text-zinc-900'}>
+                          <span className="text-zinc-900">
                             {experiment.datasets}
                           </span>
                         </div>
                         <div>
-                          <span className={darkMode ? 'text-zinc-400' : 'text-zinc-600'}>
+                          <span className="text-zinc-600">
                             Pipelines:{' '}
                           </span>
-                          <span className={darkMode ? 'text-zinc-100' : 'text-zinc-900'}>
+                          <span className="text-zinc-900">
                             {experiment.pipelines}
                           </span>
                         </div>
                         {experiment.status === 'Complete' && (
                           <>
                             <div>
-                              <span className={darkMode ? 'text-zinc-400' : 'text-zinc-600'}>
+                              <span className="text-zinc-600">
                                 Best:{' '}
                               </span>
-                              <span className={darkMode ? 'text-zinc-100' : 'text-zinc-900'}>
+                              <span className="text-zinc-900">
                                 Pipeline {experiment.bestPipeline}
                               </span>
                             </div>
                             <div>
-                              <span className={darkMode ? 'text-zinc-400' : 'text-zinc-600'}>
+                              <span className="text-zinc-600">
                                 Score:{' '}
                               </span>
-                              <span className={darkMode ? 'text-green-400' : 'text-green-600'}>
+                              <span className="text-green-600">
                                 {experiment.score.toFixed(2)}
                               </span>
                             </div>
@@ -172,13 +171,13 @@ export function HistoryPage({ darkMode, onViewReport }: HistoryPageProps) {
 
         {/* Empty State for no experiments */}
         {experiments.length === 0 && (
-          <Card className={darkMode ? 'bg-zinc-800 border-zinc-700' : ''}>
+          <Card>
             <CardContent className="py-12 text-center">
               <Clock size={48} className="mx-auto mb-4 opacity-40" />
-              <h3 className={`mb-2 ${darkMode ? 'text-zinc-100' : 'text-zinc-900'}`}>
+              <h3 className="mb-2 text-zinc-900">
                 No experiments yet
               </h3>
-              <p className={`mb-4 ${darkMode ? 'text-zinc-400' : 'text-zinc-600'}`}>
+              <p className="mb-4 text-zinc-600">
                 Start by uploading documents and creating your first pipeline
               </p>
               <Button>Get Started</Button>
