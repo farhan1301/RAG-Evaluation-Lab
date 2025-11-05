@@ -159,7 +159,7 @@ export function DocumentationPage() {
                     {
                       title: 'Connect API Keys',
                       description:
-                        'Add your OpenAI (required), Cohere (optional), and Anthropic (optional) keys in Settings to enable different model providers.',
+                        'Add your LlamaParse (required) and OpenAI (required) keys in Settings. Cohere and Anthropic integrations stay optional for extra model coverage.',
                     },
                     {
                       title: 'Upload Documents',
@@ -193,6 +193,7 @@ export function DocumentationPage() {
                 </ol>
               </CardContent>
             </Card>
+
           </TabsContent>
 
           <TabsContent value="api-keys" className="space-y-6">
@@ -219,6 +220,61 @@ export function DocumentationPage() {
             </Card>
 
             <Accordion type="single" collapsible className="space-y-3">
+              <AccordionItem
+                value="llamaparse"
+                className="border rounded-lg px-4 border-zinc-200"
+              >
+                <AccordionTrigger>
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-lg flex items-center justify-center bg-blue-100">
+                      <FileText className="text-blue-500" size={20} />
+                    </div>
+                    <div className="text-left">
+                      <div className="font-medium">LlamaParse API Key</div>
+                      <div className="text-sm opacity-60">Required for document ingestion</div>
+                    </div>
+                  </div>
+                </AccordionTrigger>
+                <AccordionContent className="space-y-4 pt-4">
+                  <div>
+                    <h4 className="mb-2">How to Get Your LlamaParse API Key:</h4>
+                    <ol className="space-y-2 text-sm ml-4 list-decimal">
+                      <li>
+                        Create an account at{' '}
+                        <a
+                          href="https://cloud.llamaindex.ai"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-blue-500 hover:underline inline-flex items-center gap-1"
+                        >
+                          cloud.llamaindex.ai <ExternalLink size={12} />
+                        </a>
+                      </li>
+                      <li>Navigate to the API Keys section of the dashboard</li>
+                      <li>Generate a new key dedicated to RAG Evaluation Lab</li>
+                      <li>Copy the key and store it securely</li>
+                      <li>Add it to the backend `.env` as `LLAMA_CLOUD_API_KEY`</li>
+                    </ol>
+                  </div>
+
+                  <Separator />
+
+                  <div>
+                    <h4 className="mb-2">Why You Need It:</h4>
+                    <ul className="space-y-1 text-sm">
+                      <li className="flex items-center gap-2">
+                        <CheckCircle2 size={14} className="text-green-500" />
+                        Powers all document parsing before chunking and experiments
+                      </li>
+                      <li className="flex items-center gap-2">
+                        <CheckCircle2 size={14} className="text-green-500" />
+                        Enables page counts and job tracking within experiment logs
+                      </li>
+                    </ul>
+                  </div>
+                </AccordionContent>
+              </AccordionItem>
+
               <AccordionItem
                 value="openai"
                 className="border rounded-lg px-4 border-zinc-200"

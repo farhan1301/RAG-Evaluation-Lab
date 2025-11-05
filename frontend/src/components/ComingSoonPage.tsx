@@ -1,4 +1,4 @@
-import { Sparkles, Layers, Brain, Database, Zap, Palette, Star } from 'lucide-react';
+import { Sparkles, Layers, Brain, Database, Zap, Palette, Star, FileText } from 'lucide-react';
 import { Card } from './ui/card';
 import { Badge } from './ui/badge';
 
@@ -15,6 +15,14 @@ export function ComingSoonPage({ darkMode }: ComingSoonPageProps) {
       category: 'Retrieval',
       priority: 'High',
       eta: 'Q1 2026'
+    },
+    {
+      icon: FileText,
+      title: 'Additional Parsing Techniques',
+      description: 'Local PDF parsing, advanced OCR workflows, and configurable ingestion pipelines alongside LlamaParse',
+      category: 'Ingestion',
+      priority: 'High',
+      eta: 'Q2 2026'
     },
     {
       icon: Brain,
@@ -85,6 +93,7 @@ export function ComingSoonPage({ darkMode }: ComingSoonPageProps) {
   const categoryColors = {
     'Retrieval': darkMode ? 'bg-purple-500/20 text-purple-300 border-purple-500/30' : 'bg-purple-50 text-purple-700 border-purple-200',
     'LLM': darkMode ? 'bg-blue-500/20 text-blue-300 border-blue-500/30' : 'bg-blue-50 text-blue-700 border-blue-200',
+    'Ingestion': darkMode ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/30' : 'bg-cyan-50 text-cyan-700 border-cyan-200',
     'Evaluation': darkMode ? 'bg-green-500/20 text-green-300 border-green-500/30' : 'bg-green-50 text-green-700 border-green-200',
     'Automation': darkMode ? 'bg-orange-500/20 text-orange-300 border-orange-500/30' : 'bg-orange-50 text-orange-700 border-orange-200',
     'Intelligence': darkMode ? 'bg-yellow-500/20 text-yellow-300 border-yellow-500/30' : 'bg-yellow-50 text-yellow-700 border-yellow-200',

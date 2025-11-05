@@ -428,8 +428,16 @@ export function ExperimentsPage({ onNext }: ExperimentsPageProps) {
               );
             }
           } catch (error) {
-            const message =
+            let message =
               error instanceof Error ? error.message : 'Unknown error while parsing document.';
+            if (
+              typeof message === 'string' &&
+              (message.includes('LlamaParse API key is not configured') ||
+                message.includes('Document parsing is not configured'))
+            ) {
+              message =
+                'LlamaParse requires an API key. Set LLAMA_CLOUD_API_KEY in your backend environment before running experiments.';
+            }
             applyDocuments((prev) =>
               prev.map((item) =>
                 item.id === doc.id

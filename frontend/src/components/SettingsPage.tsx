@@ -120,10 +120,17 @@ export function SettingsPage() {
               <CardTitle className="text-zinc-900">API Keys</CardTitle>
             </div>
             <CardDescription className="text-zinc-600">
-              Manage API keys for external services (OpenAI, Cohere, etc.)
+              LlamaParse is required for document ingestion; other providers unlock additional model options.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="llamaParseKey" className="text-zinc-700">
+                LlamaParse API Key <span className="text-red-500">*</span>
+              </Label>
+              <Input id="llamaParseKey" type="password" placeholder="llx-..." />
+            </div>
+            
             <div className="space-y-2">
               <Label htmlFor="openaiKey" className="text-zinc-700">
                 OpenAI API Key
