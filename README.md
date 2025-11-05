@@ -3,6 +3,7 @@
 End-to-end workspace for building, running, and evaluating retrieval-augmented generation (RAG) pipelines. The project is split into a `frontend` Vite/React application that orchestrates datasets, pipelines, experiments, reporting, history, documentation, and settings, and a `backend` Express service that handles OpenAI, Qdrant, and LlamaParse integrations.
 
 Click on the image below to open the demo video:
+
 [![Watch Demo](/RAG_Demo_Thumbnail.png)](https://drive.google.com/file/d/1N9gWsj2-VUxENEvvmErER1WbRtXOn-Ph/view?usp=sharing)
 
 
@@ -52,25 +53,14 @@ npm install
 > **Security reminder:** Never commit real API keys. Keep secrets in `.env.local` (gitignored) or inject them via your shell/secret manager. The backend loads `.env` first (if present) and then `.env.local` so you can layer per-machine overrides.
 
 ## Environment Variables
-Both apps read environment variables from the repository root. The backend hydrates via `dotenv` and the frontend points Vite to the same directory (`envDir`). Create a safe `.env` (or `.env.local` to override locally) with the following keys:
+Both apps read environment variables from the repository root. The backend hydrates via `dotenv` and the frontend points Vite to the same directory (`envDir`). Create a safe `.env` (or `.env.local` to override locally) with at least the required keys below; see `.env.example` for the full catalog.
 
-| Variable | Required | Description | Default |
-| --- | --- | --- | --- |
-| `OPENAI_API_KEY` | ✅ | OpenAI account key used for embeddings and chat completions | – |
-| `OPENAI_EMBED_MODEL` | ⬜️ | Override embedding model | `text-embedding-3-small` |
-| `OPENAI_CHAT_MODEL` | ⬜️ | Override chat/completions model | `gpt-4o-mini` |
-| `QDRANT_URL` | ✅ | Base URL for your Qdrant cluster | – |
-| `QDRANT_API_KEY` | ⬜️ | API key if Qdrant requires auth | – |
-| `QDRANT_COLLECTION` | ⬜️ | Default collection name for vectors | `rag-eval-chunks` |
-| `QDRANT_COLLECTION_1536` | ⬜️ | Collection override when embedding vectors are 1536-dim | `rag-eval-chunks-1536` |
-| `QDRANT_COLLECTION_3072` | ⬜️ | Collection override when embedding vectors are 3072-dim | `rag-eval-chunks-3072` |
-| `LLAMA_CLOUD_API_KEY` or `LLAMA_PARSE_API_KEY` | ✅ | API key for LlamaParse document parsing | – |
-| `LLAMA_CLOUD_BASE_URL` | ⬜️ | Override LlamaParse API host | `https://api.cloud.llamaindex.ai/api` |
-| `PORT` | ⬜️ | Backend HTTP port | `7070` |
-| `VITE_BACKEND_URL` | ✅ | Frontend base URL for backend requests | `http://localhost:7070` |
-| `CORS_ORIGINS` | ⬜️ | Comma-separated list of allowed browser origins | `http://127.0.0.1:3000,http://localhost:3000,http://localhost:5173,http://127.0.0.1:5173` |
-| `LLAMA_PARSE_CONSOLE_LOGS` | ⬜️ | Set to `true` to mirror verbose parse logs to stdout | `false` |
-| `PARSE_ROUTE_CONSOLE_LOGS` | ⬜️ | Set to `true` to mirror `/api/parse` route logs to stdout | `false` |
+| Variable | Required | Description |
+| --- | --- | --- |
+| `OPENAI_API_KEY` | ✅ | OpenAI account key used for embeddings and chat completions |
+| `QDRANT_URL` | ✅ | Base URL for your Qdrant cluster |
+| `LLAMA_CLOUD_API_KEY` or `LLAMA_PARSE_API_KEY` | ✅ | API key for LlamaParse document parsing |
+| `VITE_BACKEND_URL` | ✅ | Frontend base URL for backend requests |
 
 Frontend-only environment overrides still need the `VITE_` prefix; set them in the root `.env` as well (or `.env.local`) and they will be surfaced to the Vite dev server.
 
@@ -137,14 +127,6 @@ npx ts-node --swc ./scripts/verify-search.ts
 ```
 
 `scripts/setup-qdrant-index.ts` helps create the `pipelineId` payload index when Qdrant is freshly provisioned.
-
-## Key UI Areas
-- **Datasets & Tasks:** Upload documents, parse them through LlamaParse (required for now), load curated samples, or import CSV task definitions with warning feedback. Additional parsing techniques are planned.
-- **Pipelines:** Configure chunking, embedding, retrieval, reranking (placeholder), answer generation, and judge settings per experiment pipeline. Duplicate or baseline pipelines at will.
-- **Experiments:** Run one or more pipelines end-to-end, stream progress, auto-parse when needed, and persist detailed results.
-- **Reports:** Compare pipelines, highlight improvements over baseline, view token/cost usage, and export Markdown/PDF summaries.
-- **History & Roadmap:** Presentational experiment history plus a “Coming Soon” roadmap of planned product features.
-- **Documentation & Settings:** In-app guides, API key reminders, and placeholders for future account/security controls.
 
 ## Implementation Overview
 
@@ -228,29 +210,15 @@ This section summarizes the backend and frontend work that powers the Retrieval-
 9. **Persistence:** The latest `ExperimentRun` snapshot (including configuration copies) is stored in context for Reports, History, and Documentation pages.
 
 ### Remaining / Optional Work
-- **Authentication & Authorization:** Lock down backend routes (API keys, session middleware) before exposing beyond localhost.
-- **Persistent Storage:** Replace History placeholders with real storage (backend API, database, or export/import utilities).
+- **Authentication & Authorization (critical):** No auth guard or rate limiting exists today; add API keys/session middleware before exposing beyond localhost.
+- **Persistent Storage (critical):** Experiment history and settings screens remain static—replace with real storage (backend API, database, or export/import utilities).
+- **Parsing Flexibility (critical):** `/api/parse` returns `503` without `LLAMA_CLOUD_API_KEY`; introduce alternative connectors so LlamaParse is optional.
+- **Provider Coverage (critical):** Backend only supports OpenAI even though the UI advertises other providers; wire up reranker + additional integrations (Anthropic/Cohere).
+- **Roadmap Delivery (critical):** Items showcased on the Coming Soon page (reranking, metrics, dark mode) are not implemented yet.
 - **Real-time Feedback:** Consider SSE/websocket progress updates instead of polling to show real-time pipeline stages.
-- **Reranking + Provider Integrations:** Wire up the reranker toggle and expand beyond OpenAI (Anthropic/Cohere) across backend + frontend.
 - **Testing & Observability:** Add unit/integration coverage for backend clients/routes, plus telemetry dashboards for token/cost monitoring.
 - **Deployment Tooling:** Docker images, CI workflows, and environment templates for staging/production readiness.
 - **Access Controls:** Gate admin settings (API keys, roadmap edits) and provide workspace-level isolation when multi-user support arrives.
-
-### Critical Gaps
-- The frontend surfaces toggles and documentation for non-OpenAI providers, but the backend currently only supports OpenAI models.
-- LlamaParse is required today; `/api/parse` will return `503` until `LLAMA_CLOUD_API_KEY` is configured. Additional parsing connectors are planned.
-- Experiment history and settings screens are currently static; wiring them to real persistence remains on the roadmap.
-- There is no rate limiting or auth guard on backend endpoints yet, so external deployments require additional hardening.
-- Roadmap items shown on the “Coming Soon” page (reranking, additional metrics, dark mode) are not yet implemented.
-
-### Quick Usage Recap
-1. **Configure Env:** `cp .env.example .env.local`, then populate OpenAI, Qdrant, and LlamaParse credentials.
-2. **Backend:** `cd backend && npm install && npm run dev` (or `npm run build && npm start` for production).
-3. **Frontend:** `cd frontend && npm install && npm run dev` (ensure `VITE_BACKEND_URL` points to the backend).
-4. **Workflow:** Upload documents (or load samples) → define tasks (CSV import available) → configure pipelines → run experiments → export/share reports.
-5. **Verify APIs (optional):** Run `ts-node` against `backend/scripts/verify-*.ts` to smoke-test backend credentials without the UI.
-
-This captures the current implementation status and the main opportunities for enhancement. Let the maintainers know if you’d like to dive deeper into any specific area.
 
 ## Troubleshooting
 - `ERR_UNKNOWN_FILE_EXTENSION ".ts"` – Occurs when Node tries to execute TypeScript directly. Use the provided `npm run dev` scripts so the loader/transpiler is applied.
