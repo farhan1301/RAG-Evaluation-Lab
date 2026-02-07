@@ -8,6 +8,7 @@
 [![React](https://img.shields.io/badge/React-20232A?style=for-the-badge&logo=react&logoColor=61DAFB)](https://reactjs.org/)
 [![Node.js](https://img.shields.io/badge/Node.js-43853D?style=for-the-badge&logo=node.js&logoColor=white)](https://nodejs.org/)
 [![Express](https://img.shields.io/badge/Express.js-404D59?style=for-the-badge)](https://expressjs.com/)
+[![CI](https://img.shields.io/github/actions/workflow/status/farhan1301/RAG-Evaluation-Lab/ci.yml?branch=main&style=for-the-badge)](https://github.com/farhan1301/RAG-Evaluation-Lab/actions/workflows/ci.yml)
 
 [Features](#-features) • [Tech Stack](#️-tech-stack) • [Quick Start](#-quick-start) • [API Reference](#-api-reference) • [Documentation](#-documentation)
 
