@@ -159,7 +159,7 @@ export function DocumentationPage() {
                     {
                       title: 'Connect API Keys',
                       description:
-                        'Add your LlamaParse (required) and OpenAI (required) keys in Settings. Cohere and Anthropic integrations stay optional for extra model coverage.',
+                        'Set LLAMA_CLOUD_API_KEY and OPENAI_API_KEY in the backend environment.',
                     },
                     {
                       title: 'Upload Documents',
@@ -212,8 +212,7 @@ export function DocumentationPage() {
                   <AlertCircle className="h-4 w-4" />
                   <AlertTitle>Security Note</AlertTitle>
                   <AlertDescription>
-                    API keys are stored locally in your browser and never sent to external servers. Always keep your keys secure and never share them
-                    publicly.
+                    Set provider keys in the backend environment or the repository root .env.local and restart the backend.
                   </AlertDescription>
                 </Alert>
               </CardContent>
@@ -311,7 +310,7 @@ export function DocumentationPage() {
                       <li>Navigate to API Keys section in your account settings</li>
                       <li>Click &quot;Create new secret key&quot;</li>
                       <li>Copy the key (you won&apos;t be able to see it again!)</li>
-                      <li>Paste it in the Settings page of this app</li>
+                      <li>Set OPENAI_API_KEY in the backend environment</li>
                     </ol>
                   </div>
 
@@ -395,7 +394,7 @@ response = openai.chat.completions.create(
                       <li>Go to API Keys in the dashboard</li>
                       <li>Generate a new API key</li>
                       <li>Copy and save it securely</li>
-                      <li>Add it to Settings in this app</li>
+                      <li>Store the key securely</li>
                     </ol>
                   </div>
 
@@ -638,10 +637,9 @@ response = co.rerank(
                       stage: 'Evaluation Metrics',
                       description: 'Judge answers for accuracy and quality',
                       options: [
-                        'Exact Match',
-                        'Semantic Similarity',
-                        'Context Recall',
-                        'LLM Judge (GPT-5 Chat Latest)',
+                        'Judge pass rate and coverage',
+                        'Judged context precision',
+                        'Groundedness',
                       ],
                       params: 'Weights for composite scoring',
                     },

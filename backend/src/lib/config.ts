@@ -20,16 +20,12 @@ const required = (value: string | undefined, name: string) => {
 export const loadConfig = (): AppConfig => {
   const openaiApiKey = required(process.env.OPENAI_API_KEY, 'OPENAI_API_KEY');
   const qdrantUrl = required(process.env.QDRANT_URL, 'QDRANT_URL');
-  const collection1536 =
-    process.env.QDRANT_COLLECTION_1536?.trim() ?? 'rag-eval-chunks-1536';
-  const collection3072 =
-    process.env.QDRANT_COLLECTION_3072?.trim() ?? 'rag-eval-chunks-3072';
-  const qdrantCollections: Record<number, string> = {
-    1536: collection1536,
-    3072: collection3072,
-  };
-  const defaultCollection =
-    process.env.QDRANT_COLLECTION?.trim() ?? collection1536;
+  const defaultCollection = process.env.QDRANT_COLLECTION?.trim() || 'rag-eval-chunks';
+  const qdrantCollections: Record<number, string> = {};
+  for (const size of [1536, 3072]) {
+    const collection = process.env[`QDRANT_COLLECTION_${size}`]?.trim();
+    if (collection) qdrantCollections[size] = collection;
+  }
 
   return {
     openaiApiKey,

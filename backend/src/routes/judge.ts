@@ -1,5 +1,5 @@
 import type { Request, Response } from 'express';
-import type { OpenAIClient } from '../lib/openaiClient.js';
+import type { OpenAIClient, ChatResponse } from '../lib/openaiClient.js';
 
 interface JudgeEvaluationInput {
   taskId: string;
@@ -18,7 +18,7 @@ interface JudgeRequestBody {
 
 interface JudgeScores {
   relevance: number;
-  contextPrecision: number;
+  judgedContextPrecision: number;
   groundedness: number;
 }
 
@@ -30,31 +30,31 @@ interface JudgeDetailResponse extends JudgeScores {
 
 interface JudgeDetail {
   taskId: string;
-  verdict: 'pass' | 'review';
-  scores: JudgeScores;
+  verdict: 'pass' | 'review' | 'unavailable';
+  scores: JudgeScores | null;
   rationale: string;
   missingCriteria: string[];
   latencyMs: number;
-  usage?: {
-    promptTokens: number;
-    completionTokens: number;
-    totalTokens: number;
-  };
+  usage?: ChatResponse['usage'];
 }
 
-const coerceScore = (value: unknown) => {
-  const num = typeof value === 'number' ? value : Number(value);
-  if (!Number.isFinite(num)) {
-    return 0;
+const score = (value: unknown) => {
+  if (
+    typeof value !== 'number' ||
+    !Number.isFinite(value) ||
+    value < 0 ||
+    value > 1
+  ) {
+    throw new Error('Invalid judge score.');
   }
-  return Math.max(0, Math.min(1, num));
+  return value;
 };
 
 const buildJudgePrompt = (input: JudgeEvaluationInput) => {
   const context = (input.context ?? [])
     .map(
       (snippet, index) =>
-        `Context ${index + 1}:\n${snippet.trim().replace(/\s+/g, ' ')}`
+        `Context ${index + 1}:\n${snippet.trim().replace(/\s+/g, ' ')}`,
     )
     .join('\n\n');
 
@@ -66,7 +66,9 @@ const buildJudgePrompt = (input: JudgeEvaluationInput) => {
     ? input.acceptanceRule.trim()
     : 'Use best judgment based on correctness, completeness, and factual alignment with the provided context.';
 
-  const contextSection = context ? context : 'No retrieval context was supplied.';
+  const contextSection = context
+    ? context
+    : 'No retrieval context was supplied.';
 
   const instructions = [
     'You are an impartial evaluator assessing answers produced by a retrieval-augmented generation (RAG) system.',
@@ -105,43 +107,38 @@ const parseJudgeResponse = (payload: unknown): JudgeDetailResponse => {
     throw new Error('Judge response was not an object.');
   }
 
-  const verdictRaw = (payload as any).verdict;
-  const verdict = verdictRaw === 'pass' ? 'pass' : 'review';
-
-  const relevance = coerceScore((payload as any).relevance);
-  const contextPrecision = coerceScore((payload as any).context_precision);
-  const groundedness = coerceScore((payload as any).groundedness);
-  const rationale =
-    typeof (payload as any).rationale === 'string'
-      ? (payload as any).rationale.trim()
-      : 'Evaluation failed. Please review manually.';
-  const missingCriteriaRaw = (payload as any).missing_criteria;
-
-  const missingCriteria =
-    Array.isArray(missingCriteriaRaw)
-      ? missingCriteriaRaw
-          .map((item) => (typeof item === 'string' ? item.trim() : ''))
-          .filter(Boolean)
-      : [];
-
+  const result = payload as Record<string, unknown>;
+  const { verdict, rationale, missing_criteria } = result;
+  if (
+    (verdict !== 'pass' && verdict !== 'review') ||
+    typeof rationale !== 'string' ||
+    !rationale.trim() ||
+    !Array.isArray(missing_criteria) ||
+    !missing_criteria.every((item) => typeof item === 'string')
+  ) {
+    throw new Error('Invalid judge decision.');
+  }
   return {
     verdict,
-    rationale,
-    missingCriteria,
-    relevance,
-    contextPrecision,
-    groundedness,
+    rationale: rationale.trim(),
+    missingCriteria: missing_criteria,
+    relevance: score(result.relevance),
+    judgedContextPrecision: score(result.context_precision),
+    groundedness: score(result.groundedness),
   };
 };
 
 const average = (values: number[]) =>
-  values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+  values.length
+    ? values.reduce((sum, value) => sum + value, 0) / values.length
+    : null;
 
-export const createJudgeHandler = (openai: OpenAIClient) =>
+export const createJudgeHandler =
+  (openai: Pick<OpenAIClient, 'chatCompletion'>) =>
   async (req: Request<unknown, unknown, JudgeRequestBody>, res: Response) => {
-    const { pipelineId, evaluations, model } = req.body;
+    const { pipelineId, evaluations, model } = req.body ?? {};
 
-    if (!pipelineId || !pipelineId.trim()) {
+    if (typeof pipelineId !== 'string' || !pipelineId.trim()) {
       return res.status(400).json({ error: 'pipelineId is required.' });
     }
 
@@ -156,6 +153,7 @@ export const createJudgeHandler = (openai: OpenAIClient) =>
 
       for (const evaluation of evaluations) {
         const evalStarted = Date.now();
+        let usage: ChatResponse['usage'];
         try {
           const messages = buildJudgePrompt(evaluation);
           const completion = await openai.chatCompletion(messages, {
@@ -164,6 +162,7 @@ export const createJudgeHandler = (openai: OpenAIClient) =>
             responseFormat: { type: 'json_object' },
           });
           const latencyMs = Date.now() - evalStarted;
+          usage = completion.usage;
           const parsed = parseJudgeResponse(JSON.parse(completion.content));
 
           judgeDetails.push({
@@ -171,71 +170,73 @@ export const createJudgeHandler = (openai: OpenAIClient) =>
             verdict: parsed.verdict,
             scores: {
               relevance: parsed.relevance,
-              contextPrecision: parsed.contextPrecision,
+              judgedContextPrecision: parsed.judgedContextPrecision,
               groundedness: parsed.groundedness,
             },
             rationale: parsed.rationale,
             missingCriteria: parsed.missingCriteria,
             latencyMs,
-            usage: completion.usage,
+            usage,
           });
-        } catch (innerError) {
-          const latencyMs = Date.now() - evalStarted;
-          const rationale =
-            innerError instanceof Error ? innerError.message : 'Judge call failed.';
-
+        } catch {
           judgeDetails.push({
             taskId: evaluation.taskId,
-            verdict: 'review',
-            scores: {
-              relevance: 0,
-              contextPrecision: 0,
-              groundedness: 0,
-            },
-            rationale: `Unable to score answer automatically. ${rationale}`,
-            missingCriteria: ['Automatic evaluation failed'],
-            latencyMs,
+            verdict: 'unavailable',
+            scores: null,
+            rationale: 'The judge did not return a valid evaluation.',
+            missingCriteria: [],
+            latencyMs: Date.now() - evalStarted,
+            usage,
           });
         }
       }
 
-      const passCount = judgeDetails.filter((detail) => detail.verdict === 'pass').length;
-      const passRate = judgeDetails.length ? passCount / judgeDetails.length : 0;
-
+      const scores = judgeDetails.flatMap((detail) =>
+        detail.scores ? [detail.scores] : [],
+      );
+      const coverage = { completed: scores.length, total: judgeDetails.length };
+      const passes = judgeDetails.filter(
+        (detail) => detail.verdict === 'pass',
+      ).length;
+      const judgePassRate = scores.length ? passes / scores.length : null;
       const averageScores = {
-        relevance: average(judgeDetails.map((detail) => detail.scores.relevance)),
-        contextPrecision: average(
-          judgeDetails.map((detail) => detail.scores.contextPrecision)
+        relevance: average(scores.map((item) => item.relevance)),
+        judgedContextPrecision: average(
+          scores.map((item) => item.judgedContextPrecision),
         ),
-        groundedness: average(
-          judgeDetails.map((detail) => detail.scores.groundedness)
-        ),
+        groundedness: average(scores.map((item) => item.groundedness)),
       };
 
       const tokensUsed = judgeDetails.reduce(
         (sum, detail) => sum + (detail.usage?.totalTokens ?? 0),
-        0
+        0,
       );
 
       const latencyMsTotal = judgeDetails.reduce(
         (sum, detail) => sum + detail.latencyMs,
-        0
+        0,
       );
 
       const overallVerdict =
-        passRate >= 0.8 && averageScores.groundedness >= 0.7 ? 'pass' : 'review';
+        judgePassRate === null || averageScores.groundedness === null
+          ? 'unavailable'
+          : judgePassRate >= 0.8 && averageScores.groundedness >= 0.7
+            ? 'pass'
+            : 'review';
 
       res.json({
         pipelineId,
         verdict: overallVerdict,
-        passRate,
+        judgePassRate,
+        coverage,
         averageScores,
         tokensUsed,
         latencyMs: latencyMsTotal,
         details: judgeDetails,
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unexpected error';
+      const message =
+        error instanceof Error ? error.message : 'Unexpected error';
       res.status(500).json({ error: message });
     }
   };

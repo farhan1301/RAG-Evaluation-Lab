@@ -229,7 +229,7 @@ export function ExperimentsPage({ onNext }: ExperimentsPageProps) {
       );
 
       const convertedResults = (answeringSummary.details ?? []).map((detail) => {
-        const matches = detail.citedChunkIds
+        const matches = detail.retrievedChunkIds
           .map((chunkId) => {
             const chunk = chunkLookup.get(chunkId);
             if (!chunk) {
@@ -543,13 +543,12 @@ export function ExperimentsPage({ onNext }: ExperimentsPageProps) {
 
         const upsertResponse = await upsertChunks({
           pipelineId,
-          resetCollection: true,
           embeddingModel: pipelineEmbeddingModel,
           chunks: chunks.map((chunk) => ({
             id: chunk.id,
             text: chunk.content,
+            documentId: chunk.documentId,
             metadata: {
-              documentId: chunk.documentId,
               documentName: chunk.documentName,
               documentSource: chunk.documentSource,
               charCount: chunk.charCount,
@@ -594,7 +593,6 @@ export function ExperimentsPage({ onNext }: ExperimentsPageProps) {
             question: task.question,
             topK: retrieverK,
             model: currentPipeline.llm?.model,
-            collectionName: targetCollectionName,
             embeddingModel: pipelineEmbeddingModel,
           });
 
@@ -642,7 +640,7 @@ export function ExperimentsPage({ onNext }: ExperimentsPageProps) {
             expectedAnswer: task.expectedAnswer,
             acceptanceRule: task.acceptanceRule,
             response: response.answer,
-            citedChunkIds: matches.map((match) => match.id),
+            retrievedChunkIds: matches.map((match) => match.id),
             latencyMs: response.latencyMs ?? 0,
             usage: response.usage,
           });
@@ -698,28 +696,22 @@ export function ExperimentsPage({ onNext }: ExperimentsPageProps) {
               context: result.matches.map((match) => match.text),
             };
           }),
-        });
-
-        appendLog(
-          `[${pipelineName}] Judge verdict: ${(judgeResponse.passRate * 100).toFixed(0)}% pass rate, ` +
-            `groundedness ${(judgeResponse.averageScores.groundedness * 100).toFixed(0)}%.`
-        );
-
-        const normalizedJudgeDetails: JudgingSummary['details'] = judgeResponse.details.map(
-          (detail) => ({
-            taskId: detail.taskId,
-            verdict: detail.verdict,
-            scores: {
-              relevance: Number(detail.scores.relevance.toFixed(2)),
-              contextPrecision: Number(detail.scores.contextPrecision.toFixed(2)),
-              groundedness: Number(detail.scores.groundedness.toFixed(2)),
-            },
-            rationale: detail.rationale,
-            missingCriteria: detail.missingCriteria ?? [],
-            latencyMs: detail.latencyMs,
-            usage: detail.usage,
-          })
-        );
+        }).catch(() => ({
+          verdict: 'unavailable' as const,
+          judgePassRate: null,
+          averageScores: { relevance: null, judgedContextPrecision: null, groundedness: null },
+          coverage: { completed: 0, total: results.length },
+          details: results.map(({ taskId }): JudgingSummary['details'][number] => ({
+            taskId,
+            verdict: 'unavailable',
+            scores: null,
+            missingCriteria: [],
+            rationale: 'Judge request failed.',
+            latencyMs: 0,
+          })),
+          latencyMs: 0,
+          tokensUsed: 0,
+        }));
 
         const totalQuestions = readyTasks.length;
         const embeddingModelName = pipelineEmbeddingModel ?? 'text-embedding-3-small';
@@ -766,26 +758,23 @@ export function ExperimentsPage({ onNext }: ExperimentsPageProps) {
         const costPerQuery = totalQuestions ? answerCost / totalQuestions : 0;
 
         const pipelineMetrics: PipelineMetrics = {
-          precisionAt5: Number(judgeResponse.passRate.toFixed(2)),
-          recallAt5: Number(judgeResponse.averageScores.contextPrecision.toFixed(2)),
+          judgePassRate: judgeResponse.judgePassRate,
+          judgedContextPrecision: judgeResponse.averageScores.judgedContextPrecision,
           latencyP95: Number(latencyP95Seconds.toFixed(2)),
-          groundedness: Number(judgeResponse.averageScores.groundedness.toFixed(2)),
+          groundedness: judgeResponse.averageScores.groundedness,
           costPerQuery: Number(costPerQuery.toFixed(4)),
           tokensUsed: Math.round(tokensUsed),
         };
 
         const judgingSummary: JudgingSummary = {
           verdict: judgeResponse.verdict,
-          passRate: Number(judgeResponse.passRate.toFixed(2)),
-          averageScores: {
-            relevance: Number(judgeResponse.averageScores.relevance.toFixed(2)),
-            contextPrecision: Number(judgeResponse.averageScores.contextPrecision.toFixed(2)),
-            groundedness: Number(judgeResponse.averageScores.groundedness.toFixed(2)),
-          },
+          judgePassRate: judgeResponse.judgePassRate,
+          averageScores: judgeResponse.averageScores,
+          coverage: judgeResponse.coverage,
           tokensUsed: Math.round(judgeTotalTokens),
           latencyMs: judgeResponse.latencyMs,
           costUsd: Number(judgeCost.toFixed(3)),
-          details: normalizedJudgeDetails,
+          details: judgeResponse.details,
         };
 
         const pipelineResult: ExperimentPipelineResult = {
@@ -822,8 +811,12 @@ export function ExperimentsPage({ onNext }: ExperimentsPageProps) {
         pipelineResults.push(pipelineResult);
         completedAt = new Date().toISOString();
 
+        const { completed: scored, total } = judgeResponse.coverage;
+        const passRateLabel = judgeResponse.judgePassRate === null
+          ? 'unavailable'
+          : `${(judgeResponse.judgePassRate * 100).toFixed(0)}%`;
         appendLog(
-          `[${pipelineName}] Evaluation complete. Pass rate ${(judgeResponse.passRate * 100).toFixed(0)}%.`
+          `[${pipelineName}] Evaluation complete. Judge coverage ${scored}/${total}. Judge pass rate ${passRateLabel}.`
         );
         computePipelineProgress(index, 1);
       }
@@ -832,24 +825,17 @@ export function ExperimentsPage({ onNext }: ExperimentsPageProps) {
       setProgress(100);
       appendLog('Experiment complete. Review the answers below.');
 
-      const bestByMetric =
-        pipelineResults.length > 0
-          ? METRIC_DEFINITIONS.reduce<ExperimentRun['bestByMetric']>((acc, metric) => {
-              let bestResult = pipelineResults[0];
-              for (let i = 1; i < pipelineResults.length; i += 1) {
-                const candidate = pipelineResults[i];
-                if (metric.better === 'higher') {
-                  if (candidate.metrics[metric.key] > bestResult.metrics[metric.key]) {
-                    bestResult = candidate;
-                  }
-                } else if (candidate.metrics[metric.key] < bestResult.metrics[metric.key]) {
-                  bestResult = candidate;
-                }
-              }
-              acc[metric.key] = bestResult.pipelineId;
-              return acc;
-            }, {})
-          : {};
+      const bestByMetric: ExperimentRun['bestByMetric'] = {};
+      for (const metric of METRIC_DEFINITIONS) {
+        let best: number | null = null;
+        for (const result of pipelineResults) {
+          const value = result.metrics[metric.key];
+          if (value !== null && (best === null || (metric.better === 'higher' ? value > best : value < best))) {
+            best = value;
+            bestByMetric[metric.key] = result.pipelineId;
+          }
+        }
+      }
 
       const baselinePipelineIdForRun =
         pipelineResults.find((result) => result.pipelineId === baselinePipelineId)?.pipelineId ??

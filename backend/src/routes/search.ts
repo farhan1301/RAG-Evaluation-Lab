@@ -6,21 +6,23 @@ interface SearchRequestBody {
   pipelineId: string;
   question: string;
   topK?: number;
-  collectionName?: string;
   embeddingModel?: string;
 }
 
 export const createSearchHandler = (
-  openai: OpenAIClient,
+  openai: Pick<OpenAIClient, 'createEmbeddings'>,
   qdrant: QdrantClient
 ) =>
   async (req: Request<unknown, unknown, SearchRequestBody>, res: Response) => {
-    const { pipelineId, question, topK = 5, collectionName, embeddingModel } = req.body;
+    if (!req.body || typeof req.body !== 'object' || 'collectionName' in req.body || 'resetCollection' in req.body) {
+      return res.status(400).json({ error: 'Collection selection and reset are server-managed.' });
+    }
+    const { pipelineId, question, topK = 5, embeddingModel } = req.body;
     const normalizedPipelineId = typeof pipelineId === 'string' ? pipelineId.trim() : '';
     const normalizedEmbeddingModel =
       typeof embeddingModel === 'string' ? embeddingModel.trim() : undefined;
 
-    if (!normalizedPipelineId || !question || !question.trim()) {
+    if (!normalizedPipelineId || typeof question !== 'string' || !question.trim()) {
       return res.status(400).json({ error: 'pipelineId and question are required.' });
     }
 
@@ -35,8 +37,7 @@ export const createSearchHandler = (
       const vectorSize = vectors[0].length;
       const targetCollection = qdrant.collectionNameForPipeline(
         vectorSize,
-        normalizedPipelineId,
-        collectionName
+        normalizedPipelineId
       );
 
       const results = await qdrant.search(

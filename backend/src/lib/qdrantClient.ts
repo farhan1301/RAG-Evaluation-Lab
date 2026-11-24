@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import fetch from 'node-fetch';
 import type { AppConfig } from './config.js';
 
@@ -20,13 +21,6 @@ const sanitizeCollection = (value: string) =>
     .replace(/^-+|-+$/g, '')
     .slice(0, 64) || 'default';
 
-const sanitizeSuffix = (value: string) =>
-  value
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 32);
-
 export class QdrantClient {
   private readonly config: AppConfig;
   private readonly headers: Record<string, string>;
@@ -42,63 +36,19 @@ export class QdrantClient {
     }
   }
 
-  private resolveCollectionName(explicit?: string, vectorSize?: number) {
-    if (explicit && explicit.trim()) {
-      return sanitizeCollection(explicit);
-    }
-
-    if (
-      typeof vectorSize === 'number' &&
-      Number.isFinite(vectorSize) &&
-      vectorSize > 0
-    ) {
-      const mapped = this.config.qdrantCollections?.[vectorSize];
-      if (mapped && mapped.trim()) {
-        return sanitizeCollection(mapped);
-      }
-    }
-
-    const baseCollection = this.config.qdrantCollection || 'rag-eval-chunks';
-    const base =
-      typeof baseCollection === 'string'
-        ? baseCollection.replace(/-\d+$/, '')
-        : 'rag-eval-chunks';
-    const fallback =
-      typeof vectorSize === 'number' && Number.isFinite(vectorSize) && vectorSize > 0
-        ? `${base}-${vectorSize}`
-        : baseCollection;
-
-    return sanitizeCollection(fallback);
-  }
-
-  collectionNameForVectorSize(vectorSize: number) {
-    return this.resolveCollectionName(undefined, vectorSize);
-  }
-
-  sanitizeCollectionName(name: string) {
-    return sanitizeCollection(name);
-  }
-
-  collectionNameForPipeline(vectorSize: number, pipelineId: string, explicit?: string) {
-    const base = this.resolveCollectionName(explicit, vectorSize);
-    const suffix = sanitizeSuffix(pipelineId);
-    if (!suffix) {
-      return base;
-    }
-
-    if (base.endsWith(`-${suffix}`)) {
-      return base;
-    }
-
-    return sanitizeCollection(`${base}-${suffix}`);
+  collectionNameForPipeline(vectorSize: number, pipelineId: string) {
+    const base = this.config.qdrantCollections[vectorSize] || this.config.qdrantCollection;
+    // Keep disjoint namespaces even when long or punctuation-heavy IDs sanitize alike.
+    const scope = createHash('sha256').update(JSON.stringify([base, vectorSize, pipelineId])).digest('hex').slice(0, 32);
+    return `${sanitizeCollection(base).slice(0, 31)}-${scope}`;
   }
 
   private url(path: string) {
     return `${this.config.qdrantUrl}${path}`;
   }
 
-  async ensureCollection(vectorSize: number, collectionName?: string, signal?: AbortSignal) {
-    const collection = this.resolveCollectionName(collectionName, vectorSize);
+  async ensureCollection(vectorSize: number, collectionName: string, signal?: AbortSignal) {
+    const collection = sanitizeCollection(collectionName);
     const response = await fetch(this.url(`/collections/${collection}?wait=true`), {
       method: 'PUT',
       headers: this.headers,
@@ -119,13 +69,13 @@ export class QdrantClient {
     await this.ensurePipelineIndex(collection, signal);
   }
 
-  async upsertPoints(points: QdrantPoint[], collectionName?: string, signal?: AbortSignal) {
+  async upsertPoints(points: QdrantPoint[], collectionName: string, signal?: AbortSignal) {
     if (!points.length) {
       return;
     }
 
-    const collection = this.resolveCollectionName(collectionName);
-    const response = await fetch(this.url(`/collections/${collection}/points`), {
+    const collection = sanitizeCollection(collectionName);
+    const response = await fetch(this.url(`/collections/${collection}/points?wait=true`), {
       method: 'PUT',
       headers: this.headers,
       body: JSON.stringify({
@@ -137,20 +87,6 @@ export class QdrantClient {
     if (!response.ok) {
       const detail = await response.text();
       throw new Error(`Failed to upsert Qdrant points (${response.status}): ${detail}`);
-    }
-  }
-
-  async deleteCollection(collectionName?: string, signal?: AbortSignal) {
-    const collection = this.resolveCollectionName(collectionName);
-    const response = await fetch(this.url(`/collections/${collection}`), {
-      method: 'DELETE',
-      headers: this.headers,
-      signal,
-    });
-
-    if (!response.ok && response.status !== 404) {
-      const detail = await response.text();
-      throw new Error(`Failed to delete Qdrant collection (${response.status}): ${detail}`);
     }
   }
 
@@ -252,13 +188,13 @@ export class QdrantClient {
     throw new Error(`Failed to create Qdrant pipelineId index (${status}): ${detail}`);
   }
 
-  async deletePipelinePoints(pipelineId: string, collectionName?: string, signal?: AbortSignal) {
+  async deletePipelinePoints(pipelineId: string, collectionName: string, signal?: AbortSignal) {
     const trimmedId = pipelineId?.trim();
     if (!trimmedId) {
       return;
     }
 
-    const collection = this.resolveCollectionName(collectionName);
+    const collection = sanitizeCollection(collectionName);
     let attemptedIndexCreation = false;
 
     while (true) {
@@ -278,7 +214,7 @@ export class QdrantClient {
         signal,
       });
 
-      if (response.ok || response.status === 404) {
+      if (response.ok) {
         return;
       }
 
@@ -299,75 +235,32 @@ export class QdrantClient {
   async search(
     vector: number[],
     limit: number,
-    filter: Record<string, unknown> | undefined,
-    collectionName?: string,
+    filter: { pipelineId: string } & Record<string, unknown>,
+    collectionName: string,
     signal?: AbortSignal
   ): Promise<QdrantSearchResult[]> {
-    const collection = this.resolveCollectionName(collectionName, Array.isArray(vector) ? vector.length : undefined);
-    const body: any = {
-      vector,
-      limit,
-      with_payload: true,
-    };
-
-    const buildFilter = (value: Record<string, unknown>) => ({
-      must: Object.entries(value).map(([key, entryValue]) =>
-        Array.isArray(entryValue)
-          ? { key, match: { any: entryValue } }
-          : { key, match: { value: entryValue } }
-      ),
-    });
-
-    const requestBody = { ...body };
-    if (filter && Object.keys(filter).length) {
-      requestBody.filter = buildFilter(filter);
+    if (!filter?.pipelineId?.trim()) {
+      throw new Error('A pipelineId filter is required.');
     }
-
-    const performSearch = async (payloadBody: any): Promise<any> => {
-      const response = await fetch(this.url(`/collections/${collection}/points/search`), {
-        method: 'POST',
-        headers: this.headers,
-        body: JSON.stringify(payloadBody),
-        signal,
-      });
-
-      if (!response.ok) {
-        const detail = await response.text();
-        throw new Error(`Qdrant search failed (${response.status}): ${detail}`);
-      }
-
-      return response.json();
-    };
-
-    const handleSearch = async (): Promise<any> => {
-      try {
-        return await performSearch(requestBody);
-      } catch (error) {
-        if (
-          error instanceof Error &&
-          /Index required but not found/i.test(error.message ?? '') &&
-          requestBody.filter
-        ) {
-          const fallbackBody = { ...requestBody };
-          delete fallbackBody.filter;
-          if (typeof console !== 'undefined' && typeof console.warn === 'function') {
-            console.warn(
-              '[QdrantClient] Missing payload index for filter. Retrying search without filter.'
-            );
-          }
-          return performSearch(fallbackBody);
-        }
-        throw error;
-      }
-    };
-
-    const payload: any = await handleSearch();
-    const results = Array.isArray(payload?.result) ? payload.result : [];
-
-    return results.map((item: any) => ({
-      id: String(item?.id ?? ''),
-      score: typeof item?.score === 'number' ? item.score : 0,
-      payload: (item?.payload as Record<string, unknown>) ?? {},
+    const collection = sanitizeCollection(collectionName);
+    const must = Object.entries(filter).map(([key, value]) => ({
+      key,
+      match: Array.isArray(value) ? { any: value } : { value },
+    }));
+    const response = await fetch(this.url(`/collections/${collection}/points/search`), {
+      method: 'POST',
+      headers: this.headers,
+      body: JSON.stringify({ vector, limit, with_payload: true, filter: { must } }),
+      signal,
+    });
+    if (!response.ok) {
+      throw new Error(`Scoped Qdrant search failed (${response.status}): ${await response.text()}`);
+    }
+    const payload = await response.json() as { result: QdrantSearchResult[] };
+    return payload.result.map(item => ({
+      id: String(item.id),
+      score: item.score,
+      payload: item.payload ?? {},
     }));
   }
 }

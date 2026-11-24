@@ -9,7 +9,7 @@ interface ParseRequestBody {
   outputFormat?: LlamaParseResultFormat;
 }
 
-export const createParseHandler = (llamaParse: LlamaParseClient) =>
+export const createParseHandler = (llamaParse: Pick<LlamaParseClient, 'isConfigured' | 'parseDocument'>) =>
   async (req: Request<unknown, unknown, ParseRequestBody>, res: Response) => {
     const normalizeFormat = (value: string | undefined): LlamaParseResultFormat =>
       value && value.trim().toLowerCase() === 'text' ? 'text' : 'markdown';

@@ -1,11 +1,29 @@
 {
   "name": "rag-eval-lab",
+  "version": "0.1.0",
   "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "workspaces": [
+    "frontend",
+    "backend"
+  ],
   "scripts": {
-    "dev": "npm run dev --prefix frontend",
-    "dev:frontend": "npm run dev --prefix frontend",
-    "dev:backend": "npm run dev --prefix backend",
-    "build": "npm run build --prefix frontend",
-    "build:backend": "npm run build --prefix backend"
+    "dev": "npm run dev -w rag-eval-frontend",
+    "dev:backend": "npm run dev -w rag-eval-backend",
+    "build": "npm run build --workspaces && node scripts/check-startup.mjs",
+    "lint": "biome lint .",
+    "typecheck": "tsc -p backend/tsconfig.json --noEmit && tsc -p tests/tsconfig.json",
+    "test": "vitest run",
+    "format": "biome format --write ."
+  },
+  "devDependencies": {
+    "typescript": "7.0.2",
+    "tsx": "4.23.15",
+    "vitest": "5.1.1",
+    "@biomejs/biome": "2.6.9",
+    "@types/node": "26.6.6"
   }
 }

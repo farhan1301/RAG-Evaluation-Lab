@@ -1,0 +1,152 @@
+{
+  "files": {
+    "includes": [
+      "**",
+      "!!**/node_modules",
+      "!!**/dist",
+      "!!**/build",
+      "!!**/coverage",
+      "!!**/package-lock.json",
+      "!!frontend/src/index.css"
+    ]
+  },
+  "formatter": {
+    "indentStyle": "space",
+    "indentWidth": 2
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "single"
+    }
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "recommended"
+    }
+  },
+  "overrides": [
+    {
+      "includes": ["frontend/src/components/ui/breadcrumb.tsx"],
+      "linter": {
+        "rules": {
+          "a11y": {
+            "useFocusableInteractive": "warn"
+          }
+        }
+      }
+    },
+    {
+      "includes": [
+        "frontend/src/components/DatasetsPage.tsx",
+        "frontend/src/components/PipelinesPage.tsx"
+      ],
+      "linter": {
+        "rules": {
+          "a11y": {
+            "noLabelWithoutControl": "warn"
+          }
+        }
+      }
+    },
+    {
+      "includes": [
+        "frontend/src/components/ui/breadcrumb.tsx",
+        "frontend/src/components/ui/carousel.tsx",
+        "frontend/src/components/ui/input-otp.tsx"
+      ],
+      "linter": {
+        "rules": {
+          "a11y": {
+            "useSemanticElements": "warn"
+          }
+        }
+      }
+    },
+    {
+      "includes": ["frontend/src/components/ui/pagination.tsx"],
+      "linter": {
+        "rules": {
+          "a11y": {
+            "noRedundantRoles": "warn"
+          }
+        }
+      }
+    },
+    {
+      "includes": ["frontend/src/components/figma/ImageWithFallback.tsx"],
+      "linter": {
+        "rules": {
+          "a11y": {
+            "noRedundantAlt": "warn"
+          }
+        }
+      }
+    },
+    {
+      "includes": [
+        "frontend/src/App.tsx",
+        "frontend/src/components/PipelinesPage.tsx"
+      ],
+      "linter": {
+        "rules": {
+          "a11y": {
+            "useButtonType": "warn"
+          }
+        }
+      }
+    },
+    {
+      "includes": [
+        "frontend/src/components/DocumentationPage.tsx",
+        "frontend/src/components/ui/calendar.tsx"
+      ],
+      "linter": {
+        "rules": {
+          "correctness": {
+            "noComponentHookFactories": "warn"
+          }
+        }
+      }
+    },
+    {
+      "includes": [
+        "frontend/src/components/ui/sidebar.tsx",
+        "frontend/src/state/experimentResults.tsx"
+      ],
+      "linter": {
+        "rules": {
+          "correctness": {
+            "useExhaustiveDependencies": "warn"
+          }
+        }
+      }
+    },
+    {
+      "includes": [
+        "frontend/src/components/ComingSoonPage.tsx",
+        "frontend/src/components/DocumentationPage.tsx",
+        "frontend/src/components/ExperimentsPage.tsx",
+        "frontend/src/components/HomePage.tsx",
+        "frontend/src/components/ui/slider.tsx"
+      ],
+      "linter": {
+        "rules": {
+          "suspicious": {
+            "noArrayIndexKey": "warn"
+          }
+        }
+      }
+    },
+    {
+      "includes": ["frontend/src/components/ui/chart.tsx"],
+      "linter": {
+        "rules": {
+          "security": {
+            "noDangerouslySetInnerHtml": "warn"
+          }
+        }
+      }
+    }
+  ]
+}

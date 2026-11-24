@@ -36,7 +36,7 @@ RAG Evaluation Lab is an end-to-end workspace for building, running, and evaluat
 - **State Management**: React Context API
 
 ### Backend
-- **Runtime**: Node.js 18+
+- **Runtime**: Node.js 22.13+
 - **Framework**: Express.js
 - **Language**: TypeScript
 - **Key Integrations**:
@@ -114,7 +114,7 @@ Before getting started, ensure you have the following:
 
 | Requirement | Version | Notes |
 |------------|---------|-------|
-| Node.js | 18+ | JavaScript runtime |
+| Node.js | 22.13+ | JavaScript runtime |
 | npm | 9+ | Package manager |
 | Qdrant | Latest | Vector database (cloud or local) |
 | OpenAI API Key | - | For embeddings and chat completions |
@@ -142,19 +142,13 @@ Edit `.env.local` with your API keys and configuration:
 OPENAI_API_KEY=your_openai_api_key
 QDRANT_URL=your_qdrant_url
 LLAMA_CLOUD_API_KEY=your_llamaparse_api_key
-VITE_BACKEND_URL=http://localhost:7070
 ```
 
 ### 2. Install Dependencies
 
 ```bash
-# Install frontend dependencies
-cd frontend
-npm install
-
-# Install backend dependencies
-cd ../backend
-npm install
+# From the repository root
+npm ci
 ```
 
 > **Security Note:** Never commit API keys to version control. Keep all secrets in `.env.local` (gitignored) or use a secure secret management system.
@@ -163,16 +157,14 @@ npm install
 
 **Terminal 1 - Start Backend:**
 ```bash
-cd backend
-npm run dev
-# Server starts at http://localhost:7070
+npm run dev:backend
+# Server starts at http://127.0.0.1:7070
 ```
 
 **Terminal 2 - Start Frontend:**
 ```bash
-cd frontend
 npm run dev
-# Application opens at http://localhost:5173
+# Application opens at http://127.0.0.1:3000
 ```
 
 > **Tip:** Use `npm run dev:watch` in the backend for auto-restart on file changes during development.
@@ -183,7 +175,7 @@ npm run dev
 
 ### Environment Variables
 
-Both frontend and backend read environment variables from the repository root via `dotenv`. The `.env.local` file overrides `.env` for local development.
+The backend reads provider settings from the repository root via `dotenv`. The `.env.local` file overrides `.env` for local development.
 
 #### Required Variables
 
@@ -192,9 +184,10 @@ Both frontend and backend read environment variables from the repository root vi
 | `OPENAI_API_KEY` | OpenAI API key for embeddings and chat completions |
 | `QDRANT_URL` | Qdrant cluster URL (cloud or local instance) |
 | `LLAMA_CLOUD_API_KEY` or `LLAMA_PARSE_API_KEY` | LlamaParse API key for document parsing |
-| `VITE_BACKEND_URL` | Backend API URL for frontend requests |
 
 #### Optional Variables
+
+For a different backend address, set the public `VITE_BACKEND_URL` in `frontend/.env.local` or the frontend process environment.
 
 See `.env.example` for the complete list of optional configuration variables including model selection, collection names, CORS settings, and logging options.
 
@@ -216,8 +209,8 @@ The backend provides the following REST endpoints:
 ### Metrics and Evaluation
 
 The platform calculates comprehensive metrics from actual LLM evaluations:
-- Pass rate and quality scores
-- Context precision and groundedness
+- Judge pass rate and coverage
+- Judged context precision and groundedness
 - Latency (p50, p95, p99)
 - Token usage and cost per query
 
@@ -262,31 +255,14 @@ npm run build:backend    # Build backend
 
 ## 🧪 Testing and Verification
 
-### API Smoke Tests
+Run the workspace checks from the repository root.
 
-Verify your API credentials and infrastructure without running the full UI:
-
-```bash
-cd backend
-
-# Test individual endpoints
-npx ts-node --swc ./scripts/verify-chunks.ts   # Test chunk upsert
-npx ts-node --swc ./scripts/verify-search.ts   # Test vector search
-npx ts-node --swc ./scripts/verify-answer.ts   # Test answer generation
-npx ts-node --swc ./scripts/verify-judge.ts    # Test evaluation
-npx ts-node --swc ./scripts/verify-parse.ts    # Test document parsing
+```sh
+npm run lint && npm run typecheck && npm test && npm run build
+node scripts/check-browser-secrets.mjs
 ```
 
-### Qdrant Setup
-
-Initialize Qdrant with the required payload index:
-
-```bash
-cd backend
-npx ts-node --swc ./scripts/setup-qdrant-index.ts
-```
-
-This creates the `pipelineId` payload index needed for pipeline-aware vector operations.
+Vitest uses synthetic documents and fake providers. TypeScript checks the backend and TypeScript test fixtures strictly. Vite builds the browser source in Phase 1. Full strict browser typechecking starts in Phase 2. The build exercises the compiled backend with fixture configuration. CI also checks its HTTP health endpoint on loopback.
 
 ---
 
@@ -312,13 +288,13 @@ This section provides detailed information about the architecture, components, a
 | `src/lib/openaiClient.ts` | Embedding + chat helpers that surface latency, token usage, GPT‑5 model quirks, and response-format support. |
 | `src/lib/qdrantClient.ts` | Pipeline-aware collection manager (sanitizes names, ensures payload indexes, retries deletes, and filters searches per `pipelineId`). |
 | `src/lib/llamaParseClient.ts` | Robust LlamaParse integration: resilient uploads, exponential backoff polling, payload normalization (markdown/text), and page-count extraction. |
-| `src/routes/embeddings.ts` | `POST /api/chunks` – embeds chunk payloads, optionally resets collections, wipes prior pipeline vectors, and returns vector dimension metadata. |
+| `src/routes/embeddings.ts` | `POST /api/chunks` – embeds chunk payloads, replaces only the selected pipeline’s points, and returns vector dimension metadata. |
 | `src/routes/search.ts` | `POST /api/search` – embeds a query, searches the pipeline-specific collection, and exposes the resolved collection + vector size. |
 | `src/routes/answer.ts` | `POST /api/answer` – runs retrieval, composes a grounded answer prompt, returns matches/usage/latency, and mirrors the resolved collection metadata. |
 | `src/routes/judge.ts` | `POST /api/judge` – coaxes structured JSON verdicts, aggregates pass rate + average scores, and keeps raw per-task rationales. |
 | `src/routes/parse.ts` | `POST /api/parse` – forwards files to LlamaParse with detailed logging, returns normalized text + job IDs, and surfaces configuration gaps with `503`s. |
 | `src/index.ts` | Loads environment layers, configures strict CORS allowlists, applies JSON size limits, and mounts every route plus `/health`. |
-| `scripts/*.ts` | CLI utilities for bootstrapping Qdrant payload indexes and verifying each API surface end-to-end (chunks, search, answer, judge, parse). |
+| `scripts/*.ts` | Optional scoped index setup: `node --import tsx backend/scripts/setup-qdrant-index.ts <pipeline-id> <vector-dimension>` from the root. |
 
 #### Runtime Expectations
 - Required env vars: `OPENAI_API_KEY`, `QDRANT_URL`, and either `LLAMA_CLOUD_API_KEY` or `LLAMA_PARSE_API_KEY` if parsing should be enabled.
@@ -326,14 +302,14 @@ This section provides detailed information about the architecture, components, a
 - Env layering: `.env` is loaded first, then `.env.local` (when present) can override per-developer secrets. `.env.example` documents every key.
 - CORS: `CORS_ORIGINS` accepts a comma-delimited allow list. The server blocks unknown origins unless `*` is present.
 - JSON payload limit: 16 MB, covering large document uploads while preventing accidental OOMs.
-- Start locally via `npm install && npm run dev` (hot reload with `tsx`). Production build uses `npm run build && npm start`.
+- Start locally with `npm run dev:backend` from the root. Run the compiled backend with `npm start -w rag-eval-backend` after the workspace build.
 
 #### Notable Behaviors
-- Pipeline-aware Qdrant usage keeps embeddings partitioned per experiment configuration while automatically provisioning/cleaning collections and payload indexes.
+- Pipeline-aware Qdrant usage keeps embeddings partitioned per experiment configuration while provisioning a collection per pipeline and vector size. Reindexing replaces points for that pipeline. Existing legacy collections stay intact.
 - All external calls (OpenAI, Qdrant, LlamaParse) bubble errors with descriptive messages, helping the frontend display actionable feedback.
 - LlamaParse integration includes retry/backoff for uploads/downloads and normalizes heterogeneous payload formats into a consistent `{ text, pageCount }` shape.
-- Judge responses request JSON-formatted output, coerce scores into the 0–1 range, and aggregate latency/tokens for downstream cost analysis.
-- `backend/scripts/*` give a quick way to validate credentials and infrastructure without running the full UI.
+- Judge responses request JSON-formatted output, require valid 0–1 scores, and aggregate latency/tokens for downstream cost analysis.
+- Judge coverage is scored tasks / submitted tasks. Only scored tasks contribute to judge pass rate and mean scores. Unavailable judgments are retained in the task details. The legacy judged context precision score is the judge’s 0–1 assessment of how well retrieved text supports the answer.
 
 ### Frontend (`/frontend`)
 
@@ -359,7 +335,7 @@ This section provides detailed information about the architecture, components, a
 | `src/components/HistoryPage.tsx` | Presentational scaffolding for browsing previous experiments (seeded data + management affordances). |
 | `src/components/DocumentationPage.tsx` | Rich in-app documentation with copy-to-clipboard snippets, tabbed guides, and workflow walkthroughs. |
 | `src/components/ComingSoonPage.tsx` | Product roadmap showcasing planned features (re-ranking, model support, dark mode, metrics). |
-| `src/components/SettingsPage.tsx` | UX shell for future account/API key management (forms and toggles are presently static). |
+| `src/components/SettingsPage.tsx` | UX shell for future account preferences (forms and toggles are presently static). |
 | `src/main.tsx` | Binds the dataset, pipeline, and experiment providers so every screen shares the same shared state. |
 
 #### Experiment Pipeline Logic
@@ -367,9 +343,9 @@ This section provides detailed information about the architecture, components, a
 2. **Parsing on Demand:** When a pipeline runs, any uploaded-but-unparsed documents are sent to `/api/parse` using the baseline pipeline’s parsing strategy, with status updates fed back into the dataset context.
 3. **Chunking:** `chunkDocumentsWithConfig` slices content according to the active pipeline strategy; `summarizeChunkGroups` produces quick stats for the report.
 4. **Upsert:** `/api/chunks` embeds every chunk and writes them to the pipeline’s target Qdrant collection. Existing vectors for that pipeline are cleared, and collection metadata (dimension, source collection) is tracked.
-5. **Answering:** For each task + pipeline, `/api/answer` performs retrieval, captures cited chunks, latency, and token usage, and normalizes snippets for downstream rendering.
-6. **Judging:** Answers feed `/api/judge`, which yields per-task verdicts (pass/review), dimension-specific scores, rationales, latency, and token counts.
-7. **Metrics & Costing:** The experiment store computes aggregate metrics (pass rate, context precision, groundedness, latency p95, cost/query, tokens used) and derives “best pipeline” recommendations.
+5. **Answering:** For each task + pipeline, `/api/answer` performs retrieval, records retrieved chunks, latency, and token usage, and normalizes snippets for downstream rendering.
+6. **Judging:** Answers feed `/api/judge`, which yields per-task verdicts (pass/review/unavailable), dimension-specific scores, rationales, latency, and token counts.
+7. **Metrics & Costing:** The experiment store computes aggregate metrics (judge pass rate, judged context precision, groundedness, latency p95, cost/query, tokens used) and derives “best pipeline” recommendations.
 8. **Reporting & Export:** The Reports page compares pipelines, highlights metric deltas against baseline, and offers Markdown/PDF exports summarizing findings and recommended next steps.
 9. **Persistence:** The latest `ExperimentRun` snapshot (including configuration copies) is stored in context for Reports, History, and Documentation pages.
 

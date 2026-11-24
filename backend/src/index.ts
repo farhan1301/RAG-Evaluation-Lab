@@ -26,8 +26,10 @@ const loadEnvFile = (filename: string, override = false) => {
   }
 };
 
-loadEnvFile('.env');
-loadEnvFile('.env.local', true);
+if (process.env.NODE_ENV !== 'test') {
+  loadEnvFile('.env');
+  loadEnvFile('.env.local', true);
+}
 
 const config = loadConfig();
 const openai = new OpenAIClient(config);
@@ -45,9 +47,9 @@ const parseAllowedOrigins = (value: string | undefined) =>
 const parsedOrigins = parseAllowedOrigins(process.env.CORS_ORIGINS);
 const allowAnyOrigin = parsedOrigins.includes('*');
 const defaultLocalOrigins = [
-  'http://localhost:3000',
   'http://127.0.0.1:3000',
-  'http://localhost:5173',
+  'http://127.0.0.1:3000',
+  'http://127.0.0.1:5173',
   'http://127.0.0.1:5173',
 ];
 const configuredOrigins = parsedOrigins.filter((origin) => origin !== '*');
@@ -109,6 +111,6 @@ app.post('/api/parse', createParseHandler(llamaParse));
 app.post('/api/judge', createJudgeHandler(openai));
 
 const PORT = process.env.PORT ? Number(process.env.PORT) : 7070;
-app.listen(PORT, () => {
-  console.log(`[backend] listening on http://localhost:${PORT}`);
+app.listen(PORT, '127.0.0.1', () => {
+  console.log(`[backend] listening on http://127.0.0.1:${PORT}`);
 });

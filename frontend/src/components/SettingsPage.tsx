@@ -112,58 +112,6 @@ export function SettingsPage() {
           </CardContent>
         </Card>
 
-        {/* API Keys */}
-        <Card>
-          <CardHeader>
-            <div className="flex items-center gap-2">
-              <Key size={20} />
-              <CardTitle className="text-zinc-900">API Keys</CardTitle>
-            </div>
-            <CardDescription className="text-zinc-600">
-              LlamaParse is required for document ingestion; other providers unlock additional model options.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="space-y-2">
-              <Label htmlFor="llamaParseKey" className="text-zinc-700">
-                LlamaParse API Key <span className="text-red-500">*</span>
-              </Label>
-              <Input id="llamaParseKey" type="password" placeholder="llx-..." />
-            </div>
-            
-            <div className="space-y-2">
-              <Label htmlFor="openaiKey" className="text-zinc-700">
-                OpenAI API Key
-              </Label>
-              <Input
-                id="openaiKey"
-                type="password"
-                placeholder="sk-..."
-                defaultValue="sk-proj-..."
-              />
-            </div>
-            
-            <div className="space-y-2">
-              <Label htmlFor="cohereKey" className="text-zinc-700">
-                Cohere API Key
-              </Label>
-              <Input id="cohereKey" type="password" placeholder="..." />
-            </div>
-            
-            <div className="space-y-2">
-              <Label htmlFor="anthropicKey" className="text-zinc-700">
-                Anthropic API Key
-              </Label>
-              <Input id="anthropicKey" type="password" placeholder="sk-ant-..." />
-            </div>
-            
-            <Button className="gap-2">
-              <Save size={16} />
-              Save API Keys
-            </Button>
-          </CardContent>
-        </Card>
-
         {/* Data & Privacy */}
         <Card>
           <CardHeader>

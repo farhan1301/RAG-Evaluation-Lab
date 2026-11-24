@@ -1,4 +1,7 @@
+import type { JudgingSummary } from '../types/experiment';
+
 interface ChunkPayload {
+  documentId?: string;
   id: string;
   text: string;
   metadata?: Record<string, unknown>;
@@ -7,8 +10,6 @@ interface ChunkPayload {
 interface UpsertChunksRequest {
   pipelineId: string;
   documentId?: string;
-  collectionName?: string;
-  resetCollection?: boolean;
   embeddingModel?: string;
   chunks: ChunkPayload[];
 }
@@ -34,7 +35,6 @@ interface SearchRequest {
   pipelineId: string;
   question: string;
   topK?: number;
-  collectionName?: string;
   embeddingModel?: string;
 }
 
@@ -42,7 +42,6 @@ interface AnswerRequestPayload {
   pipelineId: string;
   question: string;
   topK?: number;
-  collectionName?: string;
   model?: string;
   embeddingModel?: string;
 }
@@ -73,35 +72,7 @@ interface JudgeEvaluationInput {
   context?: string[];
 }
 
-interface JudgeResponse {
-  pipelineId: string;
-  verdict: 'pass' | 'review';
-  passRate: number;
-  averageScores: {
-    relevance: number;
-    contextPrecision: number;
-    groundedness: number;
-  };
-  tokensUsed: number;
-  latencyMs: number;
-  details: Array<{
-    taskId: string;
-    verdict: 'pass' | 'review';
-    scores: {
-      relevance: number;
-      contextPrecision: number;
-      groundedness: number;
-    };
-    rationale: string;
-    missingCriteria: string[];
-    latencyMs: number;
-    usage?: {
-      promptTokens: number;
-      completionTokens: number;
-      totalTokens: number;
-    };
-  }>;
-}
+type JudgeResponse = Omit<JudgingSummary, 'costUsd'> & { pipelineId: string };
 
 interface ParseDocumentRequest {
   filename: string;
@@ -116,8 +87,8 @@ interface ParseDocumentResponse {
 }
 
 const BACKEND_URL =
-  (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_BACKEND_URL) ||
-  'http://localhost:7070';
+  import.meta.env.VITE_BACKEND_URL ||
+  'http://127.0.0.1:7070';
 
 const withBase = (path: string) => {
   const trimmed = path.startsWith('/') ? path : `/${path}`;

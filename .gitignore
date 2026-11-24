@@ -1,17 +1,11 @@
-/.env
-/.env.local
-
-# Node dependencies
 node_modules/
-
-# Build outputs
 dist/
 build/
-backend/dist/
-frontend/build/
-frontend/node_modules/.vite/
-
-# Logs and runtime artifacts
+coverage/
+.vite/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
 *.log
 logs/
-backend/logs/

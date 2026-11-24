@@ -3,8 +3,8 @@ import type { ChunkingStatistics } from '../lib/chunking';
 import type { DatasetTask } from './dataset';
 
 export type MetricKey =
-  | 'precisionAt5'
-  | 'recallAt5'
+  | 'judgePassRate'
+  | 'judgedContextPrecision'
   | 'latencyP95'
   | 'groundedness'
   | 'costPerQuery'
@@ -18,15 +18,15 @@ export interface MetricDefinition {
 }
 
 export const METRIC_DEFINITIONS: MetricDefinition[] = [
-  { key: 'precisionAt5', label: 'Pass Rate', better: 'higher', format: (value) => `${(value * 100).toFixed(0)}%` },
-  { key: 'recallAt5', label: 'Context Precision', better: 'higher', format: (value) => `${(value * 100).toFixed(0)}%` },
+  { key: 'judgePassRate', label: 'Judge pass rate', better: 'higher', format: (value) => `${(value * 100).toFixed(0)}%` },
+  { key: 'judgedContextPrecision', label: 'Judged context precision', better: 'higher', format: (value) => `${(value * 100).toFixed(0)}%` },
   { key: 'latencyP95', label: 'Latency p95 (s)', better: 'lower', format: (value) => `${value.toFixed(1)}s` },
   { key: 'groundedness', label: 'Groundedness', better: 'higher', format: (value) => value.toFixed(2) },
   { key: 'costPerQuery', label: 'Cost per Query', better: 'lower', format: (value) => `$${value.toFixed(4)}` },
   { key: 'tokensUsed', label: 'Tokens Used', better: 'lower', format: (value) => Math.round(value).toLocaleString() },
 ];
 
-export type PipelineMetrics = Record<MetricKey, number>;
+export type PipelineMetrics = Record<MetricKey, number | null>;
 
 export interface EmbeddingSummary {
   model: string;
@@ -59,7 +59,7 @@ export interface AnswerDetail {
   expectedAnswer?: string;
   acceptanceRule?: string;
   response: string;
-  citedChunkIds: string[];
+  retrievedChunkIds: string[];
   latencyMs?: number;
   usage?: {
     promptTokens: number;
@@ -79,14 +79,14 @@ export interface AnsweringSummary {
 
 export interface JudgeScores {
   relevance: number;
-  contextPrecision: number;
+  judgedContextPrecision: number;
   groundedness: number;
 }
 
 export interface JudgeDetail {
   taskId: string;
-  verdict: 'pass' | 'review';
-  scores: JudgeScores;
+  verdict: 'pass' | 'review' | 'unavailable';
+  scores: JudgeScores | null;
   rationale: string;
   missingCriteria: string[];
   latencyMs: number;
@@ -98,9 +98,10 @@ export interface JudgeDetail {
 }
 
 export interface JudgingSummary {
-  verdict: 'pass' | 'review';
-  passRate: number;
-  averageScores: JudgeScores;
+  verdict: 'pass' | 'review' | 'unavailable';
+  judgePassRate: number | null;
+  coverage: { completed: number; total: number };
+  averageScores: Record<keyof JudgeScores, number | null>;
   tokensUsed: number;
   latencyMs: number;
   costUsd: number;

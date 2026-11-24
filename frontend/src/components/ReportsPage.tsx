@@ -1,4 +1,4 @@
-import { useMemo, useCallback } from 'react';
+import { useMemo } from 'react';
 import { Download, FileText } from 'lucide-react';
 import { Button } from './ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
@@ -136,19 +136,20 @@ const roundValue = (value: number | undefined, decimals: number) => {
 
 const VALUE_EPSILON = 1e-6;
 
-const deriveMetricValue = (pipeline: ExperimentPipelineResult, key: MetricKey): number => {
+const deriveMetricValue = (pipeline: ExperimentPipelineResult, key: MetricKey): number | null => {
   const baseValue = pipeline.metrics?.[key];
+  if (baseValue === null) return null;
   if (typeof baseValue === 'number' && Number.isFinite(baseValue)) {
     return baseValue;
   }
 
   switch (key) {
-    case 'precisionAt5':
-      return roundValue(pipeline.judgingSummary?.passRate, 2);
-    case 'recallAt5':
-      return roundValue(pipeline.judgingSummary?.averageScores.contextPrecision, 2);
+    case 'judgePassRate':
+      return pipeline.judgingSummary?.judgePassRate ?? null;
+    case 'judgedContextPrecision':
+      return pipeline.judgingSummary?.averageScores.judgedContextPrecision ?? null;
     case 'groundedness':
-      return roundValue(pipeline.judgingSummary?.averageScores.groundedness, 2);
+      return pipeline.judgingSummary?.averageScores.groundedness ?? null;
     case 'latencyP95': {
       const answerLatencyMs = pipeline.answeringSummary?.latencyMs;
       if (typeof answerLatencyMs === 'number' && Number.isFinite(answerLatencyMs)) {
@@ -184,7 +185,7 @@ const deriveMetricValue = (pipeline: ExperimentPipelineResult, key: MetricKey): 
 };
 
 const buildPipelineMetrics = (pipeline: ExperimentPipelineResult): PipelineMetrics =>
-  (['precisionAt5', 'recallAt5', 'latencyP95', 'groundedness', 'costPerQuery', 'tokensUsed'] as MetricKey[]).reduce(
+  (['judgePassRate', 'judgedContextPrecision', 'latencyP95', 'groundedness', 'costPerQuery', 'tokensUsed'] as MetricKey[]).reduce(
     (acc, key) => {
       acc[key] = deriveMetricValue(pipeline, key);
       return acc;
@@ -225,7 +226,7 @@ export function ReportsPage() {
             </CardHeader>
             <CardContent className="space-y-4 text-sm">
               <p className="text-zinc-600">
-                Once your first experiment completes, this page will populate with pass rate, context precision, latency, and cost
+                Once your first experiment completes, this page will populate with judge pass rate, judged context precision, latency, and cost
                 comparisons for every pipeline you tested. You will also unlock export options for sharing the findings
                 with stakeholders.
               </p>
@@ -247,10 +248,10 @@ export function ReportsPage() {
   const baselinePipeline = baselineId ? pipelineMap[baselineId] : undefined;
 
   const recommendedId =
-    (latestRun?.bestByMetric.precisionAt5 &&
-    pipelineMap[latestRun.bestByMetric.precisionAt5]
-      ? latestRun.bestByMetric.precisionAt5
-      : undefined) ?? baselineId;
+    (latestRun?.bestByMetric.judgePassRate &&
+    pipelineMap[latestRun.bestByMetric.judgePassRate]
+      ? latestRun.bestByMetric.judgePassRate
+      : undefined);
 
   const recommendedPipeline = recommendedId ? pipelineMap[recommendedId] : undefined;
   const recommendedSnapshot = recommendedPipeline?.pipelineSnapshot;
@@ -302,7 +303,7 @@ export function ReportsPage() {
       ? METRIC_DEFINITIONS.filter((definition) => {
           const recommendedValue = recommendedMetrics[definition.key];
           const baselineValue = baselineMetrics[definition.key];
-          if (recommendedValue === undefined || baselineValue === undefined) {
+          if (typeof recommendedValue !== 'number' || typeof baselineValue !== 'number') {
             return false;
           }
           if (definition.better === 'higher') {
@@ -318,11 +319,11 @@ export function ReportsPage() {
       ? `It outperforms your baseline (${baselinePipeline.pipelineName}) on ${highlightSummary}${
           highlightMetrics.length > 3 ? ' and additional metrics' : ''
         }.`
-      : 'It maintains parity with your baseline configuration while ensuring consistent quality.';
+      : 'The recommendation uses judge pass rate among completed judgments.';
 
   const COMPARISON_METRICS: MetricKey[] = [
-    'precisionAt5',
-    'recallAt5',
+    'judgePassRate',
+    'judgedContextPrecision',
     'groundedness',
     'latencyP95',
     'costPerQuery',
@@ -331,11 +332,13 @@ export function ReportsPage() {
 
   const pipelineComparisonRows = pipelineEntries.map(({ id, pipeline, color }) => {
     const metrics = pipelineMetrics[id]?.metrics;
+    const coverage = pipeline?.judgingSummary?.coverage;
     return {
       id,
       name: pipeline?.pipelineName ?? `Pipeline ${id}`,
       color,
       metrics,
+      coverage: coverage ? `${coverage.completed}/${coverage.total}` : 'Unavailable',
       isBaseline: id === baselineId,
       isRecommended: id === recommendedId,
     };
@@ -361,7 +364,7 @@ export function ReportsPage() {
     {} as Record<MetricKey, { best: number; worst: number }>
   );
 
-  const buildMarkdownReport = useCallback(() => {
+  const buildMarkdownReport = () => {
     if (!latestRun) {
       return '';
     }
@@ -413,7 +416,7 @@ export function ReportsPage() {
     lines.push('## Pipeline Metrics');
 
     const tableHeader = [
-      'Pipeline',
+      'Pipeline', 'Judge coverage (scored/total)',
       ...COMPARISON_METRICS.map((metric) => METRIC_LOOKUP[metric]?.label ?? metric),
     ];
     const headerRow = `| ${tableHeader.join(' | ')} |`;
@@ -424,8 +427,8 @@ export function ReportsPage() {
     pipelineComparisonRows.forEach((row) => {
       const valueCells = COMPARISON_METRICS.map((metric) => {
         const value = row.metrics?.[metric];
-        if (value === undefined || Number.isNaN(value)) {
-          return '—';
+        if (typeof value !== 'number' || Number.isNaN(value)) {
+          return 'Unavailable';
         }
         return formatMetricValue(metric, value);
       });
@@ -439,7 +442,7 @@ export function ReportsPage() {
       }
 
       const pipelineLabel = labels.length ? `${row.name} (${labels.join(', ')})` : row.name;
-      lines.push(`| ${[pipelineLabel, ...valueCells].join(' | ')} |`);
+      lines.push(`| ${[pipelineLabel, row.coverage, ...valueCells].join(' | ')} |`);
     });
 
     lines.push('');
@@ -449,25 +452,17 @@ export function ReportsPage() {
     });
 
     return lines.join('\n');
-  }, [
-    latestRun,
-    formattedTimestamp,
-    recommendedPipeline,
-    recommendationSummary,
-    highlightMetrics,
-    recommendedSnapshot,
-    pipelineComparisonRows,
-  ]);
+  };
 
-  const handleExportMarkdown = useCallback(() => {
+  const handleExportMarkdown = () => {
     const markdown = buildMarkdownReport();
     if (!markdown) {
       return;
     }
     triggerDownload(markdown, 'experiment-report.md', 'text/markdown');
-  }, [buildMarkdownReport]);
+  };
 
-  const handleExportPdf = useCallback(() => {
+  const handleExportPdf = () => {
     if (!latestRun) {
       return;
     }
@@ -522,12 +517,13 @@ export function ReportsPage() {
 
       const rowTitle = badges.length ? `${row.name} (${badges.join(', ')})` : row.name;
       lines.push(rowTitle);
+      lines.push(`  - Judge coverage (scored/total): ${row.coverage}`);
 
       COMPARISON_METRICS.forEach((metric) => {
         const label = METRIC_LOOKUP[metric]?.label ?? metric;
         const value = row.metrics?.[metric];
         const formattedValue =
-          value === undefined || Number.isNaN(value) ? '—' : formatMetricValue(metric, value);
+          typeof value !== 'number' || Number.isNaN(value) ? 'Unavailable' : formatMetricValue(metric, value);
         lines.push(`  - ${label}: ${formattedValue}`);
       });
 
@@ -542,14 +538,7 @@ export function ReportsPage() {
 
     const pdf = buildPdfDocument(lines);
     triggerDownload(pdf, 'experiment-report.pdf', 'application/pdf');
-  }, [
-    latestRun,
-    formattedTimestamp,
-    recommendedPipeline,
-    recommendationSummary,
-    recommendedSnapshot,
-    pipelineComparisonRows,
-  ]);
+  };
 
   return (
     <div className="p-8 bg-zinc-50">
@@ -577,15 +566,14 @@ export function ReportsPage() {
         {/* Recommendation */}
         <Card>
           <CardHeader>
-            <CardTitle>AI-Generated Recommendation</CardTitle>
+            <CardTitle>Pipeline Recommendation</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
             <p className="text-zinc-700">
               {recommendedPipeline ? (
                 <>
                   Based on the most recent experiment,{' '}
-                  <strong>{recommendedPipeline.pipelineName}</strong> provides the strongest balance
-                  across the tracked metrics. {recommendationSummary}
+                  <strong>{recommendedPipeline.pipelineName}</strong> has the highest observed judge pass rate. {recommendationSummary}
                 </>
               ) : (
                 'Run details were recorded, but we could not identify a leading configuration.'
@@ -649,6 +637,7 @@ export function ReportsPage() {
                   <TableHeader>
                     <TableRow>
                       <TableHead>Pipeline</TableHead>
+                      <TableHead>Judge coverage (scored/total)</TableHead>
                       {COMPARISON_METRICS.map((metric) => (
                         <TableHead key={metric} className="text-right">
                           {METRIC_LOOKUP[metric]?.label ?? capitalize(metric)}
@@ -669,6 +658,7 @@ export function ReportsPage() {
                             )}
                       </div>
                     </TableCell>
+                    <TableCell>{row.coverage}</TableCell>
                     {COMPARISON_METRICS.map((metric) => (
                       <TableCell key={metric} className="text-right">
                         {row.metrics && typeof row.metrics[metric] === 'number' ? (
@@ -806,7 +796,7 @@ export function ReportsPage() {
                             })()}
                           </div>
                         ) : (
-                          '—'
+                          'Unavailable'
                         )}
                       </TableCell>
                     ))}
