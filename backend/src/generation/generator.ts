@@ -241,6 +241,9 @@ export class SyntheticGenerator {
 
   private async requestStructuredProposals(
     model: string,
+    expectedProvider: ReturnType<
+      ProviderRegistry['resolveChat']
+    >['provider']['kind'],
     messages: ChatMessage[],
     params: {
       temperature: number | null;
@@ -259,7 +262,11 @@ export class SyntheticGenerator {
       structuredOutput: boolean;
     };
   }> {
-    const { provider } = this.providers.resolveChat('chat', model);
+    const { provider } = this.providers.resolveChat(
+      'chat',
+      model,
+      expectedProvider,
+    );
     let repairUsed = false;
     let lastRawContent = '';
     let lastRepairHint = '';
@@ -409,7 +416,7 @@ export class SyntheticGenerator {
 
     const pendingDocs = plan.documents.filter((d) => d.state !== 'succeeded');
     let remainingTarget = Math.max(
-      1,
+      0,
       batch.params.targetCount - batch.proposedCount,
     );
     let succeededDocs = plan.documents.filter(
@@ -419,6 +426,7 @@ export class SyntheticGenerator {
     let lastError: string | null = null;
 
     for (let idx = 0; idx < pendingDocs.length; idx++) {
+      if (remainingTarget <= 0) break;
       hooks.signal?.throwIfAborted();
       hooks.guard?.();
 
@@ -450,6 +458,7 @@ export class SyntheticGenerator {
       try {
         const generated = await this.requestStructuredProposals(
           batch.model,
+          batch.provider,
           messages,
           {
             temperature: batch.params.temperature,
@@ -466,6 +475,7 @@ export class SyntheticGenerator {
         let leakageFlaggedCount = 0;
 
         for (const raw of generated.proposals) {
+          if (acceptedForDoc.length >= remainingTarget) break;
           const spanCheck = validateSourceSpans(
             raw.sourceSpans,
             frozenDocsByVersionId,

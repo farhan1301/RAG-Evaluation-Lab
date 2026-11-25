@@ -138,7 +138,7 @@ export class OpenAIProvider implements ChatProvider, EmbeddingProvider {
     let expectedDim = request.expectedDimensions ?? this.expectedDimensions;
     let promptTokens = 0;
     let totalTokens = 0;
-    let hasUsage = false;
+    let allBatchesHadUsage = true;
 
     for (let offset = 0; offset < request.inputs.length; offset += batchSize) {
       request.signal?.throwIfAborted();
@@ -216,11 +216,14 @@ export class OpenAIProvider implements ChatProvider, EmbeddingProvider {
         vectors.push(vec);
       }
 
-      if (response.usage) {
-        hasUsage = true;
-        promptTokens += response.usage.prompt_tokens ?? 0;
+      if (response.usage && typeof response.usage.prompt_tokens === 'number') {
+        promptTokens += response.usage.prompt_tokens;
         totalTokens +=
-          response.usage.total_tokens ?? response.usage.prompt_tokens ?? 0;
+          typeof response.usage.total_tokens === 'number'
+            ? response.usage.total_tokens
+            : response.usage.prompt_tokens;
+      } else {
+        allBatchesHadUsage = false;
       }
     }
 
@@ -230,7 +233,7 @@ export class OpenAIProvider implements ChatProvider, EmbeddingProvider {
       model: request.model,
       provider: this.kind,
       requestIds,
-      ...(hasUsage
+      ...(allBatchesHadUsage
         ? {
             usage: {
               inputTokens: promptTokens,

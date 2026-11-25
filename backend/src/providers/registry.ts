@@ -2,6 +2,7 @@ import type {
   Capabilities,
   PipelineConfig,
   Profile,
+  ProviderKind,
   Role,
 } from '@rag-eval/contracts';
 import type { Config, ResolvedProviderProfile } from '../config/env.js';
@@ -138,22 +139,32 @@ export class ProviderRegistry {
     this.transports = transports;
   }
 
-  findProfile(role: Role, requestedModel?: string) {
+  findProfile(
+    role: Role,
+    requestedModel?: string,
+    expectedProvider?: ProviderKind,
+  ) {
     const model = requestedModel?.trim() || '';
     return this.profiles.find(
-      (p) => p.role === role && (!model || p.model === model),
+      (p) =>
+        p.role === role &&
+        (!model || p.model === model) &&
+        (!expectedProvider || p.provider === expectedProvider),
     );
   }
 
   resolveChat(
     role: 'chat' | 'judge',
     requestedModel?: string,
+    expectedProvider?: ProviderKind,
   ): { profile: ResolvedProviderProfile; provider: ChatProvider } {
-    const found = this.findProfile(role, requestedModel);
+    const found = this.findProfile(role, requestedModel, expectedProvider);
     if (!found?.capabilities.chat) {
       throw new ProviderError(
         'missing_capability',
-        `Configure a ${role} profile before running ${role} operations.`,
+        expectedProvider
+          ? `Frozen ${role} profile "${expectedProvider}/${requestedModel ?? ''}" is unavailable or has changed.`
+          : `Configure a ${role} profile before running ${role} operations.`,
       );
     }
     const key = `${found.role}:${found.provider}:${found.model}`;
@@ -199,18 +210,27 @@ export class ProviderRegistry {
     return { profile: found, provider };
   }
 
-  resolveEmbedding(requestedModel?: string): {
+  resolveEmbedding(
+    requestedModel?: string,
+    expectedProvider?: ProviderKind,
+  ): {
     profile: ResolvedProviderProfile;
     provider: EmbeddingProvider;
   } {
-    const found = this.findProfile('embedding', requestedModel);
+    const found = this.findProfile(
+      'embedding',
+      requestedModel,
+      expectedProvider,
+    );
     if (
       !found?.capabilities.embeddings ||
       (found.provider !== 'openai' && found.provider !== 'openai-compatible')
     ) {
       throw new ProviderError(
         'missing_capability',
-        'Configure an embedding profile before indexing or searching dense vectors.',
+        expectedProvider
+          ? `Frozen embedding profile "${expectedProvider}/${requestedModel ?? ''}" is unavailable or has changed.`
+          : 'Configure an embedding profile before indexing or searching dense vectors.',
       );
     }
     const key = `${found.provider}:${found.model}`;
@@ -234,11 +254,14 @@ export class ProviderRegistry {
     return { profile: found, provider };
   }
 
-  resolveReranker(requestedModel?: string): {
+  resolveReranker(
+    requestedModel?: string,
+    expectedProvider?: ProviderKind,
+  ): {
     profile: ResolvedProviderProfile;
     provider: RerankProvider;
   } {
-    const found = this.findProfile('rerank', requestedModel);
+    const found = this.findProfile('rerank', requestedModel, expectedProvider);
     if (
       !found?.capabilities.rerank ||
       found.provider !== 'http' ||
@@ -246,7 +269,9 @@ export class ProviderRegistry {
     ) {
       throw new ProviderError(
         'missing_capability',
-        'Configure an HTTP reranker profile before enabling reranking.',
+        expectedProvider
+          ? `Frozen reranker profile "${expectedProvider}/${requestedModel ?? ''}" is unavailable or has changed.`
+          : 'Configure an HTTP reranker profile before enabling reranking.',
       );
     }
     const key = `${found.model}:${found.baseURL}`;

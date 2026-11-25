@@ -318,8 +318,8 @@ export class Generations {
 
       const insertDoc = this.db.prepare(
         `INSERT INTO generation_batch_documents(
-          batch_id, document_id, document_version_id, document_name, ordinal, state
-        ) VALUES (?, ?, ?, ?, ?, 'pending')`,
+          batch_id, document_id, document_version_id, document_name, ordinal, state, artifact_id
+        ) VALUES (?, ?, ?, ?, ?, 'pending', ?)`,
       );
       selectedDocs.forEach((doc, ordinal) => {
         insertDoc.run(
@@ -328,6 +328,7 @@ export class Generations {
           doc.documentVersionId,
           doc.name,
           ordinal,
+          doc.artifactId,
         );
       });
 
@@ -573,20 +574,40 @@ export class Generations {
           );
         }
 
-        // Re-verify source spans exist in the frozen document revision that generated the proposal.
-        const sourceFrozenTexts =
-          proposal.datasetRevision === expectedRevision
-            ? targetFrozenTexts
-            : this.resolveFrozenTexts(datasetId, proposal.datasetRevision);
+        // Re-verify source spans exist in the target dataset revision (supporting document
+        // versions must still be present and unchanged in the target revision).
         const spanCheck = validateSourceSpans(
           proposal.sourceSpans,
-          sourceFrozenTexts,
+          targetFrozenTexts,
         );
         if (!spanCheck.valid) {
           throw new ApiError(
             409,
             'conflict',
-            `Proposal "${proposal.id}" failed source-span validation: ${spanCheck.reason}`,
+            `Cannot promote proposal "${proposal.id}" into revision ${expectedRevision}: ${spanCheck.reason}`,
+          );
+        }
+
+        // Reject promotion when any required positive qrel is absent from the target revision
+        // or when an answerable task would be left without a positive gold document.
+        const missingPositive = proposal.qrels.filter(
+          (q) => q.grade > 0 && !targetDocIds.has(q.documentId),
+        );
+        if (missingPositive.length > 0) {
+          throw new ApiError(
+            409,
+            'conflict',
+            `Cannot promote proposal "${proposal.id}": positive relevance label(s) reference document(s) absent from dataset revision ${expectedRevision}.`,
+          );
+        }
+        const remainingPositive = proposal.qrels.filter(
+          (q) => q.grade > 0 && targetDocIds.has(q.documentId),
+        );
+        if (proposal.answerable && remainingPositive.length === 0) {
+          throw new ApiError(
+            409,
+            'conflict',
+            `Cannot promote answerable proposal "${proposal.id}": no positive gold documents remain in dataset revision ${expectedRevision}.`,
           );
         }
 
@@ -688,27 +709,46 @@ export class Generations {
 
   loadExecutionPlan(batchId: string): GenerationExecutionPlan {
     const batch = this.getBatch(batchId);
-    const docs: GenerationBatchDocumentPlan[] = this.db
+    const docRows = this.db
       .prepare(
         `SELECT document_id AS documentId, document_version_id AS documentVersionId,
-                document_name AS documentName, ordinal, state
+                document_name AS documentName, ordinal, state, artifact_id AS artifactId
          FROM generation_batch_documents
          WHERE batch_id = ?
          ORDER BY ordinal ASC`,
       )
-      .all(batchId)
-      .map((row) => ({
-        documentId: String(row.documentId),
-        documentVersionId: String(row.documentVersionId),
-        documentName: String(row.documentName),
-        ordinal: Number(row.ordinal),
-        state: row.state as GenerationBatchDocumentPlan['state'],
-      }));
+      .all(batchId);
+    const docs: GenerationBatchDocumentPlan[] = docRows.map((row) => ({
+      documentId: String(row.documentId),
+      documentVersionId: String(row.documentVersionId),
+      documentName: String(row.documentName),
+      ordinal: Number(row.ordinal),
+      state: row.state as GenerationBatchDocumentPlan['state'],
+    }));
 
-    const revisionSources = this.indexes.revisionDocuments(
+    const hasPinnedArtifacts = docRows.some(
+      (r) => typeof r.artifactId === 'string',
+    );
+    const pinnedArtifacts = hasPinnedArtifacts
+      ? Object.fromEntries(
+          docRows.map((r) => [
+            String(r.documentVersionId),
+            typeof r.artifactId === 'string' ? r.artifactId : null,
+          ]),
+        )
+      : undefined;
+    const allRevisionSources = this.indexes.revisionDocuments(
       batch.datasetId,
       batch.datasetRevision,
     );
+    const revisionSources = pinnedArtifacts
+      ? this.indexes.revisionDocuments(batch.datasetId, batch.datasetRevision, {
+          ...Object.fromEntries(
+            allRevisionSources.map((s) => [s.documentVersionId, s.artifactId]),
+          ),
+          ...pinnedArtifacts,
+        })
+      : allRevisionSources;
 
     // Existing questions from the frozen dataset revision + existing non-rejected proposals
     const frozenTasks = this.datasets.get(

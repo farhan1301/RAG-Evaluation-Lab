@@ -12,6 +12,7 @@ import {
 } from '@rag-eval/contracts';
 import { ApiError, missing } from '../errors.js';
 import { transaction } from './database.js';
+import { dropGenerationFts } from './indexes.js';
 import type { Extraction } from '../ingestion/local.js';
 import {
   defaultChunks,
@@ -361,6 +362,14 @@ export class Jobs {
             orig.embedding_model,
             new Date(this.now()).toISOString(),
           );
+        this.db
+          .prepare(
+            `INSERT INTO generation_source_artifacts(generation_id, document_version_id, artifact_id)
+             SELECT ?, document_version_id, artifact_id
+             FROM generation_source_artifacts
+             WHERE generation_id = ?`,
+          )
+          .run(nextGenerationId, previous.generationId);
         const next = this.enqueueIndex(nextGenerationId, null, null, id);
         return this.get(next);
       }
@@ -481,14 +490,12 @@ export class Jobs {
               id,
             );
           if (j.state === 'queued' && j.generationId) {
-            this.db
+            const failed = this.db
               .prepare(
                 "UPDATE index_generations SET state='failed',error_message=? WHERE id=? AND state='building'",
               )
               .run('Index build cancelled.', j.generationId);
-            this.db
-              .prepare('DELETE FROM chunk_fts WHERE generation_id=?')
-              .run(j.generationId);
+            if (failed.changes > 0) dropGenerationFts(this.db, j.generationId);
           }
           this.indexEvent(id);
         }
@@ -567,7 +574,7 @@ export class Jobs {
         this.db
           .prepare('UPDATE index_jobs SET state=?,message=? WHERE id=?')
           .run(cancelled ? 'cancelled' : 'failed', message, row.id);
-        this.db
+        const failed = this.db
           .prepare(
             "UPDATE index_generations SET state='failed',error_message=? WHERE id=? AND state='building'",
           )
@@ -575,9 +582,8 @@ export class Jobs {
             cancelled ? 'Index build cancelled.' : message,
             row.generation_id,
           );
-        this.db
-          .prepare('DELETE FROM chunk_fts WHERE generation_id=?')
-          .run(row.generation_id);
+        if (failed.changes > 0)
+          dropGenerationFts(this.db, String(row.generation_id));
         this.indexEvent(String(row.id));
       }
       const row = this.db
@@ -774,14 +780,13 @@ export class Jobs {
           .prepare('SELECT generation_id FROM index_jobs WHERE id=?')
           .get(l.id);
         if (gen?.generation_id) {
-          this.db
+          const failed = this.db
             .prepare(
               "UPDATE index_generations SET state='failed',error_message=? WHERE id=? AND state='building'",
             )
             .run('Index build cancelled.', gen.generation_id);
-          this.db
-            .prepare('DELETE FROM chunk_fts WHERE generation_id=?')
-            .run(gen.generation_id);
+          if (failed.changes > 0)
+            dropGenerationFts(this.db, String(gen.generation_id));
         }
         this.indexEvent(l.id);
       } else if (

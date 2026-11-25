@@ -74,6 +74,7 @@ const frozenSnapshotSchema = z.strictObject({
   datasetId: z.uuid(),
   datasetRevision: z.int().positive(),
   datasetName: z.string(),
+  documentArtifacts: z.record(z.string(), z.string().nullable()).optional(),
   mode: z.enum(['retrieval_only', 'full_rag']),
   judgeEnabled: z.boolean(),
   cutoffs: z.array(z.int().positive()),
@@ -496,8 +497,16 @@ export class Runs {
           'Cannot run an experiment against an archived dataset.',
         );
       }
-      // Verify >=1 document and all non-text documents have succeeded parse artifacts.
-      this.indexes.revisionDocuments(frozenDataset.id, frozenDataset.revision);
+      // Verify >=1 document, all non-text documents have succeeded parse artifacts,
+      // and freeze the exact document-version -> artifact mapping into the run snapshot.
+      const revisionDocs = this.indexes.revisionDocuments(
+        frozenDataset.id,
+        frozenDataset.revision,
+      );
+      const documentArtifacts: Record<string, string | null> =
+        Object.fromEntries(
+          revisionDocs.map((doc) => [doc.documentVersionId, doc.artifactId]),
+        );
 
       if (!frozenDataset.tasks.length) {
         throw new ApiError(
@@ -550,6 +559,7 @@ export class Runs {
         datasetId: frozenDataset.id,
         datasetRevision: frozenDataset.revision,
         datasetName: frozenDataset.name,
+        documentArtifacts,
         mode,
         judgeEnabled: mode === 'full_rag' ? judgeEnabled : false,
         cutoffs,
@@ -1565,6 +1575,182 @@ export class Runs {
     return Number(row?.n ?? 0);
   }
 
+  beginProviderCall(
+    input: {
+      stageKeyPrefix: string;
+      runId: string;
+      pipelineId?: string | null;
+      runTaskId?: string | null;
+      indexGenerationId?: string | null;
+      operation: ProviderOperation;
+      provider: ProviderKind;
+      model: string;
+      isRetry: boolean;
+      priceSchedule: PriceSchedule;
+    },
+    guard?: () => void,
+  ): { id: string; attemptNumber: number } {
+    return transaction(this.db, () => {
+      guard?.();
+      const id = randomUUID();
+      const stageKey = `${input.stageKeyPrefix}:${id}`;
+      const maxRow = input.runTaskId
+        ? this.db
+            .prepare(
+              `SELECT coalesce(max(attempt_number), 0) AS n
+               FROM provider_calls
+               WHERE run_id = ? AND run_task_id = ? AND operation = ? AND stage_key LIKE ?`,
+            )
+            .get(
+              input.runId,
+              input.runTaskId,
+              input.operation,
+              `${input.stageKeyPrefix}:%`,
+            )
+        : this.db
+            .prepare(
+              `SELECT coalesce(max(attempt_number), 0) AS n
+               FROM provider_calls
+               WHERE run_id = ? AND index_generation_id IS ? AND operation = ? AND stage_key LIKE ?`,
+            )
+            .get(
+              input.runId,
+              input.indexGenerationId ?? null,
+              input.operation,
+              `${input.stageKeyPrefix}:%`,
+            );
+      const attemptNumber = Number(maxRow?.n ?? 0) + 1;
+      this.db
+        .prepare(
+          `INSERT INTO provider_calls(
+            id, stage_key, run_id, pipeline_id, run_task_id, index_generation_id,
+            operation, provider, model, request_id, attempt_number, is_retry,
+            status, error_code, latency_ms,
+            input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, total_tokens,
+            usage_status, price_version, cost_status, cost_usd, created_at
+          ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        )
+        .run(
+          id,
+          stageKey,
+          input.runId,
+          input.pipelineId ?? null,
+          input.runTaskId ?? null,
+          input.indexGenerationId ?? null,
+          input.operation,
+          input.provider,
+          input.model,
+          null,
+          attemptNumber,
+          Number(input.isRetry || attemptNumber > 1),
+          'ambiguous',
+          'dispatch_in_flight',
+          0,
+          null,
+          null,
+          null,
+          null,
+          null,
+          'missing',
+          input.priceSchedule.version,
+          'unknown',
+          null,
+          new Date(this.now()).toISOString(),
+        );
+      return { id, attemptNumber };
+    });
+  }
+
+  completeProviderCall(
+    callId: string,
+    input: {
+      provider: ProviderKind;
+      model: string;
+      requestId?: string | null;
+      status: 'succeeded' | 'failed' | 'timeout' | 'cancelled' | 'ambiguous';
+      errorCode?: string | null;
+      latencyMs: number;
+      usage?: ProviderUsage;
+      priceSchedule: PriceSchedule;
+    },
+    guard?: () => void,
+  ) {
+    const priced =
+      input.status === 'ambiguous'
+        ? {
+            usageStatus: input.usage
+              ? ('known' as const)
+              : ('missing' as const),
+            priceVersion: input.priceSchedule.version,
+            costStatus: 'unknown' as const,
+            costUsd: null,
+          }
+        : priceProviderCall(input.priceSchedule, {
+            provider: input.provider,
+            model: input.model,
+            usage: input.usage,
+            succeeded: input.status === 'succeeded',
+          });
+    transaction(this.db, () => {
+      guard?.();
+      this.db
+        .prepare(
+          `UPDATE provider_calls
+           SET provider = ?, model = ?, request_id = ?,
+               status = ?, error_code = ?, latency_ms = ?,
+               input_tokens = ?, output_tokens = ?, cache_read_tokens = ?,
+               cache_creation_tokens = ?, total_tokens = ?,
+               usage_status = ?, price_version = ?, cost_status = ?, cost_usd = ?
+           WHERE id = ?`,
+        )
+        .run(
+          input.provider,
+          input.model,
+          input.requestId ?? null,
+          input.status,
+          input.errorCode ?? null,
+          Math.max(0, Math.round(input.latencyMs)),
+          input.usage ? input.usage.inputTokens : null,
+          input.usage ? input.usage.outputTokens : null,
+          input.usage?.cacheReadTokens ?? null,
+          input.usage?.cacheCreationTokens ?? null,
+          input.usage ? input.usage.totalTokens : null,
+          priced.usageStatus,
+          priced.priceVersion,
+          priced.costStatus,
+          priced.costUsd,
+          callId,
+        );
+    });
+  }
+
+  hasPriorProviderCall(
+    runId: string,
+    runTaskId: string,
+    operation: ProviderOperation,
+    stageKeyPrefix?: string,
+  ): boolean {
+    const row = stageKeyPrefix
+      ? this.db
+          .prepare(
+            `SELECT 1 FROM provider_calls
+             WHERE run_id = ? AND run_task_id = ? AND operation = ?
+               AND stage_key LIKE ?
+               AND status IN ('ambiguous', 'succeeded')
+             LIMIT 1`,
+          )
+          .get(runId, runTaskId, operation, `${stageKeyPrefix}%`)
+      : this.db
+          .prepare(
+            `SELECT 1 FROM provider_calls
+             WHERE run_id = ? AND run_task_id = ? AND operation = ?
+               AND status IN ('ambiguous', 'succeeded')
+             LIMIT 1`,
+          )
+          .get(runId, runTaskId, operation);
+    return Boolean(row);
+  }
+
   recordProviderCall(
     input: {
       stageKey: string;
@@ -2026,6 +2212,55 @@ export class Runs {
         'UPDATE runs SET completed_units = ?, failed_units = ? WHERE id = ?',
       )
       .run(Number(counts?.completed ?? 0), Number(counts?.failed ?? 0), runId);
+  }
+
+  getPipelineTaskOutcomeSummary(runId: string, pipelineId: string) {
+    const row = this.db
+      .prepare(
+        `SELECT
+           count(*) AS total,
+           sum(CASE WHEN state = 'succeeded' THEN 1 ELSE 0 END) AS succeeded,
+           sum(CASE WHEN state = 'partial' THEN 1 ELSE 0 END) AS partial,
+           sum(CASE WHEN state = 'failed' THEN 1 ELSE 0 END) AS failed
+         FROM run_tasks
+         WHERE run_id = ? AND pipeline_id = ?`,
+      )
+      .get(runId, pipelineId);
+    return {
+      total: Number(row?.total ?? 0),
+      succeeded: Number(row?.succeeded ?? 0),
+      partial: Number(row?.partial ?? 0),
+      failed: Number(row?.failed ?? 0),
+    };
+  }
+
+  getRunTaskOutcomeSummary(runId: string) {
+    const row = this.db
+      .prepare(
+        `SELECT
+           count(*) AS total,
+           sum(CASE WHEN state IN ('succeeded', 'partial') THEN 1 ELSE 0 END) AS completed,
+           sum(CASE WHEN state = 'failed' THEN 1 ELSE 0 END) AS failed
+         FROM run_tasks
+         WHERE run_id = ?`,
+      )
+      .get(runId);
+    const firstError = this.db
+      .prepare(
+        `SELECT error_message AS errorMessage FROM run_tasks
+         WHERE run_id = ? AND state = 'failed' AND error_message IS NOT NULL
+         ORDER BY rowid ASC LIMIT 1`,
+      )
+      .get(runId);
+    return {
+      total: Number(row?.total ?? 0),
+      completed: Number(row?.completed ?? 0),
+      failed: Number(row?.failed ?? 0),
+      firstErrorMessage:
+        typeof firstError?.errorMessage === 'string'
+          ? firstError.errorMessage
+          : null,
+    };
   }
 
   finalizeRun(

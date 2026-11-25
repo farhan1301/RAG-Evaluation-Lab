@@ -34,6 +34,7 @@ export interface RetrievalServiceOptions {
 }
 
 export interface RetrievalProviderCallAudit {
+  callId?: string;
   operation: 'query_embed' | 'rerank';
   provider: ProviderKind;
   model: string;
@@ -45,6 +46,13 @@ export interface RetrievalProviderCallAudit {
 }
 
 export interface SearchAuditHooks {
+  expectedEmbeddingProvider?: ProviderKind;
+  expectedRerankerProvider?: ProviderKind;
+  onProviderCallStart?: (call: {
+    operation: 'query_embed' | 'rerank';
+    provider: ProviderKind;
+    model: string;
+  }) => string | undefined;
   onProviderCall?: (call: RetrievalProviderCallAudit) => void;
 }
 
@@ -106,7 +114,10 @@ export class RetrievalService {
     if (request.reranker.enabled) {
       // Validate reranker capability up front before doing retrieval work.
       try {
-        this.providers.resolveReranker(request.reranker.model);
+        this.providers.resolveReranker(
+          request.reranker.model,
+          audit?.expectedRerankerProvider,
+        );
       } catch (err) {
         if (err instanceof ProviderError) throw err.toApiError();
         throw err;
@@ -162,14 +173,38 @@ export class RetrievalService {
 
       const embedStart = this.now();
       let queryVector: number[];
+      const expectedEmbedProvider =
+        audit?.expectedEmbeddingProvider ??
+        generation.embeddingProvider ??
+        undefined;
+      if (
+        audit?.expectedEmbeddingProvider &&
+        generation.embeddingProvider &&
+        audit.expectedEmbeddingProvider !== generation.embeddingProvider
+      ) {
+        throw new ApiError(
+          422,
+          'missing_capability',
+          `Frozen embedding provider "${audit.expectedEmbeddingProvider}" does not match index generation provider "${generation.embeddingProvider}".`,
+        );
+      }
       const { profile, provider } = (() => {
         try {
-          return this.providers.resolveEmbedding(generation.embeddingModel);
+          return this.providers.resolveEmbedding(
+            generation.embeddingModel,
+            expectedEmbedProvider,
+          );
         } catch (err) {
           if (err instanceof ProviderError) throw err.toApiError();
           throw err;
         }
       })();
+      const embedCallId =
+        audit?.onProviderCallStart?.({
+          operation: 'query_embed',
+          provider: provider.kind,
+          model: profile.model,
+        }) ?? undefined;
       try {
         const embedded = await provider.embed({
           model: profile.model,
@@ -179,6 +214,7 @@ export class RetrievalService {
         });
         const embedLatency = Math.max(0, this.now() - embedStart);
         audit?.onProviderCall?.({
+          callId: embedCallId,
           operation: 'query_embed',
           provider: embedded.provider,
           model: embedded.model,
@@ -202,6 +238,7 @@ export class RetrievalService {
           const isTimeout =
             err instanceof ProviderError && err.code === 'timeout';
           audit?.onProviderCall?.({
+            callId: embedCallId,
             operation: 'query_embed',
             provider: provider.kind,
             model: profile.model,
@@ -321,12 +358,21 @@ export class RetrievalService {
       const bounded = working.slice(0, candidateDepth);
       const { profile, provider } = (() => {
         try {
-          return this.providers.resolveReranker(request.reranker.model);
+          return this.providers.resolveReranker(
+            request.reranker.model,
+            audit?.expectedRerankerProvider,
+          );
         } catch (err) {
           if (err instanceof ProviderError) throw err.toApiError();
           throw err;
         }
       })();
+      const rerankCallId =
+        audit?.onProviderCallStart?.({
+          operation: 'rerank',
+          provider: provider.kind,
+          model: profile.model,
+        }) ?? undefined;
       try {
         const result = await provider.rerank({
           model: profile.model,
@@ -337,6 +383,7 @@ export class RetrievalService {
         });
         rerankUsage = result.usage;
         audit?.onProviderCall?.({
+          callId: rerankCallId,
           operation: 'rerank',
           provider: provider.kind,
           model: result.model,
@@ -377,6 +424,7 @@ export class RetrievalService {
         const isTimeout =
           err instanceof ProviderError && err.code === 'timeout';
         audit?.onProviderCall?.({
+          callId: rerankCallId,
           operation: 'rerank',
           provider: provider.kind,
           model: profile.model,
@@ -468,15 +516,22 @@ export class RetrievalService {
     options: {
       question?: string;
       model?: string;
+      provider?: ProviderKind;
+      expectedStructuredOutput?: boolean;
       temperature?: number;
       maxTokens?: number;
       contextBudgetChars?: number;
+      onBeforeCall?: (info: { provider: ProviderKind; model: string }) => void;
     },
     signal?: AbortSignal,
   ): Promise<IndexAnswerResult> {
     let resolvedChat: ReturnType<ProviderRegistry['resolveChat']>;
     try {
-      resolvedChat = this.providers.resolveChat('chat', options.model);
+      resolvedChat = this.providers.resolveChat(
+        'chat',
+        options.model,
+        options.provider,
+      );
     } catch (err) {
       if (err instanceof ProviderError) throw err.toApiError();
       throw err;
@@ -485,6 +540,22 @@ export class RetrievalService {
     validateGenerationParams(resolvedChat.profile, {
       temperature: options.temperature,
       maxTokens: options.maxTokens,
+    });
+    if (
+      options.expectedStructuredOutput !== undefined &&
+      resolvedChat.profile.capabilities.structuredOutput !==
+        options.expectedStructuredOutput
+    ) {
+      throw new ApiError(
+        422,
+        'missing_capability',
+        `Frozen chat profile "${resolvedChat.profile.provider}/${resolvedChat.profile.model}" structured-output capability has changed.`,
+      );
+    }
+
+    options.onBeforeCall?.({
+      provider: resolvedChat.profile.provider,
+      model: resolvedChat.profile.model,
     });
 
     try {

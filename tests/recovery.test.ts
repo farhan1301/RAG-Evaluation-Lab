@@ -1,13 +1,16 @@
+import { execFileSync } from 'node:child_process';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { Readable } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import * as c from '@rag-eval/contracts';
@@ -698,5 +701,337 @@ describe('Phase 8 recovery: backup, restore, Qdrant rebuild, worker health, and 
     } finally {
       db.close();
     }
+  });
+
+  it('validates SQLite blob references, opaque UUID keys, regular files inside root, and sizes/hashes on backup and restore', async () => {
+    const liveDir = join(rootDir, 'val-live');
+    const dbPath = join(liveDir, 'workspace.sqlite');
+    const blobDir = join(liveDir, 'blobs');
+    const uploadBytes = Buffer.from(
+      'Authoritative uploaded document verified against SQLite.',
+      'utf8',
+    );
+
+    const db = openDatabase(dbPath);
+    let blobKey = '';
+    try {
+      const jobs = new Jobs(db);
+      const datasets = new Datasets(db, jobs);
+      const ds = datasets.create('Blob Validation Corpus');
+      const blob = await storeUpload(
+        blobDir,
+        Readable.from([uploadBytes]),
+        'text/plain',
+        1024 * 1024,
+      );
+      blobKey = blob.key;
+      datasets.addUpload(ds.id, ds.revision, 'doc.txt', blob, 'local', null);
+    } finally {
+      db.close();
+    }
+
+    // 1. Missing or misconfigured blob directory MUST fail instead of producing a 0-blob backup.
+    await expect(
+      backupWorkspace({
+        databasePath: dbPath,
+        blobDirectory: join(rootDir, 'missing-blobs-dir'),
+        outputDir: join(rootDir, 'backup-missing-blobs'),
+      }),
+    ).rejects.toThrow(/blob/i);
+
+    // 2. Corrupted blob content / size / hash mismatch MUST fail backup.
+    const blobFile = join(blobDir, blobKey);
+    writeFileSync(blobFile, 'tampered-bytes', 'utf8');
+    await expect(
+      backupWorkspace({
+        databasePath: dbPath,
+        blobDirectory: blobDir,
+        outputDir: join(rootDir, 'backup-hash-mismatch'),
+      }),
+    ).rejects.toThrow(/size|checksum|hash/i);
+    writeFileSync(blobFile, uploadBytes);
+
+    // 3. Symlink inside blob root MUST be rejected on backup.
+    const outsideFile = join(rootDir, 'outside.txt');
+    writeFileSync(outsideFile, uploadBytes);
+    rmSync(blobFile);
+    symlinkSync(outsideFile, blobFile);
+    await expect(
+      backupWorkspace({
+        databasePath: dbPath,
+        blobDirectory: blobDir,
+        outputDir: join(rootDir, 'backup-symlink'),
+      }),
+    ).rejects.toThrow(/regular file|symlink|blob/i);
+    rmSync(blobFile);
+    writeFileSync(blobFile, uploadBytes);
+
+    // Take a valid backup first, then tamper manifest to claim zero blobs -> restore MUST reject!
+    const goodBackup = join(rootDir, 'backup-good');
+    await backupWorkspace({
+      databasePath: dbPath,
+      blobDirectory: blobDir,
+      outputDir: goodBackup,
+    });
+    const zeroManifestBackup = join(rootDir, 'backup-zero-manifest');
+    mkdirSync(join(zeroManifestBackup, 'blobs'), { recursive: true });
+    writeFileSync(
+      join(zeroManifestBackup, 'workspace.sqlite'),
+      readFileSync(join(goodBackup, 'workspace.sqlite')),
+    );
+    const parsedManifest = JSON.parse(
+      readFileSync(join(goodBackup, 'manifest.json'), 'utf8'),
+    ) as Record<string, unknown>;
+    writeFileSync(
+      join(zeroManifestBackup, 'manifest.json'),
+      JSON.stringify({ ...parsedManifest, blobCount: 0, blobs: {} }),
+      'utf8',
+    );
+    await expect(
+      restoreWorkspace({
+        backupDir: zeroManifestBackup,
+        databasePath: join(rootDir, 'restored-zero', 'workspace.sqlite'),
+        blobDirectory: join(rootDir, 'restored-zero', 'blobs'),
+      }),
+    ).rejects.toThrow(/blob|manifest/i);
+
+    // 4. Unsafe non-UUID blob_key in SQLite MUST be rejected on backup AND by worker!
+    const badDb = openDatabase(dbPath);
+    try {
+      badDb
+        .prepare('UPDATE document_versions SET blob_key = ? WHERE blob_key = ?')
+        .run('../outside.txt', blobKey);
+    } finally {
+      badDb.close();
+    }
+    await expect(
+      backupWorkspace({
+        databasePath: dbPath,
+        blobDirectory: blobDir,
+        outputDir: join(rootDir, 'backup-unsafe-key'),
+      }),
+    ).rejects.toThrow(/blob key|uuid/i);
+
+    // Worker also rejects non-UUID blob_key instead of traversing outside blob root.
+    const workerDb = openDatabase(dbPath);
+    try {
+      const wJobs = new Jobs(workerDb);
+      await runOne(wJobs, {
+        directory: blobDir,
+        cloud: new CloudParser('', undefined),
+      });
+      const jobRow = workerDb
+        .prepare('SELECT state, message FROM jobs LIMIT 1')
+        .get();
+      expect(jobRow?.state).toBe('failed');
+      expect(String(jobRow?.message)).toMatch(/blob key/i);
+    } finally {
+      workerDb.close();
+    }
+  });
+
+  it('rejects overlapping source/destination paths and preserves existing workspace when forced restore fails midway', async () => {
+    const liveDir = join(rootDir, 'overlap-live');
+    const liveDbPath = join(liveDir, 'workspace.sqlite');
+    const liveBlobDir = join(liveDir, 'blobs');
+    const liveBytes = Buffer.from(
+      'Original live workspace blob bytes.',
+      'utf8',
+    );
+
+    const db1 = openDatabase(liveDbPath);
+    let liveDatasetId = '';
+    let liveBlobKey = '';
+    try {
+      const jobs = new Jobs(db1);
+      const datasets = new Datasets(db1, jobs);
+      const ds = datasets.create('Original Live Dataset');
+      liveDatasetId = ds.id;
+      const blob = await storeUpload(
+        liveBlobDir,
+        Readable.from([liveBytes]),
+        'text/plain',
+        1024 * 1024,
+      );
+      liveBlobKey = blob.key;
+      datasets.addUpload(ds.id, ds.revision, 'live.txt', blob, 'local', null);
+    } finally {
+      db1.close();
+    }
+
+    // 1. backup --overwrite targeting parent directory containing live workspace MUST reject without deleting anything!
+    await expect(
+      backupWorkspace({
+        databasePath: liveDbPath,
+        blobDirectory: liveBlobDir,
+        outputDir: liveDir,
+        overwrite: true,
+      }),
+    ).rejects.toThrow(/overlap/i);
+    expect(existsSync(liveDbPath)).toBe(true);
+    expect(readFileSync(join(liveBlobDir, liveBlobKey))).toEqual(liveBytes);
+
+    // Also reject output nested inside blobDirectory.
+    await expect(
+      backupWorkspace({
+        databasePath: liveDbPath,
+        blobDirectory: liveBlobDir,
+        outputDir: join(liveBlobDir, 'nested-backup'),
+        overwrite: true,
+      }),
+    ).rejects.toThrow(/overlap/i);
+    expect(readFileSync(join(liveBlobDir, liveBlobKey))).toEqual(liveBytes);
+
+    // Create a second distinct workspace and back it up cleanly.
+    const src2Dir = join(rootDir, 'src2');
+    const src2DbPath = join(src2Dir, 'workspace.sqlite');
+    const src2BlobDir = join(src2Dir, 'blobs');
+    const backup2Dir = join(rootDir, 'backup-2');
+    const src2Bytes = Buffer.from('Replacement backup blob bytes.', 'utf8');
+    const db2 = openDatabase(src2DbPath);
+    try {
+      const jobs2 = new Jobs(db2);
+      const ds2 = new Datasets(db2, jobs2);
+      const created = ds2.create('Replacement Dataset');
+      const blob2 = await storeUpload(
+        src2BlobDir,
+        Readable.from([src2Bytes]),
+        'text/plain',
+        1024 * 1024,
+      );
+      ds2.addUpload(
+        created.id,
+        created.revision,
+        'replacement.txt',
+        blob2,
+        'local',
+        null,
+      );
+    } finally {
+      db2.close();
+    }
+    await backupWorkspace({
+      databasePath: src2DbPath,
+      blobDirectory: src2BlobDir,
+      outputDir: backup2Dir,
+    });
+
+    // 2. Restore with destination overlapping backupDir MUST be rejected.
+    await expect(
+      restoreWorkspace({
+        backupDir: backup2Dir,
+        databasePath: join(backup2Dir, 'nested', 'workspace.sqlite'),
+        blobDirectory: join(backup2Dir, 'nested', 'blobs'),
+        force: true,
+      }),
+    ).rejects.toThrow(/overlap/i);
+
+    // 3. Forced restore where blob staging fails MUST NOT overwrite target DB or delete previous blobs!
+    const roParent = join(rootDir, 'ro-blobs-parent');
+    const targetBlobs = join(roParent, 'blobs');
+    mkdirSync(targetBlobs, { recursive: true });
+    writeFileSync(join(targetBlobs, liveBlobKey), liveBytes);
+    chmodSync(roParent, 0o500);
+    try {
+      await expect(
+        restoreWorkspace({
+          backupDir: backup2Dir,
+          databasePath: liveDbPath,
+          blobDirectory: targetBlobs,
+          force: true,
+        }),
+      ).rejects.toThrow();
+    } finally {
+      chmodSync(roParent, 0o700);
+    }
+
+    // Previous live DB and previous blobs MUST remain 100% intact!
+    const verifyDb = openDatabase(liveDbPath);
+    try {
+      expect(new Datasets(verifyDb).get(liveDatasetId).name).toBe(
+        'Original Live Dataset',
+      );
+    } finally {
+      verifyDb.close();
+    }
+    expect(readFileSync(join(targetBlobs, liveBlobKey))).toEqual(liveBytes);
+  });
+
+  it('defaults restore CLI blobs beside --database without touching the configured workspace blobs', async () => {
+    // 1. Existing configured live workspace with its own sentinel blob.
+    const configuredDir = join(rootDir, 'configured-live');
+    const configuredDbPath = join(configuredDir, 'workspace.sqlite');
+    const configuredBlobDir = join(configuredDir, 'configured-blobs');
+    mkdirSync(configuredBlobDir, { recursive: true });
+    const sentinelPath = join(configuredBlobDir, 'live-sentinel-blob');
+    writeFileSync(sentinelPath, 'DO-NOT-DELETE-CONFIGURED-BLOBS', 'utf8');
+
+    // 2. Create a backup to restore into a separate --database path.
+    const srcDir = join(rootDir, 'cli-src');
+    const srcDbPath = join(srcDir, 'workspace.sqlite');
+    const srcBlobDir = join(srcDir, 'blobs');
+    const backupDir = join(rootDir, 'cli-backup');
+    const uploadBytes = Buffer.from('CLI restore payload.', 'utf8');
+    let uploadedKey = '';
+    const srcDb = openDatabase(srcDbPath);
+    try {
+      const jobs = new Jobs(srcDb);
+      const datasets = new Datasets(srcDb, jobs);
+      const ds = datasets.create('CLI Restore Dataset');
+      const blob = await storeUpload(
+        srcBlobDir,
+        Readable.from([uploadBytes]),
+        'text/plain',
+        1024 * 1024,
+      );
+      uploadedKey = blob.key;
+      datasets.addUpload(ds.id, ds.revision, 'cli.txt', blob, 'local', null);
+    } finally {
+      srcDb.close();
+    }
+    await backupWorkspace({
+      databasePath: srcDbPath,
+      blobDirectory: srcBlobDir,
+      outputDir: backupDir,
+    });
+
+    // 3. Run the actual restore CLI with --database <newDb> --force and NO --blobs!
+    const newDbPath = join(rootDir, 'separate-target', 'workspace.sqlite');
+    execFileSync(
+      process.execPath,
+      [
+        '--import',
+        'tsx',
+        resolve('backend/src/ops/restore.ts'),
+        '--from',
+        backupDir,
+        '--database',
+        newDbPath,
+        '--force',
+      ],
+      {
+        env: {
+          ...process.env,
+          NODE_ENV: 'test',
+          DATABASE_PATH: configuredDbPath,
+          BLOB_DIRECTORY: configuredBlobDir,
+        },
+        stdio: 'pipe',
+      },
+    );
+
+    // Configured workspace's blob directory MUST be completely untouched!
+    expect(existsSync(sentinelPath)).toBe(true);
+    expect(readFileSync(sentinelPath, 'utf8')).toBe(
+      'DO-NOT-DELETE-CONFIGURED-BLOBS',
+    );
+    expect(existsSync(join(configuredBlobDir, uploadedKey))).toBe(false);
+
+    // Restored blobs MUST have been placed beside --database!
+    const expectedSiblingBlobs = join(dirname(newDbPath), 'blobs');
+    expect(existsSync(join(expectedSiblingBlobs, uploadedKey))).toBe(true);
+    expect(readFileSync(join(expectedSiblingBlobs, uploadedKey))).toEqual(
+      uploadBytes,
+    );
   });
 });

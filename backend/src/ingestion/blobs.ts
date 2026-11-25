@@ -5,6 +5,13 @@ import { crc32, inflateRawSync } from 'node:zlib';
 import type { Config } from '../config/env.js';
 import { ApiError } from '../errors.js';
 
+const BLOB_KEY_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isValidBlobKey(key: string): boolean {
+  return BLOB_KEY_PATTERN.test(key);
+}
+
 const types: Record<string, string> = {
   '.txt': 'text/plain',
   '.md': 'text/markdown',

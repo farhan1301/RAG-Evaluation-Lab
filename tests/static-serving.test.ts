@@ -240,4 +240,72 @@ describe('production single-origin static serving, SPA fallback, and env default
       workerOnline: false,
     });
   });
+
+  it('aligns root engines.node and setup docs with the highest locked runtime Node floor', () => {
+    const parseFloor = (range: string): [number, number, number] | null => {
+      const m = range.match(/^>=\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?$/);
+      if (!m) return null;
+      return [Number(m[1]), Number(m[2] ?? 0), Number(m[3] ?? 0)];
+    };
+    const compareSemver = (
+      a: [number, number, number],
+      b: [number, number, number],
+    ) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+
+    const rootPkg = JSON.parse(
+      readFileSync(resolve('package.json'), 'utf8'),
+    ) as { engines?: { node?: string } };
+    const rootRange = rootPkg.engines?.node ?? '';
+    const rootFloor = parseFloor(rootRange);
+    expect(rootFloor).not.toBeNull();
+
+    const lock = JSON.parse(
+      readFileSync(resolve('package-lock.json'), 'utf8'),
+    ) as {
+      packages: Record<string, { dev?: boolean; engines?: { node?: string } }>;
+    };
+    for (const [pkgPath, meta] of Object.entries(lock.packages)) {
+      if (!pkgPath || meta.dev || !meta.engines?.node) continue;
+      const depFloor = parseFloor(meta.engines.node);
+      if (!depFloor || !rootFloor) continue;
+      expect(
+        compareSemver(rootFloor, depFloor),
+        `root engines.node (${rootRange}) must satisfy runtime dep ${pkgPath} (${meta.engines.node})`,
+      ).toBeGreaterThanOrEqual(0);
+    }
+
+    expect(rootRange).toBe('>=22.22.0');
+    const readme = readFileSync(resolve('README.md'), 'utf8');
+    const contributing = readFileSync(resolve('CONTRIBUTING.md'), 'utf8');
+    expect(readme).toContain('>=22.22.0');
+    expect(readme).not.toContain('>=22.18');
+    expect(contributing).toContain('>=22.22.0');
+    expect(contributing).not.toContain('>=22.18');
+  });
+
+  it('documents working native production startup and loopback-published native Qdrant setup', () => {
+    const readme = readFileSync(resolve('README.md'), 'utf8');
+    expect(readme).toContain(
+      'NODE_ENV=production npm start -w rag-eval-backend',
+    );
+    expect(readme).not.toContain(
+      'STATIC_DIR=frontend/build npm start -w rag-eval-backend',
+    );
+
+    // The built-in asset resolution in backend/dist/index.js resolves ../../frontend/build -> <repo>/frontend/build.
+    const resolvedFromBackendDist = resolve(
+      'backend',
+      'dist',
+      '../../frontend/build',
+    );
+    expect(resolvedFromBackendDist).toBe(resolve('frontend/build'));
+
+    // Native Qdrant troubleshooting must not rely on Compose's unpublished qdrant service for 127.0.0.1:6333.
+    const troubleshootingLine =
+      readme
+        .split('\n')
+        .find((line) => line.includes('Qdrant missing or unreachable')) ?? '';
+    expect(troubleshootingLine).toContain('127.0.0.1:6333:6333');
+    expect(troubleshootingLine).toContain('CONTRIBUTING.md');
+  });
 });

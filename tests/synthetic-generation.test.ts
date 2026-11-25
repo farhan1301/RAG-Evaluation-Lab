@@ -1168,4 +1168,222 @@ describe('Phase 9: synthetic test-set generation, validation, dedup, leakage pre
       'https://allowed.example',
     );
   });
+
+  it('stops dispatching once remaining target count reaches zero, caps accepted proposals, and issues zero calls on resume if already met', async () => {
+    let providerCalls = 0;
+    const fakeOpenAI: typeof fetch = vi.fn(async (_url, init) => {
+      providerCalls += 1;
+      const body = JSON.parse(String(init?.body ?? '{}')) as {
+        model: string;
+        messages: Array<{ role: string; content: string }>;
+      };
+      const meta = parsePromptMeta(body.messages[1]?.content ?? '');
+      const len = meta.text.length;
+      const mid = Math.floor(len / 2);
+      const q1 = meta.text.slice(0, Math.min(24, mid));
+      const q2 = meta.text.slice(mid, Math.min(len, mid + 24));
+      return openaiChatResponse(
+        JSON.stringify({
+          proposals: [
+            {
+              question: `First capped question for ${meta.documentName} call ${providerCalls}?`,
+              expectedAnswer: 'Paraphrased first answer with unique wording.',
+              acceptanceRule: 'Cover first concept.',
+              referenceFacts: ['first concept'],
+              answerable: true,
+              sourceSpans: [
+                {
+                  documentVersionId: meta.documentVersionId,
+                  start: 0,
+                  end: q1.length,
+                  quote: q1,
+                },
+              ],
+              qrels: [{ documentId: meta.documentId, grade: 3 }],
+            },
+            {
+              question: `Second excess question for ${meta.documentName} call ${providerCalls}?`,
+              expectedAnswer: 'Paraphrased second answer that exceeds target.',
+              acceptanceRule: 'Cover second concept.',
+              referenceFacts: ['second concept'],
+              answerable: true,
+              sourceSpans: [
+                {
+                  documentVersionId: meta.documentVersionId,
+                  start: mid,
+                  end: mid + q2.length,
+                  quote: q2,
+                },
+              ],
+              qrels: [{ documentId: meta.documentId, grade: 3 }],
+            },
+          ],
+        }),
+        body.model,
+      );
+    });
+
+    const stack = setupStack(
+      {
+        OPENAI_API_KEY: 'fixture-key',
+        OPENAI_CHAT_MODEL: 'fixture-cap-chat',
+      },
+      { openai: fakeOpenAI },
+    );
+    const sample = stack.datasets.sample().value;
+    expect(sample.documents.length).toBeGreaterThanOrEqual(3);
+
+    // 1. Ask for count=1 across all 3 documents; doc 1 returns 2 valid proposals.
+    // Generator MUST cap accepted proposals at 1 and STOP without calling docs 2 and 3.
+    const startRes = await send(
+      stack.app,
+      'POST',
+      `/api/v1/datasets/${sample.id}/generations`,
+      { count: 1 },
+    );
+    expect(startRes.status).toBe(202);
+    const created = c.createGenerationResult.parse(startRes.body);
+    await stack.drain();
+
+    expect(providerCalls).toBe(1);
+    const batch = stack.generations.getBatch(created.batch.id);
+    expect(batch.state).toBe('succeeded');
+    expect(batch.proposedCount).toBe(1);
+    const saved = stack.generations.listProposals(sample.id, 20, undefined, {
+      batchId: created.batch.id,
+    }).items;
+    expect(saved).toHaveLength(1);
+
+    // 2. Resume after target is already met: reject batch 1's proposal so batch 2 can accept
+    // on doc 1, cancel right after doc 1 meets target=1, then retry. Retry MUST issue ZERO calls!
+    await send(
+      stack.app,
+      'PATCH',
+      `/api/v1/datasets/${sample.id}/proposals/${saved[0].id}`,
+      { reviewStatus: 'rejected' },
+    );
+    providerCalls = 0;
+    const resumeStart = await send(
+      stack.app,
+      'POST',
+      `/api/v1/datasets/${sample.id}/generations`,
+      { count: 1, seed: 99 },
+    );
+    const resumeCreated = c.createGenerationResult.parse(resumeStart.body);
+    const origSave = stack.generations.saveDocumentProposals.bind(
+      stack.generations,
+    );
+    let cancelled = false;
+    vi.spyOn(stack.generations, 'saveDocumentProposals').mockImplementation(
+      (input, guard) => {
+        origSave(input, guard);
+        if (!cancelled) {
+          cancelled = true;
+          stack.jobs.cancel(resumeCreated.job.id);
+        }
+      },
+    );
+    await stack.drain();
+    expect(providerCalls).toBe(1);
+    expect(stack.jobs.get(resumeCreated.job.id).state).toBe('cancelled');
+    expect(
+      stack.generations.getBatch(resumeCreated.batch.id).proposedCount,
+    ).toBe(1);
+
+    const retryRes = await send(
+      stack.app,
+      'POST',
+      `/api/v1/jobs/${resumeCreated.job.id}/retry`,
+      {},
+    );
+    expect(retryRes.status).toBe(202);
+    await stack.drain();
+
+    expect(providerCalls).toBe(1); // ZERO extra calls on resume!
+    const resumedBatch = stack.generations.getBatch(resumeCreated.batch.id);
+    expect(resumedBatch.state).toBe('succeeded');
+    expect(resumedBatch.proposedCount).toBe(1);
+  });
+
+  it('rejects promotion when supporting document versions or required positive qrels are absent from the target revision', async () => {
+    const fakeOpenAI: typeof fetch = vi.fn(async (_url, init) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as {
+        model: string;
+        messages: Array<{ role: string; content: string }>;
+      };
+      const meta = parsePromptMeta(body.messages[1]?.content ?? '');
+      const quote = meta.text.slice(0, 32);
+      return openaiChatResponse(
+        JSON.stringify({
+          proposals: [
+            {
+              question: 'Which principle appears in the removed source doc?',
+              expectedAnswer: 'A paraphrased summary of that principle.',
+              acceptanceRule: 'Explain the principle.',
+              referenceFacts: ['the principle'],
+              answerable: true,
+              sourceSpans: [
+                {
+                  documentVersionId: meta.documentVersionId,
+                  start: 0,
+                  end: quote.length,
+                  quote,
+                },
+              ],
+              qrels: [{ documentId: meta.documentId, grade: 3 }],
+            },
+          ],
+        }),
+        body.model,
+      );
+    });
+
+    const stack = setupStack(
+      {
+        OPENAI_API_KEY: 'fixture-key',
+        OPENAI_CHAT_MODEL: 'fixture-promote-chat',
+      },
+      { openai: fakeOpenAI },
+    );
+    const sample = stack.datasets.sample().value;
+    const targetDoc = sample.documents[0];
+
+    const startRes = await send(
+      stack.app,
+      'POST',
+      `/api/v1/datasets/${sample.id}/generations`,
+      { documentIds: [targetDoc.id], count: 1 },
+    );
+    expect(startRes.status).toBe(202);
+    await stack.drain();
+
+    const prop = stack.generations.listProposals(sample.id, 10).items[0];
+    expect(prop).toBeTruthy();
+
+    await send(
+      stack.app,
+      'PATCH',
+      `/api/v1/datasets/${sample.id}/proposals/${prop.id}`,
+      { reviewStatus: 'accepted' },
+    );
+
+    // Remove the sole supporting document from the dataset -> revision 2.
+    const rev2 = stack.datasets.removeDocument(sample.id, 1, targetDoc.id);
+    expect(rev2.revision).toBe(2);
+
+    // Promoting against revision 2 MUST fail with 409 conflict instead of silently dropping qrels!
+    const promoteRes = await send(
+      stack.app,
+      'POST',
+      `/api/v1/datasets/${sample.id}/proposals/promote`,
+      { proposalIds: [prop.id] },
+      { 'if-match': '"2"' },
+    );
+    expect(promoteRes.status).toBe(409);
+    expect(c.errorEnvelope.parse(promoteRes.body).error.code).toBe('conflict');
+    expect(stack.datasets.get(sample.id).revision).toBe(2);
+    expect(stack.generations.getProposal(sample.id, prop.id).reviewStatus).toBe(
+      'accepted',
+    );
+  });
 });

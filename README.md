@@ -47,7 +47,7 @@ No API keys, cloud accounts, or model downloads are required to run your first c
 
 ## Native Development Setup
 
-Requires **Node.js `>=22.18`** (tested on Node 22.22.3 and 26.13.1) and npm workspaces (`packages/contracts`, `backend`, `frontend`).
+Requires **Node.js `>=22.22.0`** (tested on Node 22.22.3 and 26.13.1) and npm workspaces (`packages/contracts`, `backend`, `frontend`).
 
 ```bash
 cp .env.example .env.local
@@ -73,7 +73,7 @@ npm run dev
 
   ```bash
   npm run build
-  STATIC_DIR=frontend/build npm start -w rag-eval-backend
+  NODE_ENV=production npm start -w rag-eval-backend
   npm run start:worker
   ```
 
@@ -250,7 +250,7 @@ You can also force a brand-new index generation through the HTTP API at any time
 ## Troubleshooting
 
 - **Worker not running (`/health/ready` returns `503`, `workerOnline: false`, jobs stay `queued`):** Ensure the worker process is running (`npm run dev:worker` natively, or `docker compose ps` to verify the `worker` container is running and healthy). Both `app` and `worker` must point to the exact same `DATABASE_PATH` and `BLOB_DIRECTORY`.
-- **Qdrant missing or unreachable (`denseStore: false` or dense/hybrid validation error):** Keyword mode requires no Qdrant. For dense or hybrid pipelines, start Qdrant (`docker compose --profile dense up -d qdrant`), set `QDRANT_URL=http://qdrant:6333` (in Docker) or `http://127.0.0.1:6333` (native), and configure an embedding profile. Set `QDRANT_REQUIRED=true` only when you want `/health/ready` to fail if Qdrant is down.
+- **Qdrant missing or unreachable (`denseStore: false` or dense/hybrid validation error):** Keyword mode requires no Qdrant. For dense or hybrid pipelines in Docker Compose, start Qdrant (`docker compose --profile dense up -d qdrant`) and set `QDRANT_URL=http://qdrant:6333` (Compose keeps Qdrant private with no host port published). For native development, publish Qdrant on loopback as documented in [`CONTRIBUTING.md`](CONTRIBUTING.md#test-layers) (`docker run --rm -d --name rag-eval-qdrant -p 127.0.0.1:6333:6333 qdrant/qdrant:v1.20.2@sha256:d277592721d2e3b73f9b797b53cf05e6a5bb2134f6d13fdbda4ca51782afbcac`), set `QDRANT_URL=http://127.0.0.1:6333`, and configure an embedding profile. Set `QDRANT_REQUIRED=true` only when you want `/health/ready` to fail if Qdrant is down.
 - **Origin or host denied (`403 origin_denied`):** Access the app using a hostname in `TRUSTED_HOSTS` (default `localhost,127.0.0.1,[::1]`). When deploying behind a reverse proxy or custom domain, add the hostname to `TRUSTED_HOSTS`, configure `TRUSTED_PROXIES` with your proxy IP/CIDR, and add any cross-origin browser origin to `CORS_ORIGINS`.
 - **Node 22 `ExperimentalWarning: SQLite`:** Expected on Node 22.x when opening `node:sqlite`. The Docker image uses Node 26.13.1.
 

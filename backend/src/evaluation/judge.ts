@@ -119,6 +119,15 @@ export interface RunJudgeMetricOptions {
   now?: () => number;
   maxTransientRetries?: number;
   attemptOffset?: number;
+  onBeforeCall?: (info: {
+    metricId: JudgeMetricId;
+    rubricVersion: string;
+    attemptNumber: number;
+    isRetry: boolean;
+    provider: ProviderKind;
+    model: string;
+  }) => string | undefined;
+  onAfterCall?: (callId: string | undefined, audit: JudgeCallAudit) => void;
 }
 
 function normalizeWhitespace(value: string) {
@@ -781,6 +790,15 @@ export async function evaluateJudgeMetric(
       : baseMessages;
 
     const startedAt = now();
+    const callId =
+      options.onBeforeCall?.({
+        metricId: options.metricId,
+        rubricVersion: rubric.version,
+        attemptNumber,
+        isRetry,
+        provider: options.provider.kind,
+        model: options.model,
+      }) ?? undefined;
     try {
       const response = await options.provider.chat({
         model: options.model,
@@ -808,7 +826,7 @@ export async function evaluateJudgeMetric(
       );
 
       if (validated.ok) {
-        attempts.push({
+        const audit: JudgeCallAudit = {
           attemptNumber,
           isRepair,
           isRetry,
@@ -825,7 +843,9 @@ export async function evaluateJudgeMetric(
           usage: response.usage,
           callStatus: 'succeeded',
           errorCode: null,
-        });
+        };
+        options.onAfterCall?.(callId, audit);
+        attempts.push(audit);
         return {
           metricId: options.metricId,
           rubricVersion: rubric.version,
@@ -852,7 +872,7 @@ export async function evaluateJudgeMetric(
         };
       }
 
-      attempts.push({
+      const audit: JudgeCallAudit = {
         attemptNumber,
         isRepair,
         isRetry,
@@ -869,7 +889,9 @@ export async function evaluateJudgeMetric(
         usage: response.usage,
         callStatus: 'succeeded',
         errorCode: validated.attemptStatus,
-      });
+      };
+      options.onAfterCall?.(callId, audit);
+      attempts.push(audit);
 
       lastObservationStatus = validated.observationStatus;
       lastReason = validated.reason;
@@ -899,7 +921,7 @@ export async function evaluateJudgeMetric(
           ? err.message
           : 'Judge provider request failed.';
 
-      attempts.push({
+      const audit: JudgeCallAudit = {
         attemptNumber,
         isRepair,
         isRetry,
@@ -919,7 +941,11 @@ export async function evaluateJudgeMetric(
         latencyMs,
         callStatus: isAborted ? 'cancelled' : isTimeout ? 'timeout' : 'failed',
         errorCode: err instanceof ProviderError ? err.code : 'upstream_failure',
-      });
+      };
+      if (!isAborted) {
+        options.onAfterCall?.(callId, audit);
+      }
+      attempts.push(audit);
 
       lastObservationStatus = obsStatus;
       lastReason = reason;

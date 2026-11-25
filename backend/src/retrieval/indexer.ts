@@ -1,8 +1,9 @@
 import { setImmediate } from 'node:timers/promises';
 import type { GenerationChunk, ProviderUsage } from '@rag-eval/contracts';
 import type { Indexes } from '../db/indexes.js';
+import { LostLease } from '../db/jobs.js';
 import { ApiError } from '../errors.js';
-import { chunkArtifact } from '../ingestion/chunks.js';
+import { chunkArtifact, generationChunkId } from '../ingestion/chunks.js';
 import { mediaType } from '../ingestion/blobs.js';
 import { parseLocal } from '../ingestion/local.js';
 import { ProviderError } from '../providers/errors.js';
@@ -19,6 +20,8 @@ export interface IndexBuilderOptions {
 }
 
 export interface EmbedCallAudit {
+  callId?: string;
+  batchIndex: number;
   provider: 'openai' | 'openai-compatible';
   model: string;
   requestIds: string[];
@@ -32,6 +35,17 @@ export interface BuildHooks {
   signal?: AbortSignal;
   guard?: () => void;
   checkpoint?: (stage: string) => void;
+  beforeEmbedBatch?: (info: {
+    batchIndex: number;
+    totalBatches: number;
+    provider: 'openai' | 'openai-compatible';
+    model: string;
+  }) => void;
+  onEmbedBatchStart?: (info: {
+    batchIndex: number;
+    provider: 'openai' | 'openai-compatible';
+    model: string;
+  }) => string | undefined;
   onEmbedCall?: (audit: EmbedCallAudit) => void;
 }
 
@@ -63,10 +77,7 @@ export class IndexBuilder {
       );
     }
 
-    const docs = this.indexes.revisionDocuments(
-      generation.datasetId,
-      generation.datasetRevision,
-    );
+    const docs = this.indexes.generationSourceDocuments(generationId);
 
     hooks.signal?.throwIfAborted();
     hooks.guard?.();
@@ -102,7 +113,7 @@ export class IndexBuilder {
       for (const chunk of artifactChunks) {
         hooks.signal?.throwIfAborted();
         const row: GenerationChunk = {
-          chunkId: chunk.id,
+          chunkId: generationChunkId(doc.documentVersionId, chunk.id),
           documentId: doc.documentId,
           documentVersionId: doc.documentVersionId,
           documentName: doc.name,
@@ -170,113 +181,191 @@ export class IndexBuilder {
 
       const { profile, provider } = this.providers.resolveEmbedding(
         generation.embeddingModel,
+        generation.embeddingProvider ?? undefined,
       );
       hooks.signal?.throwIfAborted();
       hooks.guard?.();
       hooks.checkpoint?.('embedding');
 
-      const embedStart = this.now();
-      let embedded: Awaited<ReturnType<typeof provider.embed>>;
-      try {
-        embedded = await provider.embed({
-          model: profile.model,
-          inputs: allChunks.map((c) => c.content),
-          expectedDimensions: profile.expectedDimensions,
-          batchSize: this.embedBatchSize,
-          signal: hooks.signal,
-        });
-        hooks.onEmbedCall?.({
-          provider: embedded.provider,
-          model: embedded.model,
-          requestIds: embedded.requestIds,
-          usage: embedded.usage,
-          latencyMs: Math.max(0, this.now() - embedStart),
-          status: 'succeeded',
-          errorCode: null,
-        });
-      } catch (err) {
-        const isTimeout =
-          err instanceof ProviderError && err.code === 'timeout';
-        const isAborted = Boolean(hooks.signal?.aborted);
-        hooks.onEmbedCall?.({
+      const batchSize = Math.max(1, Math.min(2048, this.embedBatchSize));
+      const totalBatches = Math.ceil(allChunks.length / batchSize);
+      const vectors: number[][] = [];
+      let expectedDimensions = profile.expectedDimensions;
+
+      for (
+        let offset = 0, batchIndex = 0;
+        offset < allChunks.length;
+        offset += batchSize, batchIndex += 1
+      ) {
+        hooks.signal?.throwIfAborted();
+        hooks.guard?.();
+        hooks.beforeEmbedBatch?.({
+          batchIndex,
+          totalBatches,
           provider: provider.kind,
           model: profile.model,
-          requestIds: [],
-          latencyMs: Math.max(0, this.now() - embedStart),
-          status: isAborted ? 'cancelled' : isTimeout ? 'timeout' : 'failed',
-          errorCode:
-            err instanceof ProviderError ? err.code : 'upstream_failure',
         });
-        throw err;
+
+        const batchInputs = allChunks
+          .slice(offset, offset + batchSize)
+          .map((c) => c.content);
+        const batchStart = this.now();
+        const callId =
+          hooks.onEmbedBatchStart?.({
+            batchIndex,
+            provider: provider.kind,
+            model: profile.model,
+          }) ?? undefined;
+
+        let batchAudited = false;
+        try {
+          const embedded = await provider.embed({
+            model: profile.model,
+            inputs: batchInputs,
+            expectedDimensions,
+            batchSize: batchInputs.length,
+            signal: hooks.signal,
+          });
+          const latencyMs = Math.max(0, this.now() - batchStart);
+
+          if (
+            embedded.vectors.length !== batchInputs.length ||
+            embedded.dimensions <= 0
+          ) {
+            batchAudited = true;
+            hooks.onEmbedCall?.({
+              callId,
+              batchIndex,
+              provider: embedded.provider,
+              model: embedded.model,
+              requestIds: embedded.requestIds,
+              usage: embedded.usage,
+              latencyMs,
+              status: 'failed',
+              errorCode: 'partial_batch',
+            });
+            throw new ProviderError(
+              'partial_batch',
+              'Embedding provider returned an incomplete set of vectors.',
+            );
+          }
+
+          if (expectedDimensions === undefined) {
+            expectedDimensions = embedded.dimensions;
+          } else if (embedded.dimensions !== expectedDimensions) {
+            batchAudited = true;
+            hooks.onEmbedCall?.({
+              callId,
+              batchIndex,
+              provider: embedded.provider,
+              model: embedded.model,
+              requestIds: embedded.requestIds,
+              usage: embedded.usage,
+              latencyMs,
+              status: 'failed',
+              errorCode: 'dimension_mismatch',
+            });
+            throw new ProviderError(
+              'dimension_mismatch',
+              `Embedding dimension mismatch: expected ${expectedDimensions}, received ${embedded.dimensions}.`,
+            );
+          }
+
+          batchAudited = true;
+          hooks.onEmbedCall?.({
+            callId,
+            batchIndex,
+            provider: embedded.provider,
+            model: embedded.model,
+            requestIds: embedded.requestIds,
+            usage: embedded.usage,
+            latencyMs,
+            status: 'succeeded',
+            errorCode: null,
+          });
+          vectors.push(...embedded.vectors);
+        } catch (err) {
+          if (!batchAudited && !(err instanceof LostLease)) {
+            const isTimeout =
+              err instanceof ProviderError && err.code === 'timeout';
+            const isAborted = Boolean(hooks.signal?.aborted);
+            hooks.onEmbedCall?.({
+              callId,
+              batchIndex,
+              provider: provider.kind,
+              model: profile.model,
+              requestIds: [],
+              latencyMs: Math.max(0, this.now() - batchStart),
+              status: isAborted
+                ? 'cancelled'
+                : isTimeout
+                  ? 'timeout'
+                  : 'failed',
+              errorCode:
+                err instanceof ProviderError ? err.code : 'upstream_failure',
+            });
+          }
+          throw err;
+        }
       }
 
-      if (
-        embedded.vectors.length !== allChunks.length ||
-        embedded.dimensions <= 0
-      ) {
+      if (vectors.length !== allChunks.length || !expectedDimensions) {
         throw new ProviderError(
           'partial_batch',
           'Embedding provider returned an incomplete set of vectors.',
         );
       }
-      embeddingDimensions = embedded.dimensions;
+      embeddingDimensions = expectedDimensions;
       qdrantCollection =
         this.qdrant.collectionForDimension(embeddingDimensions);
 
       hooks.signal?.throwIfAborted();
       hooks.guard?.();
+      this.indexes.recordQdrantCollection(generationId, qdrantCollection);
       hooks.checkpoint?.('indexing-vectors');
 
-      try {
-        await this.qdrant.ensureGenerationCollection(
-          qdrantCollection,
-          embeddingDimensions,
-        );
+      await this.qdrant.ensureGenerationCollection(
+        qdrantCollection,
+        embeddingDimensions,
+      );
 
-        const points: GenerationVectorPoint[] = allChunks.map((chunk, i) => ({
+      const points: GenerationVectorPoint[] = allChunks.map((chunk, i) => ({
+        generationId,
+        datasetId: generation.datasetId,
+        datasetRevision: generation.datasetRevision,
+        documentId: chunk.documentId,
+        documentVersionId: chunk.documentVersionId,
+        documentName: chunk.documentName,
+        mimeType: chunk.mimeType,
+        chunkId: chunk.chunkId,
+        page: chunk.page,
+        ordinal: chunk.ordinal,
+        vector: vectors[i],
+      }));
+
+      await this.qdrant.upsertGenerationPoints(
+        qdrantCollection,
+        points,
+        this.qdrantBatchSize,
+        () => {
+          hooks.signal?.throwIfAborted();
+          hooks.guard?.();
+        },
+      );
+
+      hooks.signal?.throwIfAborted();
+      hooks.guard?.();
+      hooks.checkpoint?.('verifying');
+
+      await this.qdrant.verifyGenerationCount(
+        qdrantCollection,
+        {
           generationId,
           datasetId: generation.datasetId,
           datasetRevision: generation.datasetRevision,
-          documentId: chunk.documentId,
-          documentVersionId: chunk.documentVersionId,
-          documentName: chunk.documentName,
-          mimeType: chunk.mimeType,
-          chunkId: chunk.chunkId,
-          page: chunk.page,
-          ordinal: chunk.ordinal,
-          vector: embedded.vectors[i],
-        }));
-
-        await this.qdrant.upsertGenerationPoints(
-          qdrantCollection,
-          points,
-          this.qdrantBatchSize,
-          () => {
-            hooks.signal?.throwIfAborted();
-            hooks.guard?.();
-          },
-        );
-
-        hooks.signal?.throwIfAborted();
-        hooks.guard?.();
-        hooks.checkpoint?.('verifying');
-
-        await this.qdrant.verifyGenerationCount(
-          qdrantCollection,
-          {
-            generationId,
-            datasetId: generation.datasetId,
-            datasetRevision: generation.datasetRevision,
-          },
-          allChunks.length,
-        );
-      } catch (err) {
-        // Best-effort cleanup of ONLY this failed generation's vectors; prior ready generations remain untouched.
-        await this.qdrant
-          .deleteGenerationPoints(qdrantCollection, generationId)
-          .catch(() => {});
-        throw err;
-      }
+        },
+        allChunks.length,
+      );
     }
 
     hooks.signal?.throwIfAborted();
@@ -289,6 +378,25 @@ export class IndexBuilder {
     return this.indexes.get(generationId);
   }
 
+  /**
+   * Cleans up Qdrant points ONLY after the generation has entered an irreversible
+   * `failed` state in SQLite, preventing a stale worker from deleting vectors of a
+   * generation reclaimed and published by another worker.
+   */
+  async cleanupFailedGeneration(generationId: string): Promise<void> {
+    if (!this.qdrant) return;
+    let gen: ReturnType<Indexes['getStored']>;
+    try {
+      gen = this.indexes.getStored(generationId);
+    } catch {
+      return;
+    }
+    if (gen.state !== 'failed' || !gen.qdrantCollection) return;
+    await this.qdrant
+      .deleteGenerationPoints(gen.qdrantCollection, generationId)
+      .catch(() => {});
+  }
+
   async buildAndFinalize(generationId: string, signal?: AbortSignal) {
     try {
       return await this.build(generationId, { signal });
@@ -297,7 +405,9 @@ export class IndexBuilder {
         err instanceof ProviderError || err instanceof ApiError
           ? err.message
           : 'Index build failed.';
-      this.indexes.markFailed(generationId, message);
+      if (this.indexes.markFailed(generationId, message)) {
+        await this.cleanupFailedGeneration(generationId);
+      }
       throw err;
     }
   }

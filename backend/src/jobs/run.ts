@@ -11,7 +11,11 @@ import type { Runs } from '../db/runs.js';
 import { ApiError } from '../errors.js';
 import type { EvaluationRunner } from '../evaluation/runner.js';
 import type { SyntheticGenerator } from '../generation/generator.js';
-import { mediaType, validateContent } from '../ingestion/blobs.js';
+import {
+  isValidBlobKey,
+  mediaType,
+  validateContent,
+} from '../ingestion/blobs.js';
 import {
   chunkArtifact,
   sha256,
@@ -69,8 +73,12 @@ async function extract(
   const cached = jobs.artifact(id);
   if (cached) return { id, result: cached };
   async function readSource() {
-    if (source.blobKey)
+    if (source.blobKey) {
+      if (!isValidBlobKey(source.blobKey)) {
+        throw new ParseFailure('Invalid blob key.');
+      }
       return readFile(join(options.directory, source.blobKey));
+    }
     const inline = Buffer.from(source.inline);
     validateContent(inline, mime);
     return inline;
@@ -167,7 +175,14 @@ async function runIndexJob(
             ? err.message
             : 'Index build failed. Check configuration and retry.';
         const terminal = jobs.failIndex(lease, message, delay);
-        if (terminal) options.indexes.markFailed(lease.generationId, message);
+        if (
+          terminal &&
+          options.indexes.markFailed(lease.generationId, message)
+        ) {
+          await options.indexBuilder.cleanupFailedGeneration(
+            lease.generationId,
+          );
+        }
         span.setStatus({ code: SpanStatusCode.ERROR });
         options.logger?.warn(
           {
@@ -178,6 +193,9 @@ async function runIndexJob(
           },
           'index job failed',
         );
+      } else if (!active) {
+        // Safe cleanup if cancellation transitioned the generation to failed; no-op if ready or building.
+        await options.indexBuilder.cleanupFailedGeneration(lease.generationId);
       }
     }
   } finally {

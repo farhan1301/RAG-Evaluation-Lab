@@ -781,4 +781,132 @@ describe('Grounded answer generation, bounded context, citations, and abstention
     expect(abstained.citations).toEqual([]);
     expect(abstained.invalidCitations).toEqual([chunkA]);
   });
+
+  it('rejects malformed structured output and removes empty-context abstention shortcut in plaintext mode', async () => {
+    const structuredCapabilities = {
+      chat: true,
+      embeddings: false,
+      rerank: false,
+      structuredOutput: true,
+      temperature: true,
+      maxTemperature: 2,
+      maxTokens: true,
+      requiresMaxTokens: false,
+    };
+
+    // Malformed structured output ("Mars.") with empty context MUST reject rather than mark abstained=true.
+    await expect(
+      generateGroundedAnswer({
+        question: 'Which planet is fourth from the Sun?',
+        items: [],
+        model: 'fixture-chat',
+        provider: {
+          kind: 'openai',
+          capabilities: structuredCapabilities,
+          chat: async () => ({
+            content: 'Mars.',
+            model: 'fixture-chat',
+            provider: 'openai',
+            requestId: 'req-bad-struct-1',
+            usage: { inputTokens: 12, outputTokens: 2, totalTokens: 14 },
+            effectiveParams: { structuredOutput: true },
+          }),
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'malformed_response' });
+
+    // Invalid JSON schema object under structuredOutput MUST also reject.
+    await expect(
+      generateGroundedAnswer({
+        question: 'Which planet?',
+        items: sampleItems,
+        model: 'fixture-chat',
+        provider: {
+          kind: 'openai',
+          capabilities: structuredCapabilities,
+          chat: async () => ({
+            content: JSON.stringify({ wrong: true }),
+            model: 'fixture-chat',
+            provider: 'openai',
+            requestId: 'req-bad-struct-2',
+            effectiveParams: { structuredOutput: true },
+          }),
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'malformed_response' });
+
+    // Plaintext mode (structuredOutput=false) with empty context MUST NOT treat "Mars." as abstention.
+    const plaintextAnswer = await generateGroundedAnswer({
+      question: 'Which planet is fourth from the Sun?',
+      items: [],
+      model: 'local-chat',
+      provider: {
+        kind: 'openai-compatible',
+        capabilities: { ...structuredCapabilities, structuredOutput: false },
+        chat: async () => ({
+          content: 'Mars.',
+          model: 'local-chat',
+          provider: 'openai-compatible',
+          requestId: 'req-plain-1',
+          effectiveParams: { structuredOutput: false },
+        }),
+      },
+    });
+    expect(plaintextAnswer.answer).toBe('Mars.');
+    expect(plaintextAnswer.abstained).toBe(false);
+    expect(plaintextAnswer.citations).toEqual([]);
+
+    // Plaintext mode still recognizes explicit abstention wording.
+    const plaintextAbstain = await generateGroundedAnswer({
+      question: 'Which planet is fourth from the Sun?',
+      items: [],
+      model: 'local-chat',
+      provider: {
+        kind: 'openai-compatible',
+        capabilities: { ...structuredCapabilities, structuredOutput: false },
+        chat: async () => ({
+          content:
+            'The provided context does not contain enough information to answer.',
+          model: 'local-chat',
+          provider: 'openai-compatible',
+          requestId: 'req-plain-2',
+          effectiveParams: { structuredOutput: false },
+        }),
+      },
+    });
+    expect(plaintextAbstain.abstained).toBe(true);
+  });
+
+  it('omits aggregate embedding usage when any HTTP batch omits usage', async () => {
+    const config = readConfig({
+      OPENAI_API_KEY: 'fixture-key',
+      OPENAI_EMBED_MODEL: 'fixture-embed',
+      EMBED_BATCH_SIZE: '2',
+    });
+    let batchNum = 0;
+    const registry = new ProviderRegistry(config, {
+      openai: async (_url, init) => {
+        batchNum += 1;
+        const parsed = JSON.parse(String(init?.body)) as { input: string[] };
+        return Response.json({
+          object: 'list',
+          model: 'fixture-embed',
+          data: parsed.input.map((_t, idx) => ({
+            object: 'embedding',
+            index: idx,
+            embedding: [0.1, 0.2, 0.3],
+          })),
+          ...(batchNum === 1
+            ? { usage: { prompt_tokens: 8, total_tokens: 8 } }
+            : {}),
+        });
+      },
+    });
+    const res = await registry.resolveEmbedding().provider.embed({
+      model: 'fixture-embed',
+      inputs: ['one', 'two', 'three'],
+    });
+    expect(res.vectors).toHaveLength(3);
+    expect(res.usage).toBeUndefined();
+  });
 });

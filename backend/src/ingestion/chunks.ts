@@ -15,7 +15,7 @@ export const defaultChunks: ChunkOptions = {
 };
 export const sha256 = (value: string) =>
   createHash('sha256').update(value).digest('hex');
-function pointId(key: string) {
+export function pointId(key: string) {
   const hex = sha256(key);
   return [
     hex.slice(0, 8),
@@ -24,6 +24,14 @@ function pointId(key: string) {
     `${((Number.parseInt(hex[16], 16) & 3) | 8).toString(16)}${hex.slice(17, 20)}`,
     hex.slice(20, 32),
   ].join('-');
+}
+export function generationChunkId(
+  documentVersionId: string,
+  artifactChunkId: string,
+) {
+  return pointId(
+    JSON.stringify(['gen-chunk-v1', documentVersionId, artifactChunkId]),
+  );
 }
 // All offsets are half-open UTF-16 indices into normalized artifact text.
 // Pages and structural blocks have hard boundaries. Pack complete units when possible.

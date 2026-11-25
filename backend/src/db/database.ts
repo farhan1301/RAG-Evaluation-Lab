@@ -8,6 +8,7 @@ const migrations = [
   '003-retrieval.sql',
   '004-evaluation.sql',
   '005-generation.sql',
+  '006-hardening.sql',
 ];
 
 export const SCHEMA_VERSION = migrations.length;

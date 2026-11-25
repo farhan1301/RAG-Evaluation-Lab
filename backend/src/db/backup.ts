@@ -1,19 +1,29 @@
-import { createHash } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { existsSync, realpathSync, type Stats } from 'node:fs';
 import {
   chmod,
   copyFile,
+  lstat,
   mkdir,
   readdir,
   readFile,
+  realpath,
   rename,
   rm,
   stat,
   writeFile,
 } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+} from 'node:path';
 import * as sqlite from 'node:sqlite';
 import { z } from '@rag-eval/contracts';
+import { isValidBlobKey } from '../ingestion/blobs.js';
 import {
   integrityCheck,
   openDatabase,
@@ -73,21 +83,174 @@ async function sha256File(filePath: string): Promise<{
   };
 }
 
-function isSafeBlobName(name: string): boolean {
-  return (
-    name.length > 0 &&
-    name !== '.' &&
-    name !== '..' &&
-    !name.includes('/') &&
-    !name.includes('\\') &&
-    !name.includes('\0')
+const SHA256_HEX_PATTERN = /^[a-f0-9]{64}$/;
+
+interface ExpectedBlob {
+  bytes: number;
+  sha256: string;
+}
+
+function canonicalPath(targetPath: string): string {
+  let current = resolve(targetPath);
+  const tail: string[] = [];
+  while (!existsSync(current)) {
+    const parent = dirname(current);
+    if (parent === current) break;
+    tail.unshift(basename(current));
+    current = parent;
+  }
+  if (existsSync(current)) {
+    try {
+      current = realpathSync(current);
+    } catch {
+      // Keep resolved path when canonicalization is unavailable.
+    }
+  }
+  return tail.length ? join(current, ...tail) : current;
+}
+
+function isSameOrInside(parent: string, child: string): boolean {
+  const rel = relative(parent, child);
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+}
+
+function pathsOverlap(a: string, b: string): boolean {
+  const ca = canonicalPath(a);
+  const cb = canonicalPath(b);
+  return isSameOrInside(ca, cb) || isSameOrInside(cb, ca);
+}
+
+function assertNoOverlap(
+  leftPaths: string[],
+  rightPaths: string[],
+  message: string,
+): void {
+  for (const left of leftPaths) {
+    for (const right of rightPaths) {
+      if (pathsOverlap(left, right)) {
+        throw new Error(message);
+      }
+    }
+  }
+}
+
+function extractSqliteBlobRefs(
+  db: sqlite.DatabaseSync,
+): Map<string, ExpectedBlob> {
+  const tables = db
+    .prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'document_versions'",
+    )
+    .all();
+  if (tables.length === 0) return new Map();
+
+  const columns = new Set(
+    (
+      db.prepare('PRAGMA table_info(document_versions)').all() as Array<{
+        name?: unknown;
+      }>
+    ).map((col) => String(col.name ?? '')),
   );
+  if (!columns.has('blob_key')) return new Map();
+
+  const rows = db
+    .prepare(
+      'SELECT id, blob_key AS blobKey, hash, byte_size AS byteSize FROM document_versions WHERE blob_key IS NOT NULL',
+    )
+    .all() as Array<{
+    id?: unknown;
+    blobKey?: unknown;
+    hash?: unknown;
+    byteSize?: unknown;
+  }>;
+
+  const refs = new Map<string, ExpectedBlob>();
+  for (const row of rows) {
+    if (typeof row.blobKey !== 'string' || !isValidBlobKey(row.blobKey)) {
+      throw new Error(
+        `Unsafe or non-UUID blob key in SQLite document_versions (${String(row.id ?? 'unknown')}): ${String(row.blobKey)}`,
+      );
+    }
+    if (typeof row.hash !== 'string' || !SHA256_HEX_PATTERN.test(row.hash)) {
+      throw new Error(
+        `Invalid SHA-256 hash in SQLite document_versions for blob ${row.blobKey}.`,
+      );
+    }
+    if (
+      typeof row.byteSize !== 'number' ||
+      !Number.isSafeInteger(row.byteSize) ||
+      row.byteSize < 0
+    ) {
+      throw new Error(
+        `Invalid byte size in SQLite document_versions for blob ${row.blobKey}.`,
+      );
+    }
+    const existing = refs.get(row.blobKey);
+    if (
+      existing &&
+      (existing.bytes !== row.byteSize || existing.sha256 !== row.hash)
+    ) {
+      throw new Error(
+        `Conflicting SQLite size/hash metadata for referenced blob key ${row.blobKey}.`,
+      );
+    }
+    refs.set(row.blobKey, { bytes: row.byteSize, sha256: row.hash });
+  }
+  return refs;
+}
+
+async function verifyRegularBlobFile(
+  blobsRoot: string,
+  key: string,
+  expected: ExpectedBlob,
+): Promise<ExpectedBlob> {
+  if (!isValidBlobKey(key)) {
+    throw new Error(`Unsafe or non-UUID blob key: ${key}`);
+  }
+  let rootInfo: Stats;
+  try {
+    rootInfo = await stat(blobsRoot);
+  } catch {
+    throw new Error(`Blob directory not found: ${blobsRoot}`);
+  }
+  if (!rootInfo.isDirectory()) {
+    throw new Error(`Blob path is not a directory: ${blobsRoot}`);
+  }
+
+  const blobPath = join(blobsRoot, key);
+  let entryInfo: Stats;
+  try {
+    entryInfo = await lstat(blobPath);
+  } catch {
+    throw new Error(`Referenced blob file missing: ${key}`);
+  }
+  if (entryInfo.isSymbolicLink() || !entryInfo.isFile()) {
+    throw new Error(
+      `Referenced blob entry is not a regular file (symlinks are rejected): ${key}`,
+    );
+  }
+
+  const [realRoot, realBlob] = await Promise.all([
+    realpath(blobsRoot),
+    realpath(blobPath),
+  ]);
+  if (dirname(realBlob) !== realRoot) {
+    throw new Error(`Referenced blob file escapes blob root directory: ${key}`);
+  }
+
+  const actual = await sha256File(blobPath);
+  if (actual.bytes !== expected.bytes || actual.sha256 !== expected.sha256) {
+    throw new Error(
+      `Blob size/checksum mismatch for ${key}: expected ${expected.bytes} bytes (${expected.sha256}), got ${actual.bytes} bytes (${actual.sha256}).`,
+    );
+  }
+  return actual;
 }
 
 /**
  * Creates a consistent online backup of the SQLite database (using node:sqlite's
  * online backup API, falling back to VACUUM INTO on older Node 22.13-22.15)
- * together with the private blob directory and a verified SHA-256 manifest.
+ * together with SQLite-referenced private blobs and a verified SHA-256 manifest.
  */
 export async function backupWorkspace(
   options: BackupOptions,
@@ -98,95 +261,146 @@ export async function backupWorkspace(
   const sourceDbPath = resolve(options.databasePath);
   const sourceBlobsDir = resolve(options.blobDirectory);
   const outputDir = resolve(options.outputDir);
+
+  assertNoOverlap(
+    [outputDir],
+    [
+      sourceDbPath,
+      `${sourceDbPath}-wal`,
+      `${sourceDbPath}-shm`,
+      sourceBlobsDir,
+    ],
+    'Backup destination overlaps the source database or blob directory.',
+  );
+
   if (!existsSync(sourceDbPath)) {
     throw new Error(`SQLite database not found: ${sourceDbPath}`);
   }
 
   if (existsSync(outputDir)) {
-    const existing = await readdir(outputDir);
-    if (existing.length > 0 && !options.overwrite) {
+    const outInfo = await lstat(outputDir);
+    if (outInfo.isDirectory()) {
+      const existing = await readdir(outputDir);
+      if (existing.length > 0 && !options.overwrite) {
+        throw new Error(
+          `Backup destination already exists and is not empty: ${outputDir} (pass --overwrite to replace).`,
+        );
+      }
+    } else if (!options.overwrite) {
       throw new Error(
-        `Backup destination already exists and is not empty: ${outputDir} (pass --overwrite to replace).`,
+        `Backup destination already exists: ${outputDir} (pass --overwrite to replace).`,
       );
     }
-    if (options.overwrite) {
-      await rm(outputDir, { recursive: true, force: true });
-    }
   }
 
-  const destBlobsDir = join(outputDir, 'blobs');
-  await mkdir(destBlobsDir, { recursive: true, mode: 0o700 });
+  const outputParent = dirname(outputDir);
+  await mkdir(outputParent, { recursive: true, mode: 0o700 });
+  const stageId = randomUUID();
+  const stageDir = join(outputParent, `.rag-eval-backup-stage-${stageId}`);
+  const destBlobsDir = join(stageDir, 'blobs');
 
-  const tempDbPath = join(outputDir, 'workspace.sqlite.tmp');
-  const destDbPath = join(outputDir, 'workspace.sqlite');
-
-  const sourceDb = new sqlite.DatabaseSync(sourceDbPath);
   try {
-    sourceDb.exec('PRAGMA busy_timeout=5000');
-    if (typeof sqlite.backup === 'function') {
-      await sqlite.backup(sourceDb, tempDbPath);
-    } else {
-      sourceDb.prepare('VACUUM INTO ?').run(tempDbPath);
+    await mkdir(destBlobsDir, { recursive: true, mode: 0o700 });
+
+    const tempDbPath = join(stageDir, 'workspace.sqlite.tmp');
+    const destDbPath = join(stageDir, 'workspace.sqlite');
+
+    const sourceDb = new sqlite.DatabaseSync(sourceDbPath);
+    try {
+      sourceDb.exec('PRAGMA busy_timeout=5000');
+      if (typeof sqlite.backup === 'function') {
+        await sqlite.backup(sourceDb, tempDbPath);
+      } else {
+        sourceDb.prepare('VACUUM INTO ?').run(tempDbPath);
+      }
+    } finally {
+      sourceDb.close();
     }
-  } finally {
-    sourceDb.close();
-  }
 
-  let schemaVersion = 0;
-  const verifyDb = new sqlite.DatabaseSync(tempDbPath);
-  try {
-    if (!integrityCheck(verifyDb)) {
-      throw new Error('SQLite backup failed PRAGMA integrity_check.');
+    let schemaVersion = 0;
+    let referencedBlobs = new Map<string, ExpectedBlob>();
+    const verifyDb = new sqlite.DatabaseSync(tempDbPath, { readOnly: true });
+    try {
+      if (!integrityCheck(verifyDb)) {
+        throw new Error('SQLite backup failed PRAGMA integrity_check.');
+      }
+      schemaVersion = Number(
+        verifyDb.prepare('PRAGMA user_version').get()?.user_version ?? 0,
+      );
+      referencedBlobs = extractSqliteBlobRefs(verifyDb);
+    } finally {
+      verifyDb.close();
     }
-    schemaVersion = Number(
-      verifyDb.prepare('PRAGMA user_version').get()?.user_version ?? 0,
-    );
-  } finally {
-    verifyDb.close();
-  }
 
-  await rename(tempDbPath, destDbPath);
-  await chmod(destDbPath, 0o600);
-  const sqliteMeta = await sha256File(destDbPath);
+    await rename(tempDbPath, destDbPath);
+    await chmod(destDbPath, 0o600);
+    const sqliteMeta = await sha256File(destDbPath);
 
-  const blobs: Record<string, { bytes: number; sha256: string }> = {};
-  if (existsSync(sourceBlobsDir)) {
-    const entries = await readdir(sourceBlobsDir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isFile() || !isSafeBlobName(entry.name)) continue;
-      const src = join(sourceBlobsDir, entry.name);
-      const dst = join(destBlobsDir, entry.name);
+    const blobs: Record<string, { bytes: number; sha256: string }> = {};
+    for (const [key, expected] of referencedBlobs) {
+      await verifyRegularBlobFile(sourceBlobsDir, key, expected);
+      const src = join(sourceBlobsDir, key);
+      const dst = join(destBlobsDir, key);
       await copyFile(src, dst);
       await chmod(dst, 0o600);
-      blobs[entry.name] = await sha256File(dst);
+      const copied = await sha256File(dst);
+      if (
+        copied.bytes !== expected.bytes ||
+        copied.sha256 !== expected.sha256
+      ) {
+        throw new Error(`Copied backup blob checksum mismatch for ${key}.`);
+      }
+      blobs[key] = copied;
     }
+
+    const manifest = backupManifestSchema.parse({
+      formatVersion: 1,
+      softwareVersion: SOFTWARE_VERSION,
+      schemaVersion,
+      createdAt: new Date((options.now ?? Date.now)()).toISOString(),
+      sqliteFile: 'workspace.sqlite',
+      sqliteBytes: sqliteMeta.bytes,
+      sqliteSha256: sqliteMeta.sha256,
+      blobCount: Object.keys(blobs).length,
+      blobs,
+    });
+
+    const manifestTmp = join(stageDir, 'manifest.json.tmp');
+    const manifestPath = join(stageDir, 'manifest.json');
+    await writeFile(manifestTmp, `${JSON.stringify(manifest, null, 2)}\n`, {
+      mode: 0o600,
+    });
+    await rename(manifestTmp, manifestPath);
+
+    let prevDir: string | null = null;
+    if (existsSync(outputDir)) {
+      prevDir = join(outputParent, `.rag-eval-backup-prev-${stageId}`);
+      await rename(outputDir, prevDir);
+    }
+    try {
+      await rename(stageDir, outputDir);
+    } catch (swapErr) {
+      if (prevDir) {
+        await rename(prevDir, outputDir).catch(() => {});
+      }
+      throw swapErr;
+    }
+    if (prevDir) {
+      await rm(prevDir, { recursive: true, force: true });
+    }
+
+    return manifest;
+  } catch (err) {
+    await rm(stageDir, { recursive: true, force: true }).catch(() => {});
+    throw err;
   }
-
-  const manifest = backupManifestSchema.parse({
-    formatVersion: 1,
-    softwareVersion: SOFTWARE_VERSION,
-    schemaVersion,
-    createdAt: new Date((options.now ?? Date.now)()).toISOString(),
-    sqliteFile: 'workspace.sqlite',
-    sqliteBytes: sqliteMeta.bytes,
-    sqliteSha256: sqliteMeta.sha256,
-    blobCount: Object.keys(blobs).length,
-    blobs,
-  });
-
-  const manifestTmp = join(outputDir, 'manifest.json.tmp');
-  const manifestPath = join(outputDir, 'manifest.json');
-  await writeFile(manifestTmp, `${JSON.stringify(manifest, null, 2)}\n`, {
-    mode: 0o600,
-  });
-  await rename(manifestTmp, manifestPath);
-
-  return manifest;
 }
 
 /**
- * Verifies a backup directory against its manifest and integrity checks,
- * then restores the SQLite database and private blob directory into target paths.
+ * Verifies a backup directory against its manifest, SQLite snapshot references,
+ * and integrity checks, then atomically stages and swaps the replacement
+ * SQLite database and private blob directory without destroying the prior
+ * workspace until the restored workspace is verified.
  */
 export async function restoreWorkspace(
   options: RestoreOptions,
@@ -197,10 +411,30 @@ export async function restoreWorkspace(
   const backupDir = resolve(options.backupDir);
   const targetDbPath = resolve(options.databasePath);
   const targetBlobsDir = resolve(options.blobDirectory);
+  const targetDbPaths = [
+    targetDbPath,
+    `${targetDbPath}-wal`,
+    `${targetDbPath}-shm`,
+  ];
+
+  assertNoOverlap(
+    [backupDir],
+    [...targetDbPaths, targetBlobsDir],
+    'Restore paths must not overlap between backup source and restore destination.',
+  );
+  assertNoOverlap(
+    targetDbPaths,
+    [targetBlobsDir],
+    'Target database path and target blob directory must not overlap.',
+  );
 
   const manifestPath = join(backupDir, 'manifest.json');
   if (!existsSync(manifestPath)) {
     throw new Error(`Backup manifest not found: ${manifestPath}`);
+  }
+  const manifestInfo = await lstat(manifestPath);
+  if (manifestInfo.isSymbolicLink() || !manifestInfo.isFile()) {
+    throw new Error(`Backup manifest is not a regular file: ${manifestPath}`);
   }
   const manifest = backupManifestSchema.parse(
     JSON.parse(await readFile(manifestPath, 'utf8')),
@@ -216,6 +450,12 @@ export async function restoreWorkspace(
   if (!existsSync(sourceSqlite)) {
     throw new Error(`Backup SQLite file missing: ${sourceSqlite}`);
   }
+  const sqliteInfo = await lstat(sourceSqlite);
+  if (sqliteInfo.isSymbolicLink() || !sqliteInfo.isFile()) {
+    throw new Error(
+      `Backup SQLite file is not a regular file: ${sourceSqlite}`,
+    );
+  }
   const actualSqlite = await sha256File(sourceSqlite);
   if (
     actualSqlite.bytes !== manifest.sqliteBytes ||
@@ -226,6 +466,7 @@ export async function restoreWorkspace(
     );
   }
 
+  let referencedBlobs = new Map<string, ExpectedBlob>();
   const snapshotCheck = new sqlite.DatabaseSync(sourceSqlite, {
     readOnly: true,
   });
@@ -233,6 +474,7 @@ export async function restoreWorkspace(
     if (!integrityCheck(snapshotCheck)) {
       throw new Error('Backup SQLite snapshot failed PRAGMA integrity_check.');
     }
+    referencedBlobs = extractSqliteBlobRefs(snapshotCheck);
   } finally {
     snapshotCheck.close();
   }
@@ -242,67 +484,185 @@ export async function restoreWorkspace(
   if (blobEntries.length !== manifest.blobCount) {
     throw new Error('Backup manifest blob count does not match blob listing.');
   }
-  for (const [key, expected] of blobEntries) {
-    if (!isSafeBlobName(key)) {
-      throw new Error(`Unsafe blob key in backup manifest: ${key}`);
-    }
-    const blobPath = join(sourceBlobsDir, key);
-    if (!existsSync(blobPath)) {
-      throw new Error(`Backup blob file missing: ${key}`);
-    }
-    const info = await stat(blobPath);
-    if (!info.isFile()) {
-      throw new Error(`Backup blob entry is not a regular file: ${key}`);
-    }
-    const actual = await sha256File(blobPath);
-    if (actual.bytes !== expected.bytes || actual.sha256 !== expected.sha256) {
-      throw new Error(`Backup blob checksum mismatch for ${key}.`);
-    }
-  }
 
-  if (existsSync(targetDbPath) && !options.force) {
-    throw new Error(
-      `Target SQLite database already exists: ${targetDbPath}. Stop app/worker and re-run with --force to replace it.`,
-    );
-  }
-
-  await mkdir(dirname(targetDbPath), { recursive: true, mode: 0o700 });
-  const stagedDb = `${targetDbPath}.restore.tmp`;
-  await copyFile(sourceSqlite, stagedDb);
-  await chmod(stagedDb, 0o600);
-
-  // Remove any stale WAL/SHM sidecars so SQLite never replays old frames onto the restored DB.
-  await rm(`${targetDbPath}-wal`, { force: true });
-  await rm(`${targetDbPath}-shm`, { force: true });
-  await rename(stagedDb, targetDbPath);
-
-  if (options.force && existsSync(targetBlobsDir)) {
-    const existingBlobs = await readdir(targetBlobsDir, {
-      withFileTypes: true,
-    });
-    for (const entry of existingBlobs) {
-      await rm(join(targetBlobsDir, entry.name), {
-        recursive: true,
-        force: true,
-      });
-    }
-  }
-  await mkdir(targetBlobsDir, { recursive: true, mode: 0o700 });
-  for (const [key] of blobEntries) {
-    const dst = join(targetBlobsDir, key);
-    await copyFile(join(sourceBlobsDir, key), dst);
-    await chmod(dst, 0o600);
-  }
-
-  const restoredDb = openDatabase(targetDbPath);
-  try {
-    if (!ready(restoredDb) || !integrityCheck(restoredDb)) {
+  for (const [key, expected] of referencedBlobs) {
+    const manifestEntry = manifest.blobs[key];
+    if (!manifestEntry) {
       throw new Error(
-        'Restored SQLite database failed readiness verification.',
+        `Backup manifest is missing SQLite-referenced blob: ${key}`,
       );
     }
-  } finally {
-    restoredDb.close();
+    if (
+      manifestEntry.bytes !== expected.bytes ||
+      manifestEntry.sha256 !== expected.sha256
+    ) {
+      throw new Error(
+        `Backup manifest size/hash metadata for blob ${key} does not match SQLite snapshot.`,
+      );
+    }
+  }
+
+  for (const [key, expected] of blobEntries) {
+    await verifyRegularBlobFile(sourceBlobsDir, key, expected);
+  }
+
+  if (!options.force) {
+    if (existsSync(targetDbPath)) {
+      throw new Error(
+        `Target SQLite database already exists: ${targetDbPath}. Stop app/worker and re-run with --force to replace it.`,
+      );
+    }
+    if (existsSync(targetBlobsDir)) {
+      const targetBlobInfo = await lstat(targetBlobsDir);
+      if (!targetBlobInfo.isDirectory()) {
+        throw new Error(
+          `Target blob path already exists: ${targetBlobsDir}. Stop app/worker and re-run with --force to replace it.`,
+        );
+      }
+      const existingBlobs = await readdir(targetBlobsDir);
+      if (existingBlobs.length > 0) {
+        throw new Error(
+          `Target blob directory already exists and is not empty: ${targetBlobsDir}. Stop app/worker and re-run with --force to replace it.`,
+        );
+      }
+    }
+  }
+
+  const stageId = randomUUID();
+  const dbParent = dirname(targetDbPath);
+  const blobsParent = dirname(targetBlobsDir);
+  await mkdir(dbParent, { recursive: true, mode: 0o700 });
+  await mkdir(blobsParent, { recursive: true, mode: 0o700 });
+
+  const stagedDb = `${targetDbPath}.restore-stage-${stageId}`;
+  const stagedBlobsDir = join(blobsParent, `.blobs-restore-stage-${stageId}`);
+  const prevDbPath = `${targetDbPath}.restore-prev-${stageId}`;
+  const prevWalPath = `${targetDbPath}-wal.restore-prev-${stageId}`;
+  const prevShmPath = `${targetDbPath}-shm.restore-prev-${stageId}`;
+  const prevBlobsDir = join(blobsParent, `.blobs-restore-prev-${stageId}`);
+
+  let movedPrevDb = false;
+  let movedPrevWal = false;
+  let movedPrevShm = false;
+  let movedPrevBlobs = false;
+  let installedNewDb = false;
+  let installedNewBlobs = false;
+
+  try {
+    // 1. Stage and verify complete replacement SQLite database.
+    await copyFile(sourceSqlite, stagedDb);
+    await chmod(stagedDb, 0o600);
+    const stagedMeta = await sha256File(stagedDb);
+    if (
+      stagedMeta.bytes !== manifest.sqliteBytes ||
+      stagedMeta.sha256 !== manifest.sqliteSha256
+    ) {
+      throw new Error('Staged SQLite database checksum mismatch.');
+    }
+    const stagedVerify = openDatabase(stagedDb);
+    try {
+      if (!ready(stagedVerify) || !integrityCheck(stagedVerify)) {
+        throw new Error(
+          'Staged SQLite database failed readiness verification.',
+        );
+      }
+      stagedVerify.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+      stagedVerify.exec('PRAGMA journal_mode=DELETE');
+    } finally {
+      stagedVerify.close();
+    }
+
+    // 2. Stage and verify complete replacement blob directory before touching live workspace.
+    await mkdir(stagedBlobsDir, { recursive: true, mode: 0o700 });
+    for (const [key, expected] of blobEntries) {
+      const dst = join(stagedBlobsDir, key);
+      await copyFile(join(sourceBlobsDir, key), dst);
+      await chmod(dst, 0o600);
+      const copied = await sha256File(dst);
+      if (
+        copied.bytes !== expected.bytes ||
+        copied.sha256 !== expected.sha256
+      ) {
+        throw new Error(`Staged blob checksum mismatch for ${key}.`);
+      }
+    }
+
+    // 3. Move previous workspace aside without deleting it yet.
+    if (existsSync(targetDbPath)) {
+      await rename(targetDbPath, prevDbPath);
+      movedPrevDb = true;
+    }
+    if (existsSync(`${targetDbPath}-wal`)) {
+      await rename(`${targetDbPath}-wal`, prevWalPath);
+      movedPrevWal = true;
+    }
+    if (existsSync(`${targetDbPath}-shm`)) {
+      await rename(`${targetDbPath}-shm`, prevShmPath);
+      movedPrevShm = true;
+    }
+    if (existsSync(targetBlobsDir)) {
+      await rename(targetBlobsDir, prevBlobsDir);
+      movedPrevBlobs = true;
+    }
+
+    // 4. Swap staged replacement into live locations.
+    await rename(stagedBlobsDir, targetBlobsDir);
+    installedNewBlobs = true;
+    await rename(stagedDb, targetDbPath);
+    installedNewDb = true;
+
+    // 5. Verify live restored workspace before discarding the previous workspace.
+    const restoredDb = openDatabase(targetDbPath);
+    try {
+      if (!ready(restoredDb) || !integrityCheck(restoredDb)) {
+        throw new Error(
+          'Restored SQLite database failed readiness verification.',
+        );
+      }
+      const restoredRefs = extractSqliteBlobRefs(restoredDb);
+      for (const [key, expected] of restoredRefs) {
+        await verifyRegularBlobFile(targetBlobsDir, key, expected);
+      }
+    } finally {
+      restoredDb.close();
+    }
+  } catch (err) {
+    // Roll back to previous workspace on any staging, swap, or verification failure.
+    if (installedNewDb) {
+      await rm(targetDbPath, { force: true }).catch(() => {});
+      await rm(`${targetDbPath}-wal`, { force: true }).catch(() => {});
+      await rm(`${targetDbPath}-shm`, { force: true }).catch(() => {});
+    }
+    if (installedNewBlobs) {
+      await rm(targetBlobsDir, { recursive: true, force: true }).catch(
+        () => {},
+      );
+    }
+    if (movedPrevDb) {
+      await rename(prevDbPath, targetDbPath).catch(() => {});
+    }
+    if (movedPrevWal) {
+      await rename(prevWalPath, `${targetDbPath}-wal`).catch(() => {});
+    }
+    if (movedPrevShm) {
+      await rename(prevShmPath, `${targetDbPath}-shm`).catch(() => {});
+    }
+    if (movedPrevBlobs) {
+      await rename(prevBlobsDir, targetBlobsDir).catch(() => {});
+    }
+    await rm(stagedDb, { force: true }).catch(() => {});
+    await rm(`${stagedDb}-wal`, { force: true }).catch(() => {});
+    await rm(`${stagedDb}-shm`, { force: true }).catch(() => {});
+    await rm(stagedBlobsDir, { recursive: true, force: true }).catch(() => {});
+    throw err;
+  }
+
+  // 6. Replacement is live and verified; now clean up the previous workspace.
+  if (movedPrevDb) await rm(prevDbPath, { force: true });
+  if (movedPrevWal) await rm(prevWalPath, { force: true });
+  if (movedPrevShm) await rm(prevShmPath, { force: true });
+  if (movedPrevBlobs) {
+    await rm(prevBlobsDir, { recursive: true, force: true });
   }
 
   return {

@@ -268,7 +268,8 @@ export function definitionsRouter(
           !capabilities.profiles.some(
             (p) =>
               p.role === 'embedding' &&
-              (!gen.embeddingModel || p.model === gen.embeddingModel),
+              (!gen.embeddingModel || p.model === gen.embeddingModel) &&
+              (!gen.embeddingProvider || p.provider === gen.embeddingProvider),
           )
         )
           throw new ApiError(
@@ -282,11 +283,42 @@ export function definitionsRouter(
       const existingRun = runs.getRun(previous.runId);
       for (const p of existingRun.pipelines) {
         checkProfiles(p.config, capabilities);
+        if (
+          p.resolvedModels.embedding &&
+          !capabilities.profiles.some(
+            (pr) =>
+              pr.role === 'embedding' &&
+              pr.provider === p.resolvedModels.embedding?.provider &&
+              pr.model === p.resolvedModels.embedding?.model,
+          )
+        )
+          throw new ApiError(
+            422,
+            'missing_capability',
+            'The required embedding profile is unavailable for retrying this run.',
+          );
+        if (
+          p.resolvedModels.rerank &&
+          !capabilities.profiles.some(
+            (pr) =>
+              pr.role === 'rerank' &&
+              pr.provider === p.resolvedModels.rerank?.provider &&
+              pr.model === p.resolvedModels.rerank?.model,
+          )
+        )
+          throw new ApiError(
+            422,
+            'missing_capability',
+            'The required reranker profile is unavailable for retrying this run.',
+          );
         if (existingRun.mode === 'full_rag') {
           if (
             !capabilities.profiles.some(
               (pr) =>
                 pr.role === 'chat' &&
+                (!p.resolvedModels.chat ||
+                  (pr.provider === p.resolvedModels.chat.provider &&
+                    pr.model === p.resolvedModels.chat.model)) &&
                 (!p.config.llm.model || pr.model === p.config.llm.model),
             )
           )
@@ -300,6 +332,9 @@ export function definitionsRouter(
             !capabilities.profiles.some(
               (pr) =>
                 pr.role === 'judge' &&
+                (!p.resolvedModels.judge ||
+                  (pr.provider === p.resolvedModels.judge.provider &&
+                    pr.model === p.resolvedModels.judge.model)) &&
                 (!p.config.judge.model || pr.model === p.config.judge.model),
             )
           )
@@ -315,7 +350,10 @@ export function definitionsRouter(
       const existingBatch = generations.getBatch(previous.batchId);
       if (
         !capabilities.profiles.some(
-          (pr) => pr.role === 'chat' && pr.model === existingBatch.model,
+          (pr) =>
+            pr.role === 'chat' &&
+            pr.provider === existingBatch.provider &&
+            pr.model === existingBatch.model,
         )
       )
         throw new ApiError(

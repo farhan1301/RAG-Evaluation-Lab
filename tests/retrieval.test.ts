@@ -10,6 +10,7 @@ import { Indexes } from '../backend/src/db/indexes';
 import { Pipelines } from '../backend/src/db/pipelines';
 import { createApp } from '../backend/src/http/app';
 import { CloudParser } from '../backend/src/ingestion/cloud';
+import { LostLease } from '../backend/src/db/jobs';
 import { runOne } from '../backend/src/jobs/run';
 import { createLogger } from '../backend/src/lib/logger';
 import {
@@ -929,6 +930,350 @@ describe('Hybrid retrieval, reranking, shared service, failed reindex, and concu
         })
       ).status,
     ).toBe(201);
+  });
+
+  it('does not let a stale worker with a lost lease delete Qdrant points of a generation published by a replacement worker', async () => {
+    const fakeQdrant = new InMemoryQdrant();
+    const { api, qdrant, indexBuilder, retrieval } = createHarness(
+      {
+        QDRANT_URL: 'http://qdrant.invalid',
+        LOCAL_EMBED_BASE_URL: 'http://local.invalid/v1',
+        LOCAL_EMBED_MODEL: 'local-embed',
+      },
+      { openaiCompatible: makeEmbedTransport() },
+      fakeQdrant,
+    );
+
+    const sample = datasets.sample().value;
+    const created = c.createIndexResult.parse(
+      (
+        await send(api, 'POST', '/api/v1/indexes', {
+          datasetId: sample.id,
+          mode: 'hybrid',
+        })
+      ).body,
+    );
+    const generationId = created.index.id;
+
+    // Simulate Worker 1 losing its lease right AFTER upserting vectors while Worker 2
+    // has already reclaimed and published the generation as ready.
+    let checkpointStage = '';
+    let vectorGuards = 0;
+    let replacementPublished = false;
+    await expect(
+      indexBuilder.build(generationId, {
+        checkpoint: (stage) => {
+          checkpointStage = stage;
+        },
+        guard: () => {
+          if (checkpointStage === 'indexing-vectors' && !replacementPublished) {
+            vectorGuards += 1;
+            const chunks = indexes.allChunks(generationId);
+            const col = qdrant?.collectionForDimension(4) ?? 'fixture-d4';
+            const upsertedSoFar =
+              fakeQdrant.collections.get(col)?.points.size ?? 0;
+            if (
+              upsertedSoFar >= chunks.length ||
+              vectorGuards > chunks.length
+            ) {
+              replacementPublished = true;
+              // Replacement worker publishes SQLite ready state for the same generation.
+              indexes.markReady(generationId, {
+                chunkCount: chunks.length,
+                embeddingDimensions: 4,
+                qdrantCollection: col,
+              });
+              throw new LostLease();
+            }
+          }
+        },
+      }),
+    ).rejects.toBeInstanceOf(LostLease);
+    expect(replacementPublished).toBe(true);
+
+    // SQLite remains ready AND Qdrant vectors MUST NOT have been wiped by stale Worker 1!
+    const readyGen = indexes.get(generationId);
+    expect(readyGen.state).toBe('ready');
+    const colName = qdrant?.collectionForDimension(4) ?? 'fixture-d4';
+    const pointCount = await fakeQdrant.count(colName, {
+      filter: {
+        must: [{ key: 'generationId', match: { value: generationId } }],
+      },
+    });
+    expect(pointCount.count).toBe(readyGen.chunkCount);
+    expect(pointCount.count).toBeGreaterThan(0);
+
+    const denseHits = await retrieval.search(
+      generationId,
+      c.indexSearchRequest.parse({
+        query: 'chunking overlap',
+        mode: 'dense',
+        topK: 3,
+      }),
+    );
+    expect(denseHits.items.length).toBeGreaterThan(0);
+  });
+
+  it('isolates BM25 scores and rankings per generation so adding another generation never alters existing rankings', async () => {
+    const { api, indexBuilder, retrieval } = createHarness();
+
+    const dsA = datasets.create('BM25 Gen A');
+    let revA = dsA.revision;
+    const uploadDoc = async (
+      datasetId: string,
+      rev: number,
+      name: string,
+      content: string,
+    ) => {
+      const res = c.uploadResult.parse(
+        (
+          await send(
+            api,
+            'POST',
+            `/api/v1/datasets/${datasetId}/documents?name=${encodeURIComponent(name)}`,
+            undefined,
+            { 'if-match': `"${rev}"`, 'content-type': 'text/plain' },
+            content,
+          )
+        ).body,
+      );
+      expect(
+        await runOne(datasets.jobs, {
+          directory: blobs,
+          cloud: new CloudParser('https://unused.invalid', undefined),
+        }),
+      ).toBe(true);
+      return res.dataset.revision;
+    };
+
+    // In Generation A alone, zephyr and quasar both appear in 1 of 2 docs (equal IDF),
+    // while doc1 is shorter, so doc1 ranks #1 for "zephyr quasar".
+    revA = await uploadDoc(dsA.id, revA, 'doc1.txt', 'zephyr baseline');
+    revA = await uploadDoc(
+      dsA.id,
+      revA,
+      'doc2.txt',
+      'quasar baseline padding words to make this second document noticeably longer than the first',
+    );
+
+    const genA = c.createIndexResult.parse(
+      (
+        await send(api, 'POST', '/api/v1/indexes', {
+          datasetId: dsA.id,
+          mode: 'keyword',
+        })
+      ).body,
+    ).index;
+    await indexBuilder.build(genA.id);
+
+    const before = await retrieval.search(
+      genA.id,
+      c.indexSearchRequest.parse({
+        query: 'zephyr quasar',
+        mode: 'keyword',
+        topK: 5,
+      }),
+    );
+    expect(before.items).toHaveLength(2);
+    expect(before.items[0].documentName).toBe('doc1.txt');
+    const beforeSnapshot = before.items.map((item) => ({
+      chunkId: item.chunkId,
+      documentName: item.documentName,
+      keywordScore: item.keywordScore,
+    }));
+
+    // Add a second generation B packed with "zephyr" documents. With shared global FTS5
+    // statistics, df(zephyr) explodes and reverses doc1/doc2 in unchanged Generation A.
+    const dsB = datasets.create('BM25 Gen B');
+    let revB = dsB.revision;
+    for (let i = 0; i < 15; i++) {
+      revB = await uploadDoc(
+        dsB.id,
+        revB,
+        `skew-${i}.txt`,
+        `zephyr skew document number ${i} with zephyr repeated`,
+      );
+    }
+    const genB = c.createIndexResult.parse(
+      (
+        await send(api, 'POST', '/api/v1/indexes', {
+          datasetId: dsB.id,
+          mode: 'keyword',
+        })
+      ).body,
+    ).index;
+    await indexBuilder.build(genB.id);
+
+    const after = await retrieval.search(
+      genA.id,
+      c.indexSearchRequest.parse({
+        query: 'zephyr quasar',
+        mode: 'keyword',
+        topK: 5,
+      }),
+    );
+    expect(
+      after.items.map((item) => ({
+        chunkId: item.chunkId,
+        documentName: item.documentName,
+        keywordScore: item.keywordScore,
+      })),
+    ).toEqual(beforeSnapshot);
+  });
+
+  it('indexes distinct document versions with identical bytes using distinct chunk IDs while sharing the parse artifact', async () => {
+    const { api, indexBuilder, retrieval } = createHarness();
+    const ds = datasets.create('Duplicate Bytes Corpus');
+    const identicalText =
+      'Shared compliance bulletin covering immutable generation chunking.';
+
+    const up1 = c.uploadResult.parse(
+      (
+        await send(
+          api,
+          'POST',
+          `/api/v1/datasets/${ds.id}/documents?name=copy-one.txt`,
+          undefined,
+          { 'if-match': '"1"', 'content-type': 'text/plain' },
+          identicalText,
+        )
+      ).body,
+    );
+    const up2 = c.uploadResult.parse(
+      (
+        await send(
+          api,
+          'POST',
+          `/api/v1/datasets/${ds.id}/documents?name=copy-two.txt`,
+          undefined,
+          {
+            'if-match': `"${up1.dataset.revision}"`,
+            'content-type': 'text/plain',
+          },
+          identicalText,
+        )
+      ).body,
+    );
+
+    const parseOpts = {
+      directory: blobs,
+      cloud: new CloudParser('https://unused.invalid', undefined),
+    };
+    expect(await runOne(datasets.jobs, parseOpts)).toBe(true);
+    expect(await runOne(datasets.jobs, parseOpts)).toBe(true);
+
+    // Both document versions share a single parse_artifacts record.
+    const artifactCount = Number(
+      db.prepare('SELECT count(*) AS n FROM parse_artifacts').get()?.n ?? 0,
+    );
+    expect(artifactCount).toBe(1);
+
+    const gen = c.createIndexResult.parse(
+      (
+        await send(api, 'POST', '/api/v1/indexes', {
+          datasetId: ds.id,
+          mode: 'keyword',
+        })
+      ).body,
+    ).index;
+    const readyGen = await indexBuilder.build(gen.id);
+
+    const storedChunks = indexes.allChunks(readyGen.id);
+    expect(storedChunks).toHaveLength(2);
+    expect(new Set(storedChunks.map((ch) => ch.chunkId)).size).toBe(2);
+    expect(new Set(storedChunks.map((ch) => ch.documentId))).toEqual(
+      new Set([up1.documentId, up2.documentId]),
+    );
+
+    // Both documents are searchable, including filtering specifically to the second duplicate document.
+    const searchAll = await retrieval.search(
+      readyGen.id,
+      c.indexSearchRequest.parse({ query: 'compliance bulletin', topK: 5 }),
+    );
+    expect(new Set(searchAll.items.map((item) => item.documentId))).toEqual(
+      new Set([up1.documentId, up2.documentId]),
+    );
+    const searchSecond = await retrieval.search(
+      readyGen.id,
+      c.indexSearchRequest.parse({
+        query: 'compliance bulletin',
+        filters: { documentIds: [up2.documentId] },
+        topK: 5,
+      }),
+    );
+    expect(searchSecond.items).toHaveLength(1);
+    expect(searchSecond.items[0].documentId).toBe(up2.documentId);
+  });
+
+  it('pins document-version parse artifacts at index plan time so reparsing before build does not drift from the fingerprint', async () => {
+    const { api, indexBuilder, retrieval } = createHarness({
+      LLAMA_CLOUD_API_KEY: 'fixture-llama-key',
+    });
+    const ds = datasets.create('Pinned Parse Corpus');
+    const up = c.uploadResult.parse(
+      (
+        await send(
+          api,
+          'POST',
+          `/api/v1/datasets/${ds.id}/documents?name=guide.txt`,
+          undefined,
+          { 'if-match': '"1"', 'content-type': 'text/plain' },
+          'Original local parse content with keyword albatross.',
+        )
+      ).body,
+    );
+    expect(
+      await runOne(datasets.jobs, {
+        directory: blobs,
+        cloud: new CloudParser('https://unused.invalid', undefined),
+      }),
+    ).toBe(true);
+
+    // Plan the index generation BEFORE reparsing (do not execute the index job yet).
+    const planned = c.createIndexResult.parse(
+      (
+        await send(api, 'POST', '/api/v1/indexes', {
+          datasetId: ds.id,
+          mode: 'keyword',
+        })
+      ).body,
+    );
+
+    // Reparse the SAME document version with LlamaParse before the index builds!
+    const reparseRes = await send(
+      api,
+      'POST',
+      `/api/v1/documents/${up.documentId}/parses`,
+      { parser: 'llama-parse' },
+      { 'if-match': `"${up.dataset.revision}"` },
+    );
+    expect(reparseRes.status).toBe(202);
+    const fakeCloud = {
+      upload: async () => 'remote-job-1',
+      poll: async () => true,
+      download: async () => ({
+        text: 'Reparsed cloud content with keyword pelican.',
+        pages: [{ page: 1, start: 0, end: 44 }],
+      }),
+    } as unknown as CloudParser;
+    expect(
+      await runOne(datasets.jobs, { directory: blobs, cloud: fakeCloud }),
+    ).toBe(true);
+
+    // Build the previously planned index generation: it MUST build from the artifact
+    // pinned when the generation was planned ("albatross"), NOT the later reparse ("pelican")!
+    await indexBuilder.build(planned.index.id);
+
+    const alphaHits = await retrieval.search(
+      planned.index.id,
+      c.indexSearchRequest.parse({ query: 'albatross', mode: 'keyword' }),
+    );
+    const pelicanHits = await retrieval.search(
+      planned.index.id,
+      c.indexSearchRequest.parse({ query: 'pelican', mode: 'keyword' }),
+    );
+    expect(alphaHits.items).toHaveLength(1);
+    expect(pelicanHits.items).toHaveLength(0);
   });
 });
 

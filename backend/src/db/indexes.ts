@@ -39,6 +39,22 @@ export interface StoredIndexGeneration extends IndexGeneration {
   qdrantCollection: string | null;
 }
 
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function generationFtsTable(generationId: string): string {
+  if (!UUID_PATTERN.test(generationId)) {
+    throw new ApiError(400, 'invalid_input', 'Invalid index generation ID.');
+  }
+  return `chunk_fts_${generationId.toLowerCase().replaceAll('-', '_')}`;
+}
+
+export function dropGenerationFts(db: DatabaseSync, generationId: string) {
+  const table = generationFtsTable(generationId);
+  db.exec(`DROP TABLE IF EXISTS "${table}"`);
+  db.prepare('DELETE FROM chunk_fts WHERE generation_id = ?').run(generationId);
+}
+
 const selectGeneration = `
   SELECT g.id, g.dataset_id AS datasetId, g.dataset_revision AS datasetRevision,
     g.fingerprint, g.state, g.mode, g.chunk_config AS chunkConfig,
@@ -104,7 +120,78 @@ export class Indexes {
   revisionDocuments(
     datasetId: string,
     datasetRevision: number,
+    pinnedArtifacts?: Record<string, string | null>,
   ): RevisionSourceDocument[] {
+    if (pinnedArtifacts) {
+      const docRows = this.db
+        .prepare(
+          `SELECT d.document_id AS documentId, d.id AS documentVersionId,
+                  d.name, d.mime_type AS mimeType, d.hash, d.is_text AS isText, d.bytes
+           FROM revision_documents r
+           JOIN document_versions d ON r.version_id = d.id
+           WHERE r.dataset_id = ? AND r.revision = ?
+           ORDER BY d.document_id ASC`,
+        )
+        .all(datasetId, datasetRevision);
+
+      if (!docRows.length) {
+        throw new ApiError(
+          409,
+          'conflict',
+          'Add at least one document to the dataset before indexing.',
+        );
+      }
+
+      const artifactStmt = this.db.prepare(
+        'SELECT id, text, pages FROM parse_artifacts WHERE id = ?',
+      );
+
+      return docRows.map((row) => {
+        const isText = Number(row.isText) === 1;
+        const documentVersionId = String(row.documentVersionId);
+        if (!Object.hasOwn(pinnedArtifacts, documentVersionId)) {
+          throw new ApiError(
+            409,
+            'conflict',
+            `Pinned parse artifact mapping is missing document version "${documentVersionId}".`,
+          );
+        }
+        const pinnedId = pinnedArtifacts[documentVersionId];
+        let extraction: Extraction | undefined;
+        if (pinnedId !== null) {
+          const artifact = artifactStmt.get(pinnedId);
+          if (!artifact || typeof artifact.text !== 'string') {
+            throw new ApiError(
+              409,
+              'conflict',
+              `Pinned parse artifact "${pinnedId}" is no longer available.`,
+            );
+          }
+          extraction = {
+            text: artifact.text,
+            pages: z.array(pageSpan).parse(JSON.parse(String(artifact.pages))),
+          };
+        } else if (!isText) {
+          throw new ApiError(
+            409,
+            'conflict',
+            'Finish parsing all documents in this dataset revision before indexing.',
+          );
+        }
+        return {
+          documentId: String(row.documentId),
+          documentVersionId,
+          name: String(row.name),
+          mimeType: String(row.mimeType),
+          hash: String(row.hash),
+          isText,
+          inline: row.bytes as Uint8Array,
+          artifactId: pinnedId,
+          extraction,
+        };
+      });
+    }
+
     const rows = this.db
       .prepare(
         `SELECT d.document_id AS documentId, d.id AS documentVersionId,
@@ -162,6 +249,33 @@ export class Indexes {
             : undefined,
       };
     });
+  }
+
+  generationSourceDocuments(generationId: string): RevisionSourceDocument[] {
+    const generation = this.getStored(generationId);
+    const pinnedRows = this.db
+      .prepare(
+        `SELECT document_version_id AS documentVersionId, artifact_id AS artifactId
+         FROM generation_source_artifacts
+         WHERE generation_id = ?`,
+      )
+      .all(generationId);
+    if (pinnedRows.length > 0) {
+      const pinned: Record<string, string | null> = {};
+      for (const row of pinnedRows) {
+        pinned[String(row.documentVersionId)] =
+          typeof row.artifactId === 'string' ? row.artifactId : null;
+      }
+      return this.revisionDocuments(
+        generation.datasetId,
+        generation.datasetRevision,
+        pinned,
+      );
+    }
+    return this.revisionDocuments(
+      generation.datasetId,
+      generation.datasetRevision,
+    );
   }
 
   getStored(id: string): StoredIndexGeneration {
@@ -227,13 +341,18 @@ export class Indexes {
     } | null,
     idempotencyKey: string | null = null,
     enqueueJob = true,
+    pinnedArtifacts?: Record<string, string | null>,
   ) {
     return transaction(this.db, () => {
       const datasetRevision = this.resolveRevision(
         request.datasetId,
         request.datasetRevision,
       );
-      const docs = this.revisionDocuments(request.datasetId, datasetRevision);
+      const docs = this.revisionDocuments(
+        request.datasetId,
+        datasetRevision,
+        pinnedArtifacts,
+      );
       const fingerprint = sha256(
         JSON.stringify([
           'index-generation-v1',
@@ -300,6 +419,12 @@ export class Indexes {
           request.mode === 'keyword' ? null : (embedding?.model ?? null),
           new Date(this.now()).toISOString(),
         );
+      const insertPinned = this.db.prepare(
+        'INSERT INTO generation_source_artifacts(generation_id, document_version_id, artifact_id) VALUES (?, ?, ?)',
+      );
+      for (const doc of docs) {
+        insertPinned.run(generationId, doc.documentVersionId, doc.artifactId);
+      }
       const jobId = enqueueJob
         ? this.jobs.enqueueIndex(generationId, idempotencyKey, requestHash)
         : null;
@@ -352,9 +477,42 @@ export class Indexes {
     });
   }
 
+  private hasGenerationFtsTable(generationId: string): boolean {
+    const table = generationFtsTable(generationId);
+    const row = this.db
+      .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
+      .get(table);
+    return Boolean(row);
+  }
+
+  private ensureGenerationFts(generationId: string): string {
+    const table = generationFtsTable(generationId);
+    this.db.exec(
+      `CREATE VIRTUAL TABLE IF NOT EXISTS "${table}" USING fts5(
+        content,
+        chunk_id UNINDEXED,
+        tokenize='porter unicode61'
+      )`,
+    );
+    return table;
+  }
+
+  recordQdrantCollection(generationId: string, qdrantCollection: string) {
+    transaction(this.db, () => {
+      this.db
+        .prepare(
+          `UPDATE index_generations
+           SET qdrant_collection = ?
+           WHERE id = ? AND state = 'building'`,
+        )
+        .run(qdrantCollection, generationId);
+    });
+  }
+
   writeGenerationChunks(generationId: string, rows: GenerationChunk[]) {
     if (!rows.length) return;
     transaction(this.db, () => {
+      const ftsTable = this.ensureGenerationFts(generationId);
       const insertChunk = this.db.prepare(
         `INSERT OR IGNORE INTO generation_chunks(
           generation_id, chunk_id, document_id, document_version_id,
@@ -362,7 +520,7 @@ export class Indexes {
         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
       );
       const insertFts = this.db.prepare(
-        'INSERT INTO chunk_fts(content, generation_id, chunk_id) VALUES (?,?,?)',
+        `INSERT INTO "${ftsTable}"(content, chunk_id) VALUES (?,?)`,
       );
       for (const row of rows) {
         const res = insertChunk.run(
@@ -380,7 +538,7 @@ export class Indexes {
           row.content,
         );
         if (res.changes > 0) {
-          insertFts.run(row.content, generationId, row.chunkId);
+          insertFts.run(row.content, row.chunkId);
         }
       }
     });
@@ -392,12 +550,17 @@ export class Indexes {
         'SELECT count(*) AS n FROM generation_chunks WHERE generation_id = ?',
       )
       .get(generationId);
-    const ftsRow = this.db
-      .prepare('SELECT count(*) AS n FROM chunk_fts WHERE generation_id = ?')
-      .get(generationId);
+    let ftsCount = 0;
+    if (this.hasGenerationFtsTable(generationId)) {
+      const ftsTable = generationFtsTable(generationId);
+      const ftsRow = this.db
+        .prepare(`SELECT count(*) AS n FROM "${ftsTable}"`)
+        .get();
+      ftsCount = Number(ftsRow?.n ?? 0);
+    }
     return {
       chunkCount: Number(chunkRow?.n ?? 0),
-      ftsCount: Number(ftsRow?.n ?? 0),
+      ftsCount,
     };
   }
 
@@ -434,19 +597,23 @@ export class Indexes {
     });
   }
 
-  markFailed(generationId: string, message: string) {
-    transaction(this.db, () => {
-      this.db
+  markFailed(generationId: string, message: string): boolean {
+    return transaction(this.db, () => {
+      const res = this.db
         .prepare(
           `UPDATE index_generations
            SET state = 'failed', error_message = ?
            WHERE id = ? AND state = 'building'`,
         )
         .run(message, generationId);
-      // Clean unready FTS rows for this failed generation without touching any other generation.
-      this.db
-        .prepare('DELETE FROM chunk_fts WHERE generation_id = ?')
-        .run(generationId);
+      if (res.changes > 0) {
+        // Clean unready FTS state ONLY after transitioning building -> failed.
+        dropGenerationFts(this.db, generationId);
+      }
+      const row = this.db
+        .prepare('SELECT state FROM index_generations WHERE id = ?')
+        .get(generationId);
+      return row?.state === 'failed';
     });
   }
 
@@ -526,18 +693,39 @@ export class Indexes {
     return map;
   }
 
+  private ensureReadyGenerationFts(generationId: string): string | null {
+    const genRow = this.db
+      .prepare('SELECT state FROM index_generations WHERE id = ?')
+      .get(generationId);
+    if (genRow?.state !== 'ready') return null;
+    const ftsTable = generationFtsTable(generationId);
+    if (!this.hasGenerationFtsTable(generationId)) {
+      // Lazily materialize an isolated FTS5 table for legacy ready generations upgraded from v3-v5.
+      transaction(this.db, () => {
+        if (this.hasGenerationFtsTable(generationId)) return;
+        this.ensureGenerationFts(generationId);
+        this.db
+          .prepare(
+            `INSERT INTO "${ftsTable}"(content, chunk_id)
+             SELECT content, chunk_id FROM generation_chunks WHERE generation_id = ?`,
+          )
+          .run(generationId);
+      });
+    }
+    return ftsTable;
+  }
+
   keywordSearch(
     generationId: string,
     ftsMatch: string,
     filters: MetadataFilters | undefined,
     limit: number,
   ): KeywordHitRow[] {
-    const params: SQLInputValue[] = [ftsMatch, generationId];
-    const clauses = [
-      'chunk_fts MATCH ?',
-      'chunk_fts.generation_id = ?',
-      "g.state = 'ready'",
-    ];
+    const ftsTable = this.ensureReadyGenerationFts(generationId);
+    if (!ftsTable) return [];
+
+    const params: SQLInputValue[] = [generationId, ftsMatch];
+    const clauses = [`"${ftsTable}" MATCH ?`, "g.state = 'ready'"];
 
     if (filters?.documentIds?.length) {
       clauses.push(
@@ -572,14 +760,14 @@ export class Indexes {
              gc.document_version_id AS documentVersionId, gc.document_name AS documentName,
              gc.mime_type AS mimeType, gc.ordinal, gc.start, gc.end, gc.page,
              gc.content_hash AS contentHash, gc.content,
-             bm25(chunk_fts) AS bm25Score
-      FROM chunk_fts
-      JOIN index_generations g ON g.id = chunk_fts.generation_id
+             bm25("${ftsTable}") AS bm25Score
+      FROM "${ftsTable}"
+      JOIN index_generations g ON g.id = ?
       JOIN generation_chunks gc
-        ON gc.generation_id = chunk_fts.generation_id
-       AND gc.chunk_id = chunk_fts.chunk_id
+        ON gc.generation_id = g.id
+       AND gc.chunk_id = "${ftsTable}".chunk_id
       WHERE ${clauses.join(' AND ')}
-      ORDER BY bm25(chunk_fts) ASC, gc.chunk_id ASC
+      ORDER BY bm25("${ftsTable}") ASC, gc.chunk_id ASC
       LIMIT ?
     `;
 

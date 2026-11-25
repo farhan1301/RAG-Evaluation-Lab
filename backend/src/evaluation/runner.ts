@@ -7,6 +7,7 @@ import type {
   RetrievedTraceItem,
 } from '@rag-eval/contracts';
 import type { Indexes } from '../db/indexes.js';
+import { LostLease } from '../db/jobs.js';
 import {
   PROMPT_VERSION,
   type ExecutionPlan,
@@ -169,17 +170,20 @@ export class EvaluationRunner {
       expectedDimensions?: number;
     } | null = null;
     if (mode === 'dense' || mode === 'hybrid') {
+      const frozenEmbedding = pipeline.resolvedModels.embedding;
       const resolved = this.providers.findProfile(
         'embedding',
-        pipeline.resolvedModels.embedding?.model ??
-          pipeline.config.embedding.model,
+        frozenEmbedding?.model ?? pipeline.config.embedding.model,
+        frozenEmbedding?.provider,
       );
       if (
         !resolved?.capabilities.embeddings ||
         (resolved.provider !== 'openai' &&
           resolved.provider !== 'openai-compatible')
       ) {
-        const message = `Embedding profile is unavailable for pipeline "${pipeline.pipelineName}".`;
+        const message = frozenEmbedding
+          ? `Frozen embedding profile "${frozenEmbedding.provider}/${frozenEmbedding.model}" is unavailable or has changed for pipeline "${pipeline.pipelineName}".`
+          : `Embedding profile is unavailable for pipeline "${pipeline.pipelineName}".`;
         this.runs.markPipelineState(
           plan.runId,
           pipeline.pipelineId,
@@ -209,6 +213,7 @@ export class EvaluationRunner {
       embedding,
       null,
       false,
+      plan.snapshot.documentArtifacts,
     );
 
     if (planned.reused) {
@@ -241,7 +246,6 @@ export class EvaluationRunner {
     }
 
     const generationId = planned.index.id;
-    let embedAttempt = 0;
 
     for (let attempt = 1; attempt <= 1 + this.maxTransientRetries; attempt++) {
       hooks.signal?.throwIfAborted();
@@ -250,29 +254,72 @@ export class EvaluationRunner {
         await this.indexBuilder.build(generationId, {
           signal: hooks.signal,
           guard: hooks.guard,
-          onEmbedCall: (audit) => {
-            embedAttempt += 1;
+          beforeEmbedBatch: () => {
+            const budgetError = this.checkBudget(plan);
+            if (budgetError) {
+              throw new ProviderError('invalid_input', budgetError, {
+                retryable: false,
+              });
+            }
+          },
+          onEmbedBatchStart: (info) => {
             const isRetry = Boolean(hooks.isRetryJob) || attempt > 1;
-            this.runs.recordProviderCall(
+            const started = this.runs.beginProviderCall(
               {
-                stageKey: sha256(
-                  JSON.stringify([
-                    'corpus_embed',
-                    plan.runId,
-                    generationId,
-                    attempt,
-                    embedAttempt,
-                  ]),
-                ),
+                stageKeyPrefix: `corpus_embed:${generationId}:batch:${info.batchIndex}`,
+                runId: plan.runId,
+                pipelineId: pipeline.pipelineId,
+                indexGenerationId: generationId,
+                operation: 'corpus_embed',
+                provider: info.provider,
+                model: info.model,
+                isRetry,
+                priceSchedule: plan.snapshot.priceSchedule,
+              },
+              hooks.guard,
+            );
+            return started.id;
+          },
+          onEmbedCall: (audit) => {
+            if (audit.callId) {
+              if (audit.status === 'cancelled') return;
+              this.runs.completeProviderCall(
+                audit.callId,
+                {
+                  provider: audit.provider,
+                  model: audit.model,
+                  requestId: audit.requestIds[0] ?? null,
+                  status: audit.status,
+                  errorCode: audit.errorCode,
+                  latencyMs: audit.latencyMs,
+                  usage: audit.usage,
+                  priceSchedule: plan.snapshot.priceSchedule,
+                },
+                hooks.guard,
+              );
+              return;
+            }
+            const isRetry = Boolean(hooks.isRetryJob) || attempt > 1;
+            const started = this.runs.beginProviderCall(
+              {
+                stageKeyPrefix: `corpus_embed:${generationId}:batch:${audit.batchIndex}`,
                 runId: plan.runId,
                 pipelineId: pipeline.pipelineId,
                 indexGenerationId: generationId,
                 operation: 'corpus_embed',
                 provider: audit.provider,
                 model: audit.model,
-                requestId: audit.requestIds[0] ?? null,
-                attemptNumber: attempt,
                 isRetry,
+                priceSchedule: plan.snapshot.priceSchedule,
+              },
+              hooks.guard,
+            );
+            this.runs.completeProviderCall(
+              started.id,
+              {
+                provider: audit.provider,
+                model: audit.model,
+                requestId: audit.requestIds[0] ?? null,
                 status: audit.status,
                 errorCode: audit.errorCode,
                 latencyMs: audit.latencyMs,
@@ -296,7 +343,7 @@ export class EvaluationRunner {
         );
         return { generationId };
       } catch (err) {
-        if (hooks.signal?.aborted) throw err;
+        if (hooks.signal?.aborted || err instanceof LostLease) throw err;
         if (attempt <= this.maxTransientRetries && isRetryableError(err)) {
           const delay =
             err instanceof ProviderError && err.retryAfterMs
@@ -306,7 +353,10 @@ export class EvaluationRunner {
           continue;
         }
         const message = safeMessageOf(err, 'Index build failed.');
-        this.indexes.markFailed(generationId, message);
+        hooks.guard?.();
+        if (this.indexes.markFailed(generationId, message)) {
+          await this.indexBuilder.cleanupFailedGeneration(generationId);
+        }
         this.runs.markPipelineState(
           plan.runId,
           pipeline.pipelineId,
@@ -445,7 +495,6 @@ export class EvaluationRunner {
     for (let attempt = 1; attempt <= 1 + this.maxTransientRetries; attempt++) {
       hooks.signal?.throwIfAborted();
       hooks.guard?.();
-      let callSeq = 0;
       try {
         const result = await this.retrieval.search(
           generationId,
@@ -460,20 +509,50 @@ export class EvaluationRunner {
           },
           hooks.signal,
           {
-            onProviderCall: (audit) => {
-              callSeq += 1;
+            expectedEmbeddingProvider:
+              pipeline.resolvedModels.embedding?.provider,
+            expectedRerankerProvider: pipeline.resolvedModels.rerank?.provider,
+            onProviderCallStart: (info) => {
               const isRetry = Boolean(hooks.isRetryJob) || attempt > 1;
-              this.runs.recordProviderCall(
+              return this.runs.beginProviderCall(
                 {
-                  stageKey: sha256(
-                    JSON.stringify([
-                      audit.operation,
-                      plan.runId,
-                      task.runTaskId,
-                      attempt,
-                      callSeq,
-                    ]),
-                  ),
+                  stageKeyPrefix: `${info.operation}:${task.runTaskId}`,
+                  runId: plan.runId,
+                  pipelineId: pipeline.pipelineId,
+                  runTaskId: task.runTaskId,
+                  indexGenerationId: generationId,
+                  operation: info.operation,
+                  provider: info.provider,
+                  model: info.model,
+                  isRetry,
+                  priceSchedule: plan.snapshot.priceSchedule,
+                },
+                hooks.guard,
+              ).id;
+            },
+            onProviderCall: (audit) => {
+              if (audit.callId) {
+                if (audit.status === 'cancelled') return;
+                this.runs.completeProviderCall(
+                  audit.callId,
+                  {
+                    provider: audit.provider,
+                    model: audit.model,
+                    requestId: audit.requestId,
+                    status: audit.status,
+                    errorCode: audit.errorCode,
+                    latencyMs: audit.latencyMs,
+                    usage: audit.usage,
+                    priceSchedule: plan.snapshot.priceSchedule,
+                  },
+                  hooks.guard,
+                );
+                return;
+              }
+              const isRetry = Boolean(hooks.isRetryJob) || attempt > 1;
+              const started = this.runs.beginProviderCall(
+                {
+                  stageKeyPrefix: `${audit.operation}:${task.runTaskId}`,
                   runId: plan.runId,
                   pipelineId: pipeline.pipelineId,
                   runTaskId: task.runTaskId,
@@ -481,9 +560,17 @@ export class EvaluationRunner {
                   operation: audit.operation,
                   provider: audit.provider,
                   model: audit.model,
-                  requestId: audit.requestId,
-                  attemptNumber: attempt,
                   isRetry,
+                  priceSchedule: plan.snapshot.priceSchedule,
+                },
+                hooks.guard,
+              );
+              this.runs.completeProviderCall(
+                started.id,
+                {
+                  provider: audit.provider,
+                  model: audit.model,
+                  requestId: audit.requestId,
                   status: audit.status,
                   errorCode: audit.errorCode,
                   latencyMs: audit.latencyMs,
@@ -532,7 +619,7 @@ export class EvaluationRunner {
           searchResult: result,
         };
       } catch (err) {
-        if (hooks.signal?.aborted) throw err;
+        if (hooks.signal?.aborted || err instanceof LostLease) throw err;
         if (attempt <= this.maxTransientRetries && isRetryableError(err)) {
           await wait(this.retryDelayMs, undefined, { signal: hooks.signal });
           continue;
@@ -726,47 +813,99 @@ export class EvaluationRunner {
     const chatModel = resolvedChat?.model ?? pipeline.config.llm.model;
     const chatProviderKind: ProviderKind = resolvedChat?.provider ?? 'openai';
 
+    // If a prior paid answer attempt was already dispatched (ambiguous or succeeded
+    // before the answer row committed), automatic crash recovery MUST NOT re-dispatch
+    // silently because providers cannot deduplicate chat calls. Require explicit retry.
+    if (
+      !hooks.isRetryJob &&
+      this.runs.hasPriorProviderCall(plan.runId, task.runTaskId, 'generate')
+    ) {
+      const message =
+        'Previous answer generation attempt has an ambiguous outcome after interruption. Explicit retry is required and may incur another provider charge.';
+      const abstentionObs = evaluateTaskAbstention({
+        answerable: task.answerable,
+        generationFailed: true,
+        generationError: message,
+      });
+      this.runs.saveTaskAnswer(
+        {
+          runId: plan.runId,
+          pipelineId: pipeline.pipelineId,
+          taskVersionId: task.taskVersionId,
+          runTaskId: task.runTaskId,
+          answerKey,
+          succeeded: false,
+          generationLatencyMs: null,
+          errorCode: 'ambiguous_outcome',
+          errorMessage: message,
+          abstentionObservation: abstentionObs,
+        },
+        hooks.guard,
+      );
+      return {
+        succeeded: false,
+        answerText: '',
+        abstained: false,
+        context: boundedContext,
+        generationLatencyMs: null,
+        errorMessage: message,
+      };
+    }
+
     for (let attempt = 1; attempt <= 1 + this.maxTransientRetries; attempt++) {
       hooks.signal?.throwIfAborted();
       hooks.guard?.();
       const startedAt = this.now();
       const isRetry = Boolean(hooks.isRetryJob) || attempt > 1;
+      let callId: string | null = null;
       try {
         const result = await this.retrieval.answerFromSearch(
           syntheticSearch,
           {
             question: task.question,
             model: chatModel,
+            provider: resolvedChat?.provider,
+            expectedStructuredOutput: resolvedChat?.structuredOutput,
             temperature: resolvedChat?.effectiveTemperature ?? undefined,
             maxTokens:
               resolvedChat?.effectiveMaxTokens ?? pipeline.config.llm.maxTokens,
             contextBudgetChars: plan.snapshot.contextBudgetChars,
+            onBeforeCall: (info) => {
+              callId = this.runs.beginProviderCall(
+                {
+                  stageKeyPrefix: `generate:${task.runTaskId}`,
+                  runId: plan.runId,
+                  pipelineId: pipeline.pipelineId,
+                  runTaskId: task.runTaskId,
+                  operation: 'generate',
+                  provider: info.provider,
+                  model: info.model,
+                  isRetry,
+                  priceSchedule: plan.snapshot.priceSchedule,
+                },
+                hooks.guard,
+              ).id;
+            },
           },
           hooks.signal,
         );
 
-        this.runs.recordProviderCall(
-          {
-            stageKey: sha256(
-              JSON.stringify(['generate', plan.runId, task.runTaskId, attempt]),
-            ),
-            runId: plan.runId,
-            pipelineId: pipeline.pipelineId,
-            runTaskId: task.runTaskId,
-            operation: 'generate',
-            provider: result.provider,
-            model: result.model,
-            requestId: result.requestId,
-            attemptNumber: attempt,
-            isRetry,
-            status: 'succeeded',
-            errorCode: null,
-            latencyMs: result.latencyMs,
-            usage: result.usage,
-            priceSchedule: plan.snapshot.priceSchedule,
-          },
-          hooks.guard,
-        );
+        if (callId) {
+          this.runs.completeProviderCall(
+            callId,
+            {
+              provider: result.provider,
+              model: result.model,
+              requestId: result.requestId,
+              status: 'succeeded',
+              errorCode: null,
+              latencyMs: result.latencyMs,
+              usage: result.usage,
+              priceSchedule: plan.snapshot.priceSchedule,
+            },
+            hooks.guard,
+          );
+        }
 
         const abstentionObs = evaluateTaskAbstention({
           answerable: task.answerable,
@@ -807,35 +946,29 @@ export class EvaluationRunner {
           generationLatencyMs: result.latencyMs,
         };
       } catch (err) {
+        // Leave in-flight provider_calls row as 'ambiguous' on lease loss or abort.
+        if (err instanceof LostLease || hooks.signal?.aborted) throw err;
         const latencyMs = Math.max(0, this.now() - startedAt);
         const isTimeout =
           err instanceof ProviderError && err.code === 'timeout';
-        this.runs.recordProviderCall(
-          {
-            stageKey: sha256(
-              JSON.stringify(['generate', plan.runId, task.runTaskId, attempt]),
-            ),
-            runId: plan.runId,
-            pipelineId: pipeline.pipelineId,
-            runTaskId: task.runTaskId,
-            operation: 'generate',
-            provider: chatProviderKind,
-            model: chatModel,
-            requestId: null,
-            attemptNumber: attempt,
-            isRetry,
-            status: hooks.signal?.aborted
-              ? 'cancelled'
-              : isTimeout
-                ? 'timeout'
-                : 'failed',
-            errorCode: errorCodeOf(err),
-            latencyMs,
-            priceSchedule: plan.snapshot.priceSchedule,
-          },
-          hooks.guard,
-        );
-        if (hooks.signal?.aborted) throw err;
+        const callMeta =
+          err instanceof ProviderError ? err.callMeta : undefined;
+        if (callId) {
+          this.runs.completeProviderCall(
+            callId,
+            {
+              provider: callMeta?.provider ?? chatProviderKind,
+              model: callMeta?.model ?? chatModel,
+              requestId: callMeta?.requestId ?? null,
+              status: isTimeout ? 'timeout' : 'failed',
+              errorCode: errorCodeOf(err),
+              latencyMs: callMeta?.latencyMs ?? latencyMs,
+              usage: callMeta?.usage,
+              priceSchedule: plan.snapshot.priceSchedule,
+            },
+            hooks.guard,
+          );
+        }
         if (attempt <= this.maxTransientRetries && isRetryableError(err)) {
           await wait(this.retryDelayMs, undefined, { signal: hooks.signal });
           continue;
@@ -898,10 +1031,22 @@ export class EvaluationRunner {
     judgeState: 'succeeded' | 'partial' | 'failed';
     judgeLatencyMs: number;
   }> {
+    const frozenJudge = pipeline.resolvedModels.judge;
     const resolved = this.providers.resolveChat(
       'judge',
-      pipeline.resolvedModels.judge?.model ?? pipeline.config.judge.model,
+      frozenJudge?.model ?? pipeline.config.judge.model,
+      frozenJudge?.provider,
     );
+    if (
+      frozenJudge &&
+      resolved.profile.capabilities.structuredOutput !==
+        frozenJudge.structuredOutput
+    ) {
+      throw new ProviderError(
+        'missing_capability',
+        `Frozen judge profile "${frozenJudge.provider}/${frozenJudge.model}" structured-output capability has changed.`,
+      );
+    }
     const existing = this.runs.existingObservationMetrics(
       task.runTaskId,
       Boolean(hooks.isRetryJob),
@@ -915,6 +1060,48 @@ export class EvaluationRunner {
       hooks.guard?.();
       if (existing.has(`${metricId}:0`)) {
         completedMetrics += 1;
+        continue;
+      }
+
+      if (
+        !hooks.isRetryJob &&
+        this.runs.hasPriorProviderCall(
+          plan.runId,
+          task.runTaskId,
+          'judge',
+          `judge:${metricId}:`,
+        )
+      ) {
+        const rubric = getRubric(metricId);
+        const obs: ComputedObservation = {
+          metricId,
+          metricVersion: rubric.version,
+          cutoff: 0,
+          evaluationUnit: rubric.evaluationUnit,
+          status: 'judge_failed',
+          value: null,
+          reason:
+            'Previous judge attempt has an ambiguous outcome after interruption. Explicit retry is required and may incur another provider charge.',
+          metadata: {
+            judgeModel: resolved.profile.model,
+            judgeProvider: resolved.profile.provider,
+            rubricVersion: rubric.version,
+            rubricHash: rubric.hash,
+            rawResponseHash: null,
+          },
+        };
+        this.runs.saveTaskJudgeMetric(
+          {
+            runId: plan.runId,
+            pipelineId: pipeline.pipelineId,
+            taskVersionId: task.taskVersionId,
+            runTaskId: task.runTaskId,
+            attempts: [],
+            observation: obs,
+          },
+          hooks.guard,
+        );
+        failedMetrics += 1;
         continue;
       }
 
@@ -975,40 +1162,42 @@ export class EvaluationRunner {
         now: this.now,
         maxTransientRetries: this.maxTransientRetries,
         attemptOffset,
+        onBeforeCall: (info) =>
+          this.runs.beginProviderCall(
+            {
+              stageKeyPrefix: `judge:${info.metricId}:${info.rubricVersion}`,
+              runId: plan.runId,
+              pipelineId: pipeline.pipelineId,
+              runTaskId: task.runTaskId,
+              operation: 'judge',
+              provider: info.provider,
+              model: info.model,
+              isRetry: Boolean(hooks.isRetryJob) || info.isRetry,
+              priceSchedule: plan.snapshot.priceSchedule,
+            },
+            hooks.guard,
+          ).id,
+        onAfterCall: (callId, audit) => {
+          if (!callId) return;
+          this.runs.completeProviderCall(
+            callId,
+            {
+              provider: audit.provider,
+              model: audit.model,
+              requestId: audit.requestId,
+              status: audit.callStatus,
+              errorCode: audit.errorCode,
+              latencyMs: audit.latencyMs,
+              usage: audit.usage as ProviderUsage | undefined,
+              priceSchedule: plan.snapshot.priceSchedule,
+            },
+            hooks.guard,
+          );
+        },
       });
 
       for (const a of evaluation.attempts) {
         judgeLatencyMs += a.latencyMs;
-        const isRetry = Boolean(hooks.isRetryJob) || a.isRetry;
-        this.runs.recordProviderCall(
-          {
-            stageKey: sha256(
-              JSON.stringify([
-                'judge',
-                plan.runId,
-                task.runTaskId,
-                metricId,
-                evaluation.rubricVersion,
-                a.attemptNumber,
-              ]),
-            ),
-            runId: plan.runId,
-            pipelineId: pipeline.pipelineId,
-            runTaskId: task.runTaskId,
-            operation: 'judge',
-            provider: a.provider,
-            model: a.model,
-            requestId: a.requestId,
-            attemptNumber: a.attemptNumber,
-            isRetry,
-            status: a.callStatus,
-            errorCode: a.errorCode,
-            latencyMs: a.latencyMs,
-            usage: a.usage as ProviderUsage | undefined,
-            priceSchedule: plan.snapshot.priceSchedule,
-          },
-          hooks.guard,
-        );
       }
 
       this.runs.saveTaskJudgeMetric(
@@ -1317,10 +1506,15 @@ export class EvaluationRunner {
         await setImmediate();
       }
 
+      const pipelineOutcome = this.runs.getPipelineTaskOutcomeSummary(
+        runId,
+        pipeline.pipelineId,
+      );
       const pipelineState =
-        pipelineFailedTasks === tasks.length
+        pipelineOutcome.total > 0 &&
+        pipelineOutcome.failed === pipelineOutcome.total
           ? 'failed'
-          : pipelineFailedTasks > 0 || pipelinePartialTasks > 0
+          : pipelineOutcome.failed > 0 || pipelineOutcome.partial > 0
             ? 'partial'
             : 'succeeded';
       this.runs.markPipelineState(
@@ -1332,11 +1526,23 @@ export class EvaluationRunner {
           : null,
         hooks.guard,
       );
+      void pipelineFailedTasks;
+      void pipelinePartialTasks;
       void pipelineSucceededTasks;
     }
 
     this.runs.updateRunStage(runId, 'aggregating', hooks.guard);
     hooks.checkpoint?.('aggregating');
+    const runOutcome = this.runs.getRunTaskOutcomeSummary(runId);
+    if (runOutcome.total > 0 && runOutcome.failed === runOutcome.total) {
+      this.runs.finalizeRun(
+        runId,
+        'failed',
+        runOutcome.firstErrorMessage ?? 'All evaluation tasks failed.',
+        hooks.guard,
+      );
+      return;
+    }
     this.runs.finalizeRun(runId, 'succeeded', null, hooks.guard);
   }
 }

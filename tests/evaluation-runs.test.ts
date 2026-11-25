@@ -16,7 +16,12 @@ import { CloudParser } from '../backend/src/ingestion/cloud';
 import { runOne } from '../backend/src/jobs/run';
 import { createLogger } from '../backend/src/lib/logger';
 import { ProviderRegistry } from '../backend/src/providers/registry';
+import { ApiError } from '../backend/src/errors';
 import { IndexBuilder } from '../backend/src/retrieval/indexer';
+import {
+  QdrantStore,
+  type QdrantClientLike,
+} from '../backend/src/retrieval/qdrant';
 import { RetrievalService } from '../backend/src/retrieval/service';
 import { send } from './inProcess';
 
@@ -886,5 +891,932 @@ describe('server-side experiments, durable runs, checkpointing, and HTTP endpoin
     const retryJob = c.job.parse(retried.body);
     expect(retryJob.parentId).toBe(submitted.job.id);
     expect(retryJob.runId).toBe(submitted.run.id);
+  });
+
+  it('freezes document-version parse artifacts at run submission so reparsing before execution does not alter evaluated text', async () => {
+    const stack = setupStack({ LLAMA_CLOUD_API_KEY: 'fixture-llama-key' });
+    const ds = stack.datasets.create('Run Artifact Freeze');
+    const up = c.uploadResult.parse(
+      (
+        await send(
+          stack.app,
+          'POST',
+          `/api/v1/datasets/${ds.id}/documents?name=spec.txt`,
+          undefined,
+          { 'if-match': '"1"', 'content-type': 'text/plain' },
+          'Frozen local text mentioning albatross calibration.',
+        )
+      ).body,
+    );
+    expect(
+      await runOne(stack.jobs, {
+        directory: join(dir, 'blobs'),
+        cloud: new CloudParser('', undefined),
+      }),
+    ).toBe(true);
+
+    const dsWithTask = stack.datasets.addTask(
+      ds.id,
+      up.dataset.revision,
+      c.taskInput.parse({
+        question: 'What mentions albatross calibration?',
+        expectedAnswer: 'The frozen local text.',
+        answerable: true,
+        qrels: [{ documentId: up.documentId, grade: 3 }],
+      }),
+    );
+
+    const p1 = stack.pipelines.create({
+      name: 'Keyword',
+      config: { retriever: { mode: 'keyword', topK: 3, deduplicate: false } },
+    });
+    const exp = stack.runs.createExperiment({
+      name: 'Artifact Freeze Exp',
+      datasetId: ds.id,
+      baselinePipelineId: p1.id,
+      pipelineIds: [p1.id],
+      mode: 'retrieval_only',
+    });
+    const submitted = stack.runs.createRun(
+      exp.id,
+      { datasetRevision: dsWithTask.revision, cutoffs: [1] },
+      {
+        capabilities: stack.config.capabilities,
+        pricing: stack.config.pricing,
+        budgets: stack.config.budgets,
+      },
+    );
+
+    // Reparse the SAME document version with LlamaParse AFTER run enqueue, BEFORE run execution!
+    const reparseRes = await send(
+      stack.app,
+      'POST',
+      `/api/v1/documents/${up.documentId}/parses`,
+      { parser: 'llama-parse' },
+      { 'if-match': `"${dsWithTask.revision}"` },
+    );
+    expect(reparseRes.status).toBe(202);
+    const fakeCloud = {
+      upload: async () => 'remote-run-reparse',
+      poll: async () => true,
+      download: async () => ({
+        text: 'Reparsed cloud text mentioning pelican only.',
+        pages: [{ page: 1, start: 0, end: 44 }],
+      }),
+    } as unknown as CloudParser;
+    expect(
+      await runOne(stack.jobs, {
+        directory: join(dir, 'blobs'),
+        cloud: fakeCloud,
+      }),
+    ).toBe(true);
+
+    // Execute the queued run; it must evaluate the artifact frozen at submission ("albatross").
+    const workerOpts = {
+      directory: join(dir, 'blobs'),
+      cloud: fakeCloud,
+      indexes: stack.indexes,
+      indexBuilder: stack.indexBuilder,
+      runs: stack.runs,
+      evaluationRunner: stack.evaluationRunner,
+    };
+    while (await runOne(stack.jobs, workerOpts)) {
+      clock += 10;
+    }
+
+    const detail = stack.runs.getRun(submitted.run.id);
+    expect(detail.state).toBe('succeeded');
+    const hit1 = detail.pipelines[0]?.retrievalMetrics.find(
+      (m) => m.metricId === 'hit_at_k' && m.cutoff === 1,
+    );
+    expect(hit1?.mean).toBe(1);
+    const taskDetail = stack.runs.listRunTasks(detail.id, 10, 0, p1.id)
+      .items[0];
+    expect(taskDetail?.retrievedItems[0]?.content).toContain('albatross');
+    expect(taskDetail?.retrievedItems[0]?.content).not.toContain('pelican');
+  });
+
+  it('fails before sending data when frozen chat, judge, or embedding provider identity changes after worker restart', async () => {
+    // 1. Freeze a full_rag run against local OpenAI-compatible chat & judge profiles.
+    const submitStack = setupStack({
+      LOCAL_CHAT_BASE_URL: 'http://127.0.0.1:11434/v1',
+      LOCAL_CHAT_MODEL: 'shared-chat-model',
+      LOCAL_JUDGE_MODEL: 'shared-judge-model',
+      LOCAL_CHAT_SUPPORTS_STRUCTURED_OUTPUT: 'true',
+    });
+    const sample = submitStack.datasets.sample().value;
+    let rev = sample.revision;
+    for (const extra of sample.tasks.slice(1)) {
+      rev = submitStack.datasets.editTask(
+        sample.id,
+        rev,
+        extra.id,
+        undefined,
+      ).revision;
+    }
+    const p1 = submitStack.pipelines.create({
+      name: 'Local Full RAG',
+      config: {
+        retriever: { mode: 'keyword', topK: 3, deduplicate: false },
+        llm: { model: 'shared-chat-model', temperature: 0.2, maxTokens: 200 },
+        judge: { model: 'shared-judge-model' },
+      },
+    });
+    const exp = submitStack.runs.createExperiment({
+      name: 'Provider Pin Exp',
+      datasetId: sample.id,
+      baselinePipelineId: p1.id,
+      pipelineIds: [p1.id],
+      mode: 'full_rag',
+    });
+    const created = submitStack.runs.createRun(
+      exp.id,
+      { datasetRevision: rev, mode: 'full_rag', judgeEnabled: true },
+      {
+        capabilities: submitStack.config.capabilities,
+        pricing: submitStack.config.pricing,
+        budgets: submitStack.config.budgets,
+      },
+    );
+
+    // Worker restarts with the SAME model names mapped to cloud OpenAI instead of local!
+    const cloudOpenAIFetch = vi.fn<typeof fetch>(async () =>
+      openaiChatResponse(
+        JSON.stringify({ answer: 'LEAKED', citations: [], abstained: false }),
+        'shared-chat-model',
+      ),
+    );
+    const restartedStack = setupStack(
+      {
+        OPENAI_API_KEY: 'cloud-secret-key',
+        OPENAI_CHAT_MODEL: 'shared-chat-model',
+        OPENAI_JUDGE_MODEL: 'shared-judge-model',
+      },
+      { openai: cloudOpenAIFetch },
+    );
+
+    await runOne(restartedStack.jobs, {
+      directory: join(dir, 'blobs'),
+      cloud: new CloudParser('', undefined),
+      indexes: restartedStack.indexes,
+      indexBuilder: restartedStack.indexBuilder,
+      runs: restartedStack.runs,
+      evaluationRunner: restartedStack.evaluationRunner,
+    });
+
+    // ZERO requests may be sent to cloud OpenAI!
+    expect(cloudOpenAIFetch).not.toHaveBeenCalled();
+    const runAfter = restartedStack.runs.getRun(created.run.id);
+    expect(runAfter.state).toBe('failed');
+    expect(restartedStack.jobs.get(created.job.id).state).toBe('failed');
+
+    // 2. Also verify frozen embedding provider identity cannot silently switch local -> cloud OpenAI.
+    const embedSubmitStack = setupStack({
+      QDRANT_URL: 'http://qdrant.invalid',
+      LOCAL_EMBED_BASE_URL: 'http://127.0.0.1:11434/v1',
+      LOCAL_EMBED_MODEL: 'shared-embed-model',
+    });
+    const pDense = embedSubmitStack.pipelines.create({
+      name: 'Local Dense',
+      config: {
+        embedding: { model: 'shared-embed-model' },
+        retriever: { mode: 'dense', topK: 3, deduplicate: false },
+      },
+    });
+    const expDense = embedSubmitStack.runs.createExperiment({
+      name: 'Embed Provider Pin Exp',
+      datasetId: sample.id,
+      baselinePipelineId: pDense.id,
+      pipelineIds: [pDense.id],
+      mode: 'retrieval_only',
+    });
+    const createdDense = embedSubmitStack.runs.createRun(
+      expDense.id,
+      { datasetRevision: rev },
+      {
+        capabilities: embedSubmitStack.config.capabilities,
+        pricing: embedSubmitStack.config.pricing,
+        budgets: embedSubmitStack.config.budgets,
+      },
+    );
+
+    const cloudEmbedFetch = vi.fn<typeof fetch>(async () =>
+      Response.json({
+        object: 'list',
+        model: 'shared-embed-model',
+        data: [{ object: 'embedding', index: 0, embedding: [1, 0, 0] }],
+      }),
+    );
+    const restartedEmbedConfig = readConfig({
+      BLOB_DIRECTORY: join(dir, 'blobs'),
+      QDRANT_URL: 'http://qdrant.invalid',
+      OPENAI_API_KEY: 'cloud-secret-key',
+      OPENAI_EMBED_MODEL: 'shared-embed-model',
+    });
+    const restartedEmbedProviders = new ProviderRegistry(restartedEmbedConfig, {
+      openai: cloudEmbedFetch,
+    });
+    const fakeQdrant: QdrantClientLike = {
+      collectionExists: async () => ({ exists: false }),
+      getCollection: async () => ({}),
+      createCollection: async () => ({}),
+      createPayloadIndex: async () => ({}),
+      upsert: async () => ({}),
+      query: async () => ({ points: [] }),
+      count: async () => ({ count: 0 }),
+      delete: async () => ({}),
+      deleteCollection: async () => ({}),
+    };
+    const qdrantStore = new QdrantStore({
+      url: 'http://qdrant.invalid',
+      client: fakeQdrant,
+    });
+    const jobs2 = new Jobs(db, () => clock, 5000);
+    const datasets2 = new Datasets(db, jobs2);
+    const pipelines2 = new Pipelines(db);
+    const indexes2 = new Indexes(db, jobs2, () => clock);
+    const runs2 = new Runs(
+      db,
+      datasets2,
+      pipelines2,
+      indexes2,
+      jobs2,
+      () => clock,
+    );
+    const indexBuilder2 = new IndexBuilder({
+      indexes: indexes2,
+      providers: restartedEmbedProviders,
+      qdrant: qdrantStore,
+      now: () => clock,
+    });
+    const retrieval2 = new RetrievalService({
+      indexes: indexes2,
+      providers: restartedEmbedProviders,
+      qdrant: qdrantStore,
+      now: () => clock,
+    });
+    const runner2 = new EvaluationRunner({
+      runs: runs2,
+      indexes: indexes2,
+      indexBuilder: indexBuilder2,
+      retrieval: retrieval2,
+      providers: restartedEmbedProviders,
+      now: () => clock,
+      retryDelayMs: 1,
+    });
+    await runOne(jobs2, {
+      directory: join(dir, 'blobs'),
+      cloud: new CloudParser('', undefined),
+      indexes: indexes2,
+      indexBuilder: indexBuilder2,
+      runs: runs2,
+      evaluationRunner: runner2,
+    });
+    expect(cloudEmbedFetch).not.toHaveBeenCalled();
+    expect(runs2.getRun(createdDense.run.id).state).toBe('failed');
+    expect(jobs2.get(createdDense.job.id).state).toBe('failed');
+  });
+
+  it('marks both run and job failed when every task fails retrieval so the retry endpoint accepts it', async () => {
+    const stack = setupStack();
+    const sample = stack.datasets.sample().value;
+    const p1 = stack.pipelines.create({
+      name: 'Failing Retrieval Pipeline',
+      config: { retriever: { mode: 'keyword', topK: 3, deduplicate: false } },
+    });
+    const exp = stack.runs.createExperiment({
+      name: 'All Tasks Fail',
+      datasetId: sample.id,
+      baselinePipelineId: p1.id,
+      pipelineIds: [p1.id],
+      mode: 'retrieval_only',
+    });
+    const created = stack.runs.createRun(
+      exp.id,
+      {},
+      {
+        capabilities: stack.config.capabilities,
+        pricing: stack.config.pricing,
+        budgets: stack.config.budgets,
+      },
+    );
+
+    // Index builds and becomes ready, then every single retrieval fails.
+    vi.spyOn(stack.retrieval, 'search').mockRejectedValue(
+      new ApiError(
+        500,
+        'internal_error',
+        'Simulated permanent search failure.',
+      ),
+    );
+
+    await runOne(stack.jobs, {
+      directory: join(dir, 'blobs'),
+      cloud: new CloudParser('', undefined),
+      indexes: stack.indexes,
+      indexBuilder: stack.indexBuilder,
+      runs: stack.runs,
+      evaluationRunner: stack.evaluationRunner,
+    });
+
+    const finished = stack.runs.getRun(created.run.id);
+    expect(finished.pipelines[0]?.state).toBe('failed');
+    expect(finished.failedUnits).toBe(finished.totalUnits);
+    expect(finished.completedUnits).toBe(0);
+    expect(finished.state).toBe('failed');
+    expect(stack.jobs.get(created.job.id).state).toBe('failed');
+
+    // Retry endpoint MUST accept the failed job!
+    const retryRes = await send(
+      stack.app,
+      'POST',
+      `/api/v1/jobs/${created.job.id}/retry`,
+      {},
+    );
+    expect(retryRes.status).toBe(202);
+    expect(c.job.parse(retryRes.body).parentId).toBe(created.job.id);
+  });
+
+  it('persists unique physical provider-call attempts before dispatch, requires explicit retry after interruption, and preserves both billing records', async () => {
+    let chatCallCount = 0;
+    const fakeOpenAI = vi.fn<typeof fetch>(async (_url, init) => {
+      chatCallCount += 1;
+      const body = JSON.parse(String(init?.body ?? '{}')) as { model: string };
+      return openaiChatResponse(
+        JSON.stringify({
+          answer: `Paid answer attempt ${chatCallCount}.`,
+          citations: [],
+          abstained: false,
+        }),
+        body.model,
+        { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 },
+      );
+    });
+
+    const pricingJson = JSON.stringify({
+      version: 'attempt-price-v1',
+      currency: 'USD',
+      entries: [
+        {
+          model: 'priced-chat',
+          provider: 'openai',
+          unit: 'per_request',
+          requestUsd: 0.25,
+        },
+      ],
+    });
+    const stack = setupStack(
+      {
+        OPENAI_API_KEY: 'fixture-key',
+        OPENAI_CHAT_MODEL: 'priced-chat',
+        PRICE_SCHEDULE_JSON: pricingJson,
+      },
+      { openai: fakeOpenAI },
+    );
+
+    const sample = stack.datasets.sample().value;
+    let rev = sample.revision;
+    for (const extra of sample.tasks.slice(1)) {
+      rev = stack.datasets.editTask(
+        sample.id,
+        rev,
+        extra.id,
+        undefined,
+      ).revision;
+    }
+    const p1 = stack.pipelines.create({
+      name: 'Priced Chat',
+      config: {
+        retriever: { mode: 'keyword', topK: 3, deduplicate: false },
+        llm: { model: 'priced-chat', temperature: 0.2, maxTokens: 200 },
+      },
+    });
+    const exp = stack.runs.createExperiment({
+      name: 'Attempt Durability',
+      datasetId: sample.id,
+      baselinePipelineId: p1.id,
+      pipelineIds: [p1.id],
+      mode: 'full_rag',
+    });
+    const created = stack.runs.createRun(
+      exp.id,
+      { datasetRevision: rev, mode: 'full_rag', judgeEnabled: false },
+      {
+        capabilities: stack.config.capabilities,
+        pricing: stack.config.pricing,
+        budgets: stack.config.budgets,
+      },
+    );
+
+    // Worker 1 dies right AFTER the paid chat provider call completes and is recorded,
+    // BEFORE saveTaskAnswer commits!
+    const worker1Crash = new AbortController();
+    const origSaveAnswer = stack.runs.saveTaskAnswer.bind(stack.runs);
+    const saveAnswerSpy = vi
+      .spyOn(stack.runs, 'saveTaskAnswer')
+      .mockImplementationOnce(() => {
+        worker1Crash.abort();
+        throw new Error('Simulated worker crash before saving answer.');
+      })
+      .mockImplementation((input, guard) => origSaveAnswer(input, guard));
+
+    const workerOpts = {
+      directory: join(dir, 'blobs'),
+      cloud: new CloudParser('', undefined),
+      indexes: stack.indexes,
+      indexBuilder: stack.indexBuilder,
+      runs: stack.runs,
+      evaluationRunner: stack.evaluationRunner,
+    };
+
+    await runOne(stack.jobs, { ...workerOpts, signal: worker1Crash.signal });
+    expect(chatCallCount).toBe(1);
+    expect(saveAnswerSpy).toHaveBeenCalledTimes(1);
+
+    // Worker 2 reclaims the expired lease on the SAME job (automatic recovery, NOT explicit retry).
+    // It MUST NOT silently call the paid provider again; it must preserve the prior call and fail requiring explicit retry.
+    clock += 10_000;
+    await runOne(stack.jobs, workerOpts);
+    expect(chatCallCount).toBe(1);
+
+    const afterRecovery = stack.runs.getRun(created.run.id);
+    expect(afterRecovery.state).toBe('failed');
+    expect(stack.jobs.get(created.job.id).state).toBe('failed');
+
+    // Now operator explicitly retries the failed job -> linked retry job IS allowed to issue a 2nd paid call.
+    const retryRes = await send(
+      stack.app,
+      'POST',
+      `/api/v1/jobs/${created.job.id}/retry`,
+      {},
+    );
+    expect(retryRes.status).toBe(202);
+    await runOne(stack.jobs, workerOpts);
+
+    expect(chatCallCount).toBe(2);
+    const finished = stack.runs.getRun(created.run.id);
+    expect(finished.state).toBe('succeeded');
+
+    // BOTH physical billing records MUST be preserved in provider_calls (never dropped by INSERT OR IGNORE)!
+    const taskDetail = stack.runs.listRunTasks(finished.id, 10, 0, p1.id)
+      .items[0];
+    const generateCalls = taskDetail?.providerCalls.filter(
+      (call) => call.operation === 'generate',
+    );
+    expect(generateCalls).toHaveLength(2);
+    expect(generateCalls?.[0]?.isRetry).toBe(false);
+    expect(generateCalls?.[1]?.isRetry).toBe(true);
+    expect(finished.cost.total.totalCalls).toBe(2);
+    expect(finished.cost.total.knownUsd).toBeCloseTo(0.5, 6);
+  });
+
+  it('audits and prices each corpus embedding HTTP batch, preserves partial-failure usage and unknown usage, and enforces run budgets between batches', async () => {
+    const createBatchStack = (
+      env: NodeJS.ProcessEnv,
+      embedFetch: typeof fetch,
+    ) => {
+      const config = readConfig({
+        BLOB_DIRECTORY: join(dir, 'blobs'),
+        QDRANT_URL: 'http://qdrant.invalid',
+        LOCAL_EMBED_BASE_URL: 'http://local-embed.invalid/v1',
+        LOCAL_EMBED_MODEL: 'batched-embed',
+        EMBED_BATCH_SIZE: '2',
+        ...env,
+      });
+      const jobs = new Jobs(db, () => clock, 5000);
+      const datasets = new Datasets(db, jobs);
+      const pipelines = new Pipelines(db);
+      const indexes = new Indexes(db, jobs, () => clock);
+      const runs = new Runs(
+        db,
+        datasets,
+        pipelines,
+        indexes,
+        jobs,
+        () => clock,
+      );
+      const providers = new ProviderRegistry(config, {
+        openaiCompatible: embedFetch,
+      });
+      const points = new Map<
+        string,
+        { vector: number[]; payload: Record<string, unknown> }
+      >();
+      const fakeQdrant: QdrantClientLike = {
+        collectionExists: async () => ({ exists: true }),
+        getCollection: async () => ({
+          config: { params: { vectors: { size: 3 } } },
+        }),
+        createCollection: async () => ({}),
+        createPayloadIndex: async () => ({}),
+        upsert: async (_col, args) => {
+          for (const p of args.points) {
+            points.set(p.id, { vector: p.vector, payload: p.payload });
+          }
+        },
+        query: async (_col, args) => {
+          const genFilter = args.filter.must.find(
+            (m) => m.key === 'generationId',
+          );
+          const targetGen =
+            genFilter && 'match' in genFilter && 'value' in genFilter.match
+              ? genFilter.match.value
+              : undefined;
+          return {
+            points: Array.from(points.entries())
+              .filter(([, p]) => p.payload.generationId === targetGen)
+              .slice(0, args.limit)
+              .map(([id, p]) => ({ id, score: 0.9, payload: p.payload })),
+          };
+        },
+        count: async (_col, args) => {
+          const genFilter = args.filter.must.find(
+            (m) => m.key === 'generationId',
+          );
+          const targetGen =
+            genFilter && 'match' in genFilter && 'value' in genFilter.match
+              ? genFilter.match.value
+              : undefined;
+          let count = 0;
+          for (const p of points.values()) {
+            if (p.payload.generationId === targetGen) count += 1;
+          }
+          return { count };
+        },
+        delete: async () => ({}),
+        deleteCollection: async () => ({}),
+      };
+      const qdrant = new QdrantStore({
+        url: 'http://qdrant.invalid',
+        client: fakeQdrant,
+      });
+      const indexBuilder = new IndexBuilder({
+        indexes,
+        providers,
+        qdrant,
+        embedBatchSize: 2,
+        now: () => clock,
+      });
+      const retrieval = new RetrievalService({
+        indexes,
+        providers,
+        qdrant,
+        now: () => clock,
+      });
+      const evaluationRunner = new EvaluationRunner({
+        runs,
+        indexes,
+        indexBuilder,
+        retrieval,
+        providers,
+        now: () => clock,
+        maxTransientRetries: 0,
+        retryDelayMs: 1,
+      });
+      return {
+        config,
+        jobs,
+        datasets,
+        pipelines,
+        indexes,
+        runs,
+        indexBuilder,
+        evaluationRunner,
+      };
+    };
+
+    const perRequestPrice = JSON.stringify({
+      version: 'batch-price-v1',
+      currency: 'USD',
+      entries: [
+        {
+          model: 'batched-embed',
+          provider: 'openai-compatible',
+          unit: 'per_request',
+          requestUsd: 0.1,
+        },
+      ],
+    });
+
+    // Build a dataset with 5 distinct 1-chunk documents -> 3 HTTP embedding batches (2 + 2 + 1).
+    let batchCalls = 0;
+    const threeBatchFetch = vi.fn<typeof fetch>(async (_url, init) => {
+      batchCalls += 1;
+      const body = JSON.parse(String(init?.body ?? '{}')) as {
+        input: string[];
+      };
+      // Omit usage on batch 2 to prove missing usage is preserved as missing/unknown.
+      return Response.json({
+        object: 'list',
+        model: 'batched-embed',
+        data: body.input.map((_t, idx) => ({
+          object: 'embedding',
+          index: idx,
+          embedding: [0.5, 0.5, 0.5],
+        })),
+        ...(batchCalls === 2
+          ? {}
+          : {
+              usage: {
+                prompt_tokens: body.input.length * 5,
+                total_tokens: body.input.length * 5,
+              },
+            }),
+      });
+    });
+
+    const s1 = createBatchStack(
+      { PRICE_SCHEDULE_JSON: perRequestPrice },
+      threeBatchFetch,
+    );
+    const ds = s1.datasets.create('Five Doc Corpus');
+    const app1 = createApp({
+      config: s1.config,
+      datasets: s1.datasets,
+      pipelines: s1.pipelines,
+      indexes: s1.indexes,
+      runs: s1.runs,
+      logger: createLogger({ write: () => {} }),
+      ready: () => true,
+    });
+    let rev = ds.revision;
+    let firstDocId = '';
+    for (let i = 0; i < 5; i++) {
+      const res = c.uploadResult.parse(
+        (
+          await send(
+            app1,
+            'POST',
+            `/api/v1/datasets/${ds.id}/documents?name=d${i}.txt`,
+            undefined,
+            { 'if-match': `"${rev}"`, 'content-type': 'text/plain' },
+            `Unique corpus document number ${i} about embedding batches.`,
+          )
+        ).body,
+      );
+      if (!firstDocId) firstDocId = res.documentId;
+      rev = res.dataset.revision;
+      expect(
+        await runOne(s1.jobs, {
+          directory: join(dir, 'blobs'),
+          cloud: new CloudParser('', undefined),
+        }),
+      ).toBe(true);
+    }
+    rev = s1.datasets.addTask(
+      ds.id,
+      rev,
+      c.taskInput.parse({
+        question: 'embedding batches',
+        answerable: true,
+        qrels: [{ documentId: firstDocId, grade: 3 }],
+      }),
+    ).revision;
+
+    const pDense = s1.pipelines.create({
+      name: 'Batched Dense',
+      config: {
+        embedding: { model: 'batched-embed' },
+        retriever: { mode: 'dense', topK: 3, deduplicate: false },
+      },
+    });
+    const exp1 = s1.runs.createExperiment({
+      name: 'Per-Batch Audit',
+      datasetId: ds.id,
+      baselinePipelineId: pDense.id,
+      pipelineIds: [pDense.id],
+      mode: 'retrieval_only',
+    });
+    const r1 = s1.runs.createRun(
+      exp1.id,
+      { datasetRevision: rev },
+      {
+        capabilities: s1.config.capabilities,
+        pricing: s1.config.pricing,
+        budgets: s1.config.budgets,
+      },
+    );
+    await s1.evaluationRunner.execute(r1.run.id);
+
+    const detail1 = s1.runs.getRun(r1.run.id);
+    expect(detail1.state).toBe('succeeded');
+    // 3 HTTP corpus_embed batches -> 3 separate charges ($0.30, NOT $0.10)!
+    expect(detail1.cost.indexing.totalCalls).toBe(3);
+    expect(detail1.cost.indexing.knownUsd).toBeCloseTo(0.3, 6);
+    // Batch 2 omitted usage -> 2 of 3 corpus batches + 1 query embed had known usage (not all 4).
+    const corpusRows1 = db
+      .prepare(
+        "SELECT usage_status AS usageStatus FROM provider_calls WHERE run_id = ? AND operation = 'corpus_embed' ORDER BY rowid ASC",
+      )
+      .all(r1.run.id);
+    expect(corpusRows1.map((row) => row.usageStatus)).toEqual([
+      'known',
+      'missing',
+      'known',
+    ]);
+
+    // Sub-case B: Batch 2 fails -> Batch 1's usage & cost MUST still be preserved in SQLite!
+    let failCall = 0;
+    const failOnSecondBatch = vi.fn<typeof fetch>(async (_url, init) => {
+      failCall += 1;
+      if (failCall === 2) {
+        return new Response('Hard failure', { status: 400 });
+      }
+      const body = JSON.parse(String(init?.body ?? '{}')) as {
+        input: string[];
+      };
+      return Response.json({
+        object: 'list',
+        model: 'batched-embed',
+        data: body.input.map((_t, idx) => ({
+          object: 'embedding',
+          index: idx,
+          embedding: [0.5, 0.5, 0.5],
+        })),
+        usage: { prompt_tokens: 10, total_tokens: 10 },
+      });
+    });
+    const s2 = createBatchStack(
+      { PRICE_SCHEDULE_JSON: perRequestPrice },
+      failOnSecondBatch,
+    );
+    // Distinct chunking config forces a brand new index generation (no reuse of r1's generation).
+    const pDense2 = s2.pipelines.create({
+      name: 'Batched Dense Fail',
+      config: {
+        chunking: { strategy: 'character-window', chunkSize: 250, overlap: 10 },
+        embedding: { model: 'batched-embed' },
+        retriever: { mode: 'dense', topK: 3, deduplicate: false },
+      },
+    });
+    const exp2 = s2.runs.createExperiment({
+      name: 'Mid-Batch Failure',
+      datasetId: ds.id,
+      baselinePipelineId: pDense2.id,
+      pipelineIds: [pDense2.id],
+      mode: 'retrieval_only',
+    });
+    const r2 = s2.runs.createRun(
+      exp2.id,
+      { datasetRevision: rev },
+      {
+        capabilities: s2.config.capabilities,
+        pricing: s2.config.pricing,
+        budgets: s2.config.budgets,
+      },
+    );
+    await s2.evaluationRunner.execute(r2.run.id);
+    const detail2 = s2.runs.getRun(r2.run.id);
+    expect(detail2.state).toBe('failed');
+    expect(detail2.tokens.totalTokens).toBe(10);
+    expect(detail2.cost.indexing.totalCalls).toBe(2);
+
+    // Sub-case C: Run budget checked between batches -> stops before dispatching batch 2!
+    let budgetCalls = 0;
+    const budgetFetch = vi.fn<typeof fetch>(async (_url, init) => {
+      budgetCalls += 1;
+      const body = JSON.parse(String(init?.body ?? '{}')) as {
+        input: string[];
+      };
+      return Response.json({
+        object: 'list',
+        model: 'batched-embed',
+        data: body.input.map((_t, idx) => ({
+          object: 'embedding',
+          index: idx,
+          embedding: [0.5, 0.5, 0.5],
+        })),
+        usage: { prompt_tokens: 12, total_tokens: 12 },
+      });
+    });
+    const s3 = createBatchStack(
+      {
+        PRICE_SCHEDULE_JSON: perRequestPrice,
+        RUN_MAX_COST_USD: '0.1',
+      },
+      budgetFetch,
+    );
+    const pDense3 = s3.pipelines.create({
+      name: 'Batched Dense Budget',
+      config: {
+        chunking: { strategy: 'character-window', chunkSize: 220, overlap: 10 },
+        embedding: { model: 'batched-embed' },
+        retriever: { mode: 'dense', topK: 3, deduplicate: false },
+      },
+    });
+    const exp3 = s3.runs.createExperiment({
+      name: 'Budget Between Batches',
+      datasetId: ds.id,
+      baselinePipelineId: pDense3.id,
+      pipelineIds: [pDense3.id],
+      mode: 'retrieval_only',
+    });
+    const r3 = s3.runs.createRun(
+      exp3.id,
+      { datasetRevision: rev },
+      {
+        capabilities: s3.config.capabilities,
+        pricing: s3.config.pricing,
+        budgets: s3.config.budgets,
+      },
+    );
+    await s3.evaluationRunner.execute(r3.run.id);
+    // Batch 1 hit $0.10 budget -> batch 2 and batch 3 MUST NOT be dispatched!
+    expect(budgetCalls).toBe(1);
+    const detail3 = s3.runs.getRun(r3.run.id);
+    expect(detail3.state).toBe('failed');
+    expect(detail3.pipelines[0]?.errorMessage).toMatch(/budget/i);
+  });
+
+  it('records failed generation and null abstention score when structured answer output is malformed on empty retrieval', async () => {
+    const fakeOpenAI = vi.fn<typeof fetch>(async (_url, init) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as { model: string };
+      // Returns raw non-JSON "Mars." despite structured output schema!
+      return openaiChatResponse('Mars.', body.model, {
+        prompt_tokens: 50,
+        completion_tokens: 2,
+        total_tokens: 52,
+      });
+    });
+
+    const stack = setupStack(
+      {
+        OPENAI_API_KEY: 'fixture-key',
+        OPENAI_CHAT_MODEL: 'strict-chat',
+      },
+      { openai: fakeOpenAI },
+    );
+    const ds = stack.datasets.create('Empty Retrieval Abstention');
+    const up = c.uploadResult.parse(
+      (
+        await send(
+          stack.app,
+          'POST',
+          `/api/v1/datasets/${ds.id}/documents?name=notes.txt`,
+          undefined,
+          { 'if-match': '"1"', 'content-type': 'text/plain' },
+          'Database indexing and query optimization notes.',
+        )
+      ).body,
+    );
+    expect(
+      await runOne(stack.jobs, {
+        directory: join(dir, 'blobs'),
+        cloud: new CloudParser('', undefined),
+      }),
+    ).toBe(true);
+    const dsWithTask = stack.datasets.addTask(
+      ds.id,
+      up.dataset.revision,
+      c.taskInput.parse({
+        question: 'Which celestial planet orbits fourth from Sol?',
+        answerable: false,
+        qrels: [{ documentId: up.documentId, grade: 0 }],
+      }),
+    );
+
+    const p1 = stack.pipelines.create({
+      name: 'Strict Chat',
+      config: {
+        retriever: { mode: 'keyword', topK: 3, deduplicate: false },
+        llm: { model: 'strict-chat', temperature: 0.2, maxTokens: 100 },
+      },
+    });
+    const exp = stack.runs.createExperiment({
+      name: 'Malformed Structured Answer',
+      datasetId: ds.id,
+      baselinePipelineId: p1.id,
+      pipelineIds: [p1.id],
+      mode: 'full_rag',
+    });
+    const created = stack.runs.createRun(
+      exp.id,
+      {
+        datasetRevision: dsWithTask.revision,
+        mode: 'full_rag',
+        judgeEnabled: false,
+      },
+      {
+        capabilities: stack.config.capabilities,
+        pricing: stack.config.pricing,
+        budgets: stack.config.budgets,
+      },
+    );
+    await stack.evaluationRunner.execute(created.run.id);
+
+    const taskDetail = stack.runs.listRunTasks(created.run.id, 10, 0, p1.id)
+      .items[0];
+    expect(taskDetail?.retrievedItems).toHaveLength(0);
+    expect(taskDetail?.answerState).toBe('failed');
+    expect(taskDetail?.answer).toBeNull();
+    const absObs = taskDetail?.observations.find(
+      (o) => o.metricId === 'abstention_unanswerable',
+    );
+    expect(absObs).toMatchObject({
+      status: 'generation_failed',
+      value: null,
+    });
+    // Provider usage from the malformed response is still billed/recorded!
+    expect(taskDetail?.providerCalls[0]?.totalTokens).toBe(52);
   });
 });

@@ -1,3 +1,4 @@
+import type { ProviderKind, ProviderUsage } from '@rag-eval/contracts';
 import { ApiError } from '../errors.js';
 
 export type ProviderErrorCode =
@@ -9,17 +10,27 @@ export type ProviderErrorCode =
   | 'malformed_response'
   | 'partial_batch';
 
+export interface ProviderCallMeta {
+  provider: ProviderKind;
+  model: string;
+  requestId: string | null;
+  usage?: ProviderUsage;
+  latencyMs?: number;
+}
+
 export interface ProviderErrorOptions {
   status?: number;
   retryable?: boolean;
   retryAfterMs?: number;
   cause?: unknown;
+  callMeta?: ProviderCallMeta;
 }
 
 export class ProviderError extends Error {
   readonly status?: number;
   readonly retryable: boolean;
   readonly retryAfterMs?: number;
+  readonly callMeta?: ProviderCallMeta;
 
   constructor(
     readonly code: ProviderErrorCode,
@@ -31,6 +42,7 @@ export class ProviderError extends Error {
     this.status = options.status;
     this.retryable = options.retryable ?? false;
     this.retryAfterMs = options.retryAfterMs;
+    this.callMeta = options.callMeta;
   }
 
   toApiError(): ApiError {

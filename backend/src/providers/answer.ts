@@ -5,6 +5,7 @@ import {
   type RecordedContextItem,
   type RetrievedTraceItem,
 } from '@rag-eval/contracts';
+import { ProviderError, type ProviderCallMeta } from './errors.js';
 import type { ChatProvider } from './types.js';
 
 const structuredAnswerSchema = z.strictObject({
@@ -141,12 +142,28 @@ function parseAnswerPayload(
   rawContent: string,
   structuredOutput: boolean,
   context: RecordedContextItem[],
+  callMeta?: ProviderCallMeta,
 ) {
   const trimmed = rawContent.trim();
   const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
   const candidate = fenced ? fenced[1] : trimmed;
+
+  let parsedJson: unknown;
+  let jsonParsed = false;
   try {
-    const parsedJson: unknown = JSON.parse(candidate);
+    parsedJson = JSON.parse(candidate);
+    jsonParsed = true;
+  } catch {
+    if (structuredOutput) {
+      throw new ProviderError(
+        'malformed_response',
+        'Answer provider returned malformed structured output (invalid JSON).',
+        { retryable: false, callMeta },
+      );
+    }
+  }
+
+  if (jsonParsed) {
     const validated = structuredAnswerSchema.safeParse(parsedJson);
     if (validated.success) {
       const { valid, invalid } = validateCitations(
@@ -162,15 +179,21 @@ function parseAnswerPayload(
           : invalid,
       };
     }
-  } catch {
-    if (structuredOutput) {
-      // Structured output was explicitly enforced; fall through only with safe validation.
+    if (
+      structuredOutput ||
+      (typeof parsedJson === 'object' && parsedJson !== null)
+    ) {
+      throw new ProviderError(
+        'malformed_response',
+        `Answer provider returned malformed structured output: ${validated.error.issues[0]?.message ?? 'invalid schema'}`,
+        { retryable: false, callMeta },
+      );
     }
   }
+
   const inline = extractInlineCitations(trimmed);
   const { valid, invalid } = validateCitations(inline, context);
   const abstained =
-    context.length === 0 ||
     /\b(cannot answer|does not (contain|specify|provide|mention)|not enough information|insufficient context|no relevant context)\b/i.test(
       trimmed,
     );
@@ -274,10 +297,18 @@ export async function generateGroundedAnswer(
     signal: input.signal,
   });
 
+  const latencyMs = Math.max(0, now() - startedAt);
   const parsed = parseAnswerPayload(
     completion.content,
     completion.effectiveParams.structuredOutput,
     context,
+    {
+      provider: completion.provider,
+      model: completion.model,
+      requestId: completion.requestId,
+      usage: completion.usage,
+      latencyMs,
+    },
   );
 
   return {
@@ -291,6 +322,6 @@ export async function generateGroundedAnswer(
     requestId: completion.requestId,
     usage: completion.usage,
     effectiveParams: completion.effectiveParams,
-    latencyMs: Math.max(0, now() - startedAt),
+    latencyMs,
   };
 }

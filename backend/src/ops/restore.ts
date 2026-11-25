@@ -1,8 +1,18 @@
-import { loadEnvironment, readConfig } from '../config/env.js';
+import { realpathSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { loadEnvironment, readConfig, type Config } from '../config/env.js';
 import { restoreWorkspace } from '../db/backup.js';
 import { blobDirectory } from '../ingestion/blobs.js';
 
-function parseArgs(argv: string[]) {
+export interface RestoreCliArgs {
+  backupDir: string;
+  force: boolean;
+  databasePath?: string;
+  blobDir?: string;
+}
+
+export function parseRestoreArgs(argv: string[]): RestoreCliArgs {
   let backupDir = '';
   let force = false;
   let databasePath: string | undefined;
@@ -42,25 +52,56 @@ function parseArgs(argv: string[]) {
   return { backupDir, force, databasePath, blobDir };
 }
 
-if (process.env.NODE_ENV !== 'test') loadEnvironment();
-const args = parseArgs(process.argv.slice(2));
-const config = readConfig();
-const result = await restoreWorkspace({
-  backupDir: args.backupDir,
-  databasePath: args.databasePath ?? config.env.DATABASE_PATH,
-  blobDirectory: args.blobDir ?? blobDirectory(config),
-  force: args.force,
-});
-console.log(
-  JSON.stringify(
-    {
-      status: 'ok',
-      databasePath: result.databasePath,
-      blobDirectory: result.blobDirectory,
-      schemaVersion: result.manifest.schemaVersion,
-      restoredBlobs: result.restoredBlobs,
-    },
-    null,
-    2,
-  ),
-);
+export function resolveRestoreTargets(
+  args: RestoreCliArgs,
+  config: Config,
+): { databasePath: string; blobDirectory: string } {
+  if (args.databasePath) {
+    return {
+      databasePath: args.databasePath,
+      blobDirectory: args.blobDir ?? join(dirname(args.databasePath), 'blobs'),
+    };
+  }
+  return {
+    databasePath: config.env.DATABASE_PATH,
+    blobDirectory: args.blobDir ?? blobDirectory(config),
+  };
+}
+
+function isMainModule(): boolean {
+  if (!process.argv[1]) return false;
+  try {
+    return (
+      realpathSync(resolve(process.argv[1])) ===
+      realpathSync(fileURLToPath(import.meta.url))
+    );
+  } catch {
+    return resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url));
+  }
+}
+
+if (isMainModule()) {
+  if (process.env.NODE_ENV !== 'test') loadEnvironment();
+  const args = parseRestoreArgs(process.argv.slice(2));
+  const config = readConfig();
+  const targets = resolveRestoreTargets(args, config);
+  const result = await restoreWorkspace({
+    backupDir: args.backupDir,
+    databasePath: targets.databasePath,
+    blobDirectory: targets.blobDirectory,
+    force: args.force,
+  });
+  console.log(
+    JSON.stringify(
+      {
+        status: 'ok',
+        databasePath: result.databasePath,
+        blobDirectory: result.blobDirectory,
+        schemaVersion: result.manifest.schemaVersion,
+        restoredBlobs: result.restoredBlobs,
+      },
+      null,
+      2,
+    ),
+  );
+}
