@@ -20,7 +20,12 @@ function parseArgs(argv: string[]) {
       overwrite = true;
     } else if (arg === '--help' || arg === '-h') {
       console.log(
-        'Usage: npm run backup -- [--out <backup-dir>] [--overwrite]',
+        [
+          'Usage: npm run backup -- [--out <backup-dir>] [--overwrite]',
+          '',
+          'Creates a SQLite + blobs workspace backup with a SHA-256 manifest.',
+          'Backing up to an existing destination (--overwrite) is an offline operation: stop app and worker first.',
+        ].join('\n'),
       );
       process.exit(0);
     } else if (!arg.startsWith('-') && !outputDir) {

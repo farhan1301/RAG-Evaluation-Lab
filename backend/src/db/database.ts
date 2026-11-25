@@ -1,7 +1,6 @@
-import { mkdirSync, readFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { lstatSync, mkdirSync, readFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { recoverInterruptedRestoreSync } from './restoreJournal.js';
 
 const migrations = [
   '001-definitions.sql',
@@ -13,6 +12,65 @@ const migrations = [
 ];
 
 export const SCHEMA_VERSION = migrations.length;
+
+export interface OpenDatabaseOptions {
+  blobDirectory?: string;
+}
+
+function pathExistsSync(targetPath: string): boolean {
+  try {
+    lstatSync(targetPath);
+    return true;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return false;
+    throw err;
+  }
+}
+
+export function restorePrevPaths(
+  databasePath: string,
+  blobDirectory?: string,
+): {
+  dbPrev: string;
+  walPrev: string;
+  shmPrev: string;
+  blobsPrev: string;
+} {
+  const dbPath = resolve(databasePath);
+  const blobsPath = blobDirectory
+    ? resolve(blobDirectory)
+    : join(dirname(dbPath), 'blobs');
+  return {
+    dbPrev: `${dbPath}.prev`,
+    walPrev: `${dbPath}-wal.prev`,
+    shmPrev: `${dbPath}-shm.prev`,
+    blobsPrev: `${blobsPath}.prev`,
+  };
+}
+
+export function findInterruptedRestoreArtifacts(
+  databasePath: string,
+  blobDirectory?: string,
+): string[] {
+  if (databasePath === ':memory:') return [];
+  const prev = restorePrevPaths(databasePath, blobDirectory);
+  return [prev.dbPrev, prev.walPrev, prev.shmPrev, prev.blobsPrev].filter((p) =>
+    pathExistsSync(p),
+  );
+}
+
+export function assertNoInterruptedRestoreSync(
+  databasePath: string,
+  blobDirectory?: string,
+): void {
+  const found = findInterruptedRestoreArtifacts(databasePath, blobDirectory);
+  if (found.length === 0) return;
+  throw new Error(
+    `Refusing to open workspace because interrupted restore backup files exist: ${found.join(', ')}. ` +
+      'Manual recovery required: if the new database or blobs directory is missing or incomplete, move the .prev files back into place; otherwise verify the restored workspace and delete the .prev files before restarting.',
+  );
+}
 
 export function transaction<T>(db: DatabaseSync, work: () => T): T {
   db.exec('BEGIN IMMEDIATE');
@@ -60,7 +118,7 @@ export function checkWorkerHealth(
 export function openDatabase(
   path: string,
   targetVersion = migrations.length,
-  options: { skipRestoreRecovery?: boolean } = {},
+  options: OpenDatabaseOptions = {},
 ) {
   if (
     !Number.isInteger(targetVersion) ||
@@ -69,9 +127,7 @@ export function openDatabase(
   )
     throw new RangeError('Invalid migration target.');
   if (path !== ':memory:') {
-    if (!options.skipRestoreRecovery) {
-      recoverInterruptedRestoreSync(path);
-    }
+    assertNoInterruptedRestoreSync(path, options.blobDirectory);
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   }
   const db = new DatabaseSync(path);

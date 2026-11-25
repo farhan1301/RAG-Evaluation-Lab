@@ -35,7 +35,12 @@ export function parseRestoreArgs(argv: string[]): RestoreCliArgs {
       blobDir = next;
     } else if (arg === '--help' || arg === '-h') {
       console.log(
-        'Usage: npm run restore -- --from <backup-dir> [--force] [--database <path>] [--blobs <dir>]',
+        [
+          'Usage: npm run restore -- --from <backup-dir> [--force] [--database <path>] [--blobs <dir>]',
+          '',
+          'Restores a verified SQLite + blobs workspace backup.',
+          'Restoring over an existing workspace (--force) is an offline operation: stop app and worker first.',
+        ].join('\n'),
       );
       process.exit(0);
     } else if (!arg.startsWith('-') && !backupDir) {

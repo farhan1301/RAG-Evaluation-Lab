@@ -8,6 +8,7 @@ import { Indexes } from './db/indexes.js';
 import { Jobs } from './db/jobs.js';
 import { Pipelines } from './db/pipelines.js';
 import { createApp } from './http/app.js';
+import { blobDirectory } from './ingestion/blobs.js';
 import { createLogger } from './lib/logger.js';
 
 if (process.env.NODE_ENV !== 'test') loadEnvironment();
@@ -21,7 +22,9 @@ const staticDir =
   existsSync(join(defaultStaticDir, 'index.html'))
     ? defaultStaticDir
     : undefined);
-const db = openDatabase(config.env.DATABASE_PATH);
+const db = openDatabase(config.env.DATABASE_PATH, undefined, {
+  blobDirectory: blobDirectory(config),
+});
 const jobs = new Jobs(db, Date.now, config.env.WORKER_LEASE_MS);
 const logger = createLogger();
 let stopping = false;

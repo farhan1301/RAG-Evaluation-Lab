@@ -2,6 +2,7 @@ import { loadEnvironment, readConfig } from '../config/env.js';
 import { openDatabase } from '../db/database.js';
 import { Indexes } from '../db/indexes.js';
 import { Jobs } from '../db/jobs.js';
+import { blobDirectory } from '../ingestion/blobs.js';
 import { ProviderRegistry } from '../providers/registry.js';
 import { QdrantStore } from '../retrieval/qdrant.js';
 import { rebuildQdrantFromSqlite } from '../retrieval/rebuild.js';
@@ -35,7 +36,9 @@ if (!config.qdrant) {
     'QDRANT_URL must be configured before rebuilding Qdrant vectors from SQLite.',
   );
 }
-const db = openDatabase(config.env.DATABASE_PATH);
+const db = openDatabase(config.env.DATABASE_PATH, undefined, {
+  blobDirectory: blobDirectory(config),
+});
 try {
   const jobs = new Jobs(db, Date.now, config.env.WORKER_LEASE_MS);
   const indexes = new Indexes(db, jobs);

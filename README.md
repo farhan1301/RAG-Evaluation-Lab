@@ -208,15 +208,21 @@ With a chat profile configured, operators can launch a cancellable synthetic gen
 
 SQLite (`workspace.sqlite`) and the private blob directory (`blobs/`) are authoritative for all workspace facts, documents, and reports. Qdrant vectors are derived and rebuildable from SQLite.
 
-Backup and restore serialize concurrent operations per destination with an exclusive lock file (`.rag-eval-backup.lock` / `.rag-eval-restore.lock`), recheck overwrite permission (`--overwrite` / `--force`) under the lock right before swapping, and persist a swap journal (`<database>.restore-journal.json`) during restore so any interrupted swap is automatically rolled back or finished on the next restore or workspace startup (`openDatabase()`).
+**Offline contract & locking:**
+
+- Backing up to a **fresh** directory uses `node:sqlite`'s online backup API.
+- Backing up to an **existing** destination (`--overwrite`) and restoring over an **existing** workspace (`--force`) are **offline operations**: **stop `app` and `worker` first**.
+- Backup and restore guard each destination (`<backup-dir>.rag-eval.lock` for backups; both `<database>.rag-eval.lock` and `<blobs>.rag-eval.lock` for restores) with an exclusive fail-fast lock file (`O_CREAT | O_EXCL`) containing a random owner token and PID. There is no automatic stale-lock takeover: if a lock file already exists, the command fails fast and tells you which lock file to delete if no backup/restore is running.
+- Before swapping over an existing database, `restore` rechecks overwrite permission under the lock, checkpoints the existing database with `PRAGMA wal_checkpoint(TRUNCATE)` (aborting if busy—for example, if `app` or `worker` is still running), renames the existing DB, sidecars, and blobs directory to `.prev` names, installs and verifies the staged replacement, and deletes the `.prev` backups only after the swap succeeds.
+- **Limitation:** Restores are not crash-atomic under power loss or hard process termination during the swap window.
 
 ### Native Commands
 
 ```bash
-# 1. Consistent online backup (uses node:sqlite backup API + copies blobs + writes SHA-256 manifest)
+# 1. Consistent online backup into a fresh directory (stop app and worker first if using --overwrite on an existing destination)
 npm run backup -- --out ./backups/snapshot-2026-11-25
 
-# 2. Restore into a fresh directory (stop app/worker first if restoring over an existing DB with --force)
+# 2. Restore into a fresh directory (stop app and worker first when restoring over an existing workspace with --force)
 npm run restore -- --from ./backups/snapshot-2026-11-25 --database /path/to/new/workspace.sqlite --blobs /path/to/new/blobs
 
 # 3. Rebuild all ready dense/hybrid index generations into Qdrant directly from SQLite
@@ -228,13 +234,13 @@ npm run rebuild:qdrant -- --generation <generation-uuid>
 ### Docker Compose Commands
 
 ```bash
-# 1. Online backup into a host directory mounted temporarily or inside /data/backups
+# 1. Online backup into a fresh directory inside /data/backups (stop app and worker first if overwriting an existing destination)
 docker compose exec -T app node backend/dist/ops/backup.js --out /data/backups/snapshot-1
 
 # Copy the snapshot off the container volume to the host:
 docker compose cp app:/data/backups/snapshot-1 ./backups/snapshot-1
 
-# 2. Restore into a fresh or existing volume (stop app and worker first):
+# 2. Restore into a fresh or existing volume (offline operation — stop app and worker first):
 docker compose stop app worker
 docker compose run --rm --no-deps -v "$(pwd)/backups/snapshot-1:/backup:ro" app \
   node backend/dist/ops/restore.js --from /backup --force
@@ -244,6 +250,16 @@ docker compose up -d
 docker compose --profile dense up -d qdrant
 docker compose exec -T app node backend/dist/ops/rebuild-qdrant.js
 ```
+
+### Interrupted Restore
+
+If a restore is interrupted by a crash or power loss during the swap, `.prev` backup artifacts (`<database>.prev`, `<database>-wal.prev`, `<database>-shm.prev`, and/or `<blobs>.prev`) remain on disk and `openDatabase()` refuses to start `app` or `worker` rather than silently opening an incomplete workspace. To recover manually:
+
+1. Confirm `app`, `worker`, and any `restore` process are stopped.
+2. Inspect the workspace directory:
+   - **If the new `<database>` or `<blobs>` directory is missing or incomplete:** remove any partial replacement files and move `<database>.prev` (plus any `-wal.prev` / `-shm.prev`) back to `<database>` and `<blobs>.prev` back to `<blobs>`.
+   - **If the new `<database>` and `<blobs>` directory are complete and verified:** delete the `.prev` files/directory.
+3. If any `.rag-eval.lock` file remains and no backup/restore is running, delete it, then start `app` and `worker`.
 
 You can also force a brand-new index generation through the HTTP API at any time via `POST /api/v1/indexes` with `"forceRebuild": true`.
 

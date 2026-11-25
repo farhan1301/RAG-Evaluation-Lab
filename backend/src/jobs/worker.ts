@@ -21,7 +21,9 @@ import { runOne } from './run.js';
 if (process.env.NODE_ENV !== 'test') loadEnvironment();
 const config = readConfig(),
   logger = createLogger();
-const db = openDatabase(config.env.DATABASE_PATH),
+const db = openDatabase(config.env.DATABASE_PATH, undefined, {
+    blobDirectory: blobDirectory(config),
+  }),
   jobs = new Jobs(db, Date.now, config.env.WORKER_LEASE_MS);
 const datasets = new Datasets(db, jobs);
 const pipelines = new Pipelines(db);

@@ -3,14 +3,17 @@ import { existsSync, realpathSync, type Stats } from 'node:fs';
 import {
   chmod,
   copyFile,
+  type FileHandle,
   lstat,
   mkdir,
+  open,
   readdir,
   readFile,
   realpath,
   rename,
   rm,
   stat,
+  unlink,
   writeFile,
 } from 'node:fs/promises';
 import {
@@ -26,21 +29,13 @@ import * as sqlite from 'node:sqlite';
 import { z } from '@rag-eval/contracts';
 import { isValidBlobKey } from '../ingestion/blobs.js';
 import {
+  assertNoInterruptedRestoreSync,
   integrityCheck,
   openDatabase,
   ready,
+  restorePrevPaths,
   SCHEMA_VERSION,
 } from './database.js';
-import {
-  backupLockPath,
-  recoverInterruptedRestoreSync,
-  removeRestoreJournal,
-  restoreLockPathForBlobs,
-  restoreLockPathForDb,
-  withExclusiveLocks,
-  writeRestoreJournal,
-  type RestoreSwapJournal,
-} from './restoreJournal.js';
 import { SOFTWARE_VERSION } from './runs.js';
 
 const backupBlobEntry = z.strictObject({
@@ -81,6 +76,172 @@ export interface RestoreResult {
   databasePath: string;
   blobDirectory: string;
   restoredBlobs: number;
+}
+
+export interface DestinationLock {
+  path: string;
+  token: string;
+  pid: number;
+}
+
+export interface RestoreSwapHooks {
+  afterPrevDbRename?: () => void | Promise<void>;
+  afterInstallBlobs?: () => void | Promise<void>;
+}
+
+export function destinationLockPath(targetPath: string): string {
+  return `${canonicalPath(targetPath)}.rag-eval.lock`;
+}
+
+/**
+ * Acquires an exclusive fail-fast lock file (`O_CREAT | O_EXCL`) containing a
+ * unique owner token and process PID, fsynced on the same file descriptor.
+ * Never performs automatic stale-lock takeover.
+ */
+export async function acquireDestinationLock(
+  lockPath: string,
+): Promise<DestinationLock> {
+  const resolvedLockPath = canonicalPath(lockPath);
+  await mkdir(dirname(resolvedLockPath), { recursive: true, mode: 0o700 });
+  const token = randomUUID();
+  const payload = `${JSON.stringify({
+    token,
+    pid: process.pid,
+    createdAt: new Date().toISOString(),
+  })}\n`;
+
+  let handle: FileHandle;
+  try {
+    handle = await open(resolvedLockPath, 'wx', 0o600);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+      throw new Error(
+        `Another backup/restore holds ${resolvedLockPath}. If none is running, delete ${resolvedLockPath} and retry.`,
+      );
+    }
+    throw err;
+  }
+
+  const createdStat = await handle.stat();
+  try {
+    await handle.writeFile(payload, 'utf8');
+    await handle.sync();
+  } catch (writeErr) {
+    await handle.close().catch(() => {});
+    const currentStat = await lstat(resolvedLockPath).catch(() => null);
+    if (
+      currentStat &&
+      currentStat.dev === createdStat.dev &&
+      currentStat.ino === createdStat.ino
+    ) {
+      await unlink(resolvedLockPath).catch(() => {});
+    }
+    throw writeErr;
+  }
+  await handle.close();
+
+  return { path: resolvedLockPath, token, pid: process.pid };
+}
+
+/**
+ * Releases a destination lock file only if it is still a regular file
+ * containing this lock's exact ownership token.
+ */
+export async function releaseDestinationLock(
+  lock: DestinationLock,
+): Promise<boolean> {
+  let raw: string;
+  try {
+    const info = await lstat(lock.path);
+    if (!info.isFile()) return false;
+    raw = await readFile(lock.path, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw err;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return false;
+  }
+  if (
+    typeof parsed !== 'object' ||
+    parsed === null ||
+    (parsed as { token?: unknown }).token !== lock.token
+  ) {
+    return false;
+  }
+
+  try {
+    await unlink(lock.path);
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw err;
+  }
+}
+
+/**
+ * Acquires exclusive fail-fast destination lock files in sorted canonical order
+ * (preventing deadlocks) and releases each only if it still holds our token.
+ */
+export async function withDestinationLocks<T>(
+  lockPaths: string[],
+  work: () => Promise<T>,
+): Promise<T> {
+  const uniqueSorted = Array.from(
+    new Set(lockPaths.map((p) => canonicalPath(p))),
+  ).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  const acquired: DestinationLock[] = [];
+
+  try {
+    for (const lockPath of uniqueSorted) {
+      acquired.push(await acquireDestinationLock(lockPath));
+    }
+    return await work();
+  } finally {
+    for (let i = acquired.length - 1; i >= 0; i--) {
+      await releaseDestinationLock(acquired[i]).catch(() => {});
+    }
+  }
+}
+
+function checkpointExistingDatabaseForRestore(databasePath: string): void {
+  let existingDb: sqlite.DatabaseSync | null = null;
+  try {
+    existingDb = new sqlite.DatabaseSync(databasePath);
+    existingDb.exec('PRAGMA busy_timeout=0');
+    const row = existingDb.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get() as
+      | { busy?: unknown; log?: unknown; checkpointed?: unknown }
+      | undefined;
+    const busy = Number(row?.busy ?? 1);
+    const log = Number(row?.log ?? -1);
+    const checkpointed = Number(row?.checkpointed ?? -1);
+    if (busy !== 0 || (log > 0 && checkpointed < log)) {
+      throw new Error(
+        `Cannot checkpoint existing SQLite database before restore because it is busy (${databasePath}). Stop app and worker first, then retry.`,
+      );
+    }
+  } catch (err) {
+    const sqliteErr = err as { errcode?: unknown; message?: unknown };
+    const code = Number(sqliteErr?.errcode ?? 0);
+    const msg = String(sqliteErr?.message ?? '');
+    if (
+      code === 5 ||
+      code === 6 ||
+      /database is locked|database table is locked|busy/i.test(msg)
+    ) {
+      throw new Error(
+        `Cannot checkpoint existing SQLite database before restore because it is busy (${databasePath}). Stop app and worker first, then retry.`,
+        { cause: err },
+      );
+    }
+    throw err;
+  } finally {
+    existingDb?.close();
+  }
 }
 
 async function sha256File(filePath: string): Promise<{
@@ -308,10 +469,11 @@ async function assertRestoreTargetsWritable(
 }
 
 /**
- * Creates a consistent online backup of the SQLite database (using node:sqlite's
+ * Creates a consistent backup of the SQLite database (using node:sqlite's
  * online backup API, falling back to VACUUM INTO on older Node 22.13-22.15)
  * together with SQLite-referenced private blobs and a verified SHA-256 manifest.
- * Operations on the same output directory are serialized with an exclusive lock file.
+ * Overwriting an existing destination (`--overwrite`) is an offline operation.
+ * Destination access is guarded with a fail-fast exclusive lock file.
  */
 export async function backupWorkspace(
   options: BackupOptions,
@@ -339,10 +501,8 @@ export async function backupWorkspace(
     throw new Error(`SQLite database not found: ${sourceDbPath}`);
   }
 
-  await assertBackupDestinationWritable(outputDir, overwrite);
-
-  const lockFile = backupLockPath(canonicalPath(outputDir));
-  return withExclusiveLocks([lockFile], async () => {
+  const lockFile = destinationLockPath(outputDir);
+  return withDestinationLocks([lockFile], async () => {
     await assertBackupDestinationWritable(outputDir, overwrite);
 
     const outputParent = dirname(outputDir);
@@ -454,12 +614,13 @@ export async function backupWorkspace(
 
 /**
  * Verifies a backup directory against its manifest, SQLite snapshot references,
- * and integrity checks, then atomically stages and swaps the replacement
- * SQLite database and private blob directory without destroying the prior
- * workspace until the restored workspace is verified.
+ * and integrity checks, then stages and swaps the replacement SQLite database
+ * and private blob directory. Restoring over an existing workspace is an
+ * offline operation (app and worker must be stopped).
  */
 export async function restoreWorkspace(
   options: RestoreOptions,
+  hooks?: RestoreSwapHooks,
 ): Promise<RestoreResult> {
   if (options.databasePath === ':memory:') {
     throw new Error('Cannot restore into an in-memory SQLite database.');
@@ -534,13 +695,12 @@ export async function restoreWorkspace(
 
   const force = Boolean(options.force);
   const lockFiles = [
-    restoreLockPathForDb(canonicalPath(targetDbPath)),
-    restoreLockPathForBlobs(canonicalPath(targetBlobsDir)),
+    destinationLockPath(targetDbPath),
+    destinationLockPath(targetBlobsDir),
   ];
 
-  return withExclusiveLocks(lockFiles, async () => {
-    // Recover any interrupted prior restore before checking destination state or staging.
-    recoverInterruptedRestoreSync(targetDbPath, { alreadyLocked: true });
+  return withDestinationLocks(lockFiles, async () => {
+    assertNoInterruptedRestoreSync(targetDbPath, targetBlobsDir);
     await assertRestoreTargetsWritable(targetDbPath, targetBlobsDir, force);
 
     const stageId = randomUUID();
@@ -551,13 +711,17 @@ export async function restoreWorkspace(
 
     const stagedDb = `${targetDbPath}.restore-stage-${stageId}`;
     const stagedBlobsDir = join(blobsParent, `.blobs-restore-stage-${stageId}`);
-    const prevDbPath = `${targetDbPath}.restore-prev-${stageId}`;
-    const prevWalPath = `${targetDbPath}-wal.restore-prev-${stageId}`;
-    const prevShmPath = `${targetDbPath}-shm.restore-prev-${stageId}`;
-    const prevBlobsDir = join(blobsParent, `.blobs-restore-prev-${stageId}`);
+    const { dbPrev, walPrev, shmPrev, blobsPrev } = restorePrevPaths(
+      targetDbPath,
+      targetBlobsDir,
+    );
 
-    let journalWritten = false;
-    let journal: RestoreSwapJournal | null = null;
+    let movedPrevDb = false;
+    let movedPrevWal = false;
+    let movedPrevShm = false;
+    let movedPrevBlobs = false;
+    let installedBlobs = false;
+    let installedDb = false;
 
     try {
       // 1. Copy and checksum the backup SQLite database into writable staging FIRST,
@@ -604,7 +768,7 @@ export async function restoreWorkspace(
       }
 
       const stagedVerify = openDatabase(stagedDb, SCHEMA_VERSION, {
-        skipRestoreRecovery: true,
+        blobDirectory: targetBlobsDir,
       });
       try {
         if (!ready(stagedVerify) || !integrityCheck(stagedVerify)) {
@@ -617,6 +781,8 @@ export async function restoreWorkspace(
       } finally {
         stagedVerify.close();
       }
+      await rm(`${stagedDb}-wal`, { force: true });
+      await rm(`${stagedDb}-shm`, { force: true });
 
       // 2. Stage and verify complete replacement blob directory before touching live workspace.
       await mkdir(stagedBlobsDir, { recursive: true, mode: 0o700 });
@@ -633,57 +799,45 @@ export async function restoreWorkspace(
         }
       }
 
-      // 3. Re-verify overwrite permission under the lock immediately before swapping,
-      // then persist a durable swap journal next to the target database.
+      // 3. Re-verify overwrite permission and absence of .prev backups under the lock
+      // immediately before swapping, then checkpoint the existing target DB so no
+      // committed data remains only in -wal.
+      assertNoInterruptedRestoreSync(targetDbPath, targetBlobsDir);
       await assertRestoreTargetsWritable(targetDbPath, targetBlobsDir, force);
 
-      const hadPrevDb = existsSync(targetDbPath);
-      const hadPrevWal = existsSync(`${targetDbPath}-wal`);
-      const hadPrevShm = existsSync(`${targetDbPath}-shm`);
-      const hadPrevBlobs = existsSync(targetBlobsDir);
-
-      journal = {
-        version: 1,
-        stageId,
-        phase: 'swapping',
-        targetDbPath,
-        targetBlobsDir,
-        stagedDbPath: stagedDb,
-        stagedBlobsDir,
-        prevDbPath,
-        prevWalPath,
-        prevShmPath,
-        prevBlobsDir,
-        hadPrevDb,
-        hadPrevWal,
-        hadPrevShm,
-        hadPrevBlobs,
-        createdAt: new Date().toISOString(),
-      };
-      await writeRestoreJournal(journal);
-      journalWritten = true;
-
-      // 4. Move previous workspace aside without deleting it yet.
-      if (hadPrevDb) {
-        await rename(targetDbPath, prevDbPath);
-      }
-      if (hadPrevWal) {
-        await rename(`${targetDbPath}-wal`, prevWalPath);
-      }
-      if (hadPrevShm) {
-        await rename(`${targetDbPath}-shm`, prevShmPath);
-      }
-      if (hadPrevBlobs) {
-        await rename(targetBlobsDir, prevBlobsDir);
+      if (existsSync(targetDbPath)) {
+        checkpointExistingDatabaseForRestore(targetDbPath);
       }
 
-      // 5. Swap staged replacement into live locations.
+      // 4. Move previous workspace aside to .prev names without deleting yet.
+      if (existsSync(targetDbPath)) {
+        await rename(targetDbPath, dbPrev);
+        movedPrevDb = true;
+        await hooks?.afterPrevDbRename?.();
+      }
+      if (existsSync(`${targetDbPath}-wal`)) {
+        await rename(`${targetDbPath}-wal`, walPrev);
+        movedPrevWal = true;
+      }
+      if (existsSync(`${targetDbPath}-shm`)) {
+        await rename(`${targetDbPath}-shm`, shmPrev);
+        movedPrevShm = true;
+      }
+      if (existsSync(targetBlobsDir)) {
+        await rename(targetBlobsDir, blobsPrev);
+        movedPrevBlobs = true;
+      }
+
+      // 5. Install staged replacement into live locations.
       await rename(stagedBlobsDir, targetBlobsDir);
+      installedBlobs = true;
+      await hooks?.afterInstallBlobs?.();
       await rename(stagedDb, targetDbPath);
+      installedDb = true;
 
-      // 6. Verify live restored workspace before committing the journal and discarding previous files.
-      const restoredDb = openDatabase(targetDbPath, SCHEMA_VERSION, {
-        skipRestoreRecovery: true,
+      // 6. Verify live restored workspace before discarding .prev backups.
+      const restoredDb = new sqlite.DatabaseSync(targetDbPath, {
+        readOnly: true,
       });
       try {
         if (!ready(restoredDb) || !integrityCheck(restoredDb)) {
@@ -698,33 +852,52 @@ export async function restoreWorkspace(
       } finally {
         restoredDb.close();
       }
-
-      // 7. Mark swap committed before deleting previous workspace backups.
-      await writeRestoreJournal({ ...journal, phase: 'committed' });
     } catch (err) {
-      if (journalWritten) {
-        try {
-          recoverInterruptedRestoreSync(targetDbPath, { alreadyLocked: true });
-        } catch {
-          // Leave durable journal in place so next restore/startup can retry recovery.
+      // Roll back in-process by restoring any .prev files moved aside and
+      // removing any newly installed replacement files without touching
+      // unmoved original sidecars.
+      try {
+        if (installedDb) {
+          await rm(targetDbPath, { force: true });
+          await rm(`${targetDbPath}-wal`, { force: true });
+          await rm(`${targetDbPath}-shm`, { force: true });
         }
-      } else {
-        await rm(stagedDb, { force: true }).catch(() => {});
-        await rm(`${stagedDb}-wal`, { force: true }).catch(() => {});
-        await rm(`${stagedDb}-shm`, { force: true }).catch(() => {});
-        await rm(stagedBlobsDir, { recursive: true, force: true }).catch(
-          () => {},
-        );
+        if (movedPrevDb) {
+          await rename(dbPrev, targetDbPath);
+        }
+        if (movedPrevWal) {
+          await rename(walPrev, `${targetDbPath}-wal`);
+        }
+        if (movedPrevShm) {
+          await rename(shmPrev, `${targetDbPath}-shm`);
+        }
+      } catch {
+        // Leave .prev files in place so startup refuses and operator can recover manually.
       }
+      try {
+        if (installedBlobs) {
+          await rm(targetBlobsDir, { recursive: true, force: true });
+        }
+        if (movedPrevBlobs) {
+          await rename(blobsPrev, targetBlobsDir);
+        }
+      } catch {
+        // Leave .prev blobs directory in place for manual recovery.
+      }
+      await rm(stagedDb, { force: true }).catch(() => {});
+      await rm(`${stagedDb}-wal`, { force: true }).catch(() => {});
+      await rm(`${stagedDb}-shm`, { force: true }).catch(() => {});
+      await rm(stagedBlobsDir, { recursive: true, force: true }).catch(
+        () => {},
+      );
       throw err;
     }
 
-    // 8. Replacement is live, verified, and committed; clean up previous workspace and journal.
-    await rm(prevDbPath, { force: true });
-    await rm(prevWalPath, { force: true });
-    await rm(prevShmPath, { force: true });
-    await rm(prevBlobsDir, { recursive: true, force: true });
-    await removeRestoreJournal(targetDbPath);
+    // 7. Delete .prev files only after the new DB and blobs are fully installed and verified.
+    if (movedPrevDb) await rm(dbPrev, { force: true });
+    if (movedPrevWal) await rm(walPrev, { force: true });
+    if (movedPrevShm) await rm(shmPrev, { force: true });
+    if (movedPrevBlobs) await rm(blobsPrev, { recursive: true, force: true });
 
     return {
       manifest,
