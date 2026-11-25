@@ -4,27 +4,33 @@ import { setImmediate, setTimeout as wait } from 'node:timers/promises';
 import { SpanStatusCode, trace } from '@opentelemetry/api';
 import type { Job } from '@rag-eval/contracts';
 import type { Logger } from 'pino';
+import type { Indexes } from '../db/indexes.js';
 import { type Jobs, LostLease, type Lease } from '../db/jobs.js';
+import { ApiError } from '../errors.js';
+import { mediaType, validateContent } from '../ingestion/blobs.js';
 import {
   chunkArtifact,
   sha256,
   type ArtifactChunk,
 } from '../ingestion/chunks.js';
 import {
-  parseLocal,
-  ParseFailure,
-  type Extraction,
-} from '../ingestion/local.js';
-import {
   RemoteJobFailed,
   UploadThrottled,
   type CloudParser,
 } from '../ingestion/cloud.js';
-import { mediaType, validateContent } from '../ingestion/blobs.js';
+import {
+  parseLocal,
+  ParseFailure,
+  type Extraction,
+} from '../ingestion/local.js';
+import { ProviderError } from '../providers/errors.js';
+import type { IndexBuilder } from '../retrieval/indexer.js';
 
 export interface WorkerOptions {
   directory: string;
   cloud: CloudParser;
+  indexes?: Indexes;
+  indexBuilder?: IndexBuilder;
   signal?: AbortSignal;
   random?: () => number;
   pollMs?: number;
@@ -39,6 +45,8 @@ async function extract(
   options: WorkerOptions,
   signal: AbortSignal,
 ) {
+  if (!lease.versionId || !lease.parser)
+    throw new ParseFailure('Missing document version or parser.');
   const source = jobs.source(lease.versionId);
   // Phase 3 browser uploads sometimes used the generic octet-stream MIME.
   const mime = mediaType(
@@ -95,13 +103,94 @@ async function extract(
   return { id, result: jobs.artifact(id) ?? result };
 }
 
+async function runIndexJob(
+  jobs: Jobs,
+  lease: Job & Lease & { generationId: string },
+  options: WorkerOptions,
+) {
+  if (!options.indexBuilder || !options.indexes) return false;
+  const span = trace.getTracer('rag-eval.jobs').startSpan('index.build', {
+    attributes: {
+      'job.id': lease.id,
+      'index.generation_id': lease.generationId,
+      'job.attempt': lease.attempt,
+    },
+  });
+  const controller = new AbortController();
+  const signal = options.signal
+    ? AbortSignal.any([controller.signal, options.signal])
+    : controller.signal;
+  const timer = setInterval(
+    () => {
+      if (options.signal?.aborted || !jobs.heartbeatIndex(lease))
+        controller.abort();
+    },
+    Math.floor(jobs.leaseMs / 3),
+  );
+  try {
+    await options.indexBuilder.build(lease.generationId, {
+      signal,
+      guard: () => jobs.guardIndex(lease),
+      checkpoint: (stage) => jobs.checkpointIndex(lease, stage),
+    });
+    jobs.finishIndex(lease);
+    options.logger?.info(
+      {
+        jobId: lease.id,
+        generationId: lease.generationId,
+        attempt: lease.attempt,
+        state: 'succeeded',
+      },
+      'index job complete',
+    );
+  } catch (err) {
+    if (!options.signal?.aborted) {
+      const active = jobs.heartbeatIndex(lease);
+      if (active && !(err instanceof LostLease) && !signal.aborted) {
+        const backoff =
+          Math.min(maxBackoffMs, 1000 * 2 ** (lease.attempt - 1)) *
+          (0.5 + (options.random ?? Math.random)());
+        const delay =
+          err instanceof ProviderError && err.retryable
+            ? Math.ceil(Math.max(backoff, err.retryAfterMs ?? 0))
+            : undefined;
+        const message =
+          err instanceof ProviderError || err instanceof ApiError
+            ? err.message
+            : 'Index build failed. Check configuration and retry.';
+        const terminal = jobs.failIndex(lease, message, delay);
+        if (terminal) options.indexes.markFailed(lease.generationId, message);
+        span.setStatus({ code: SpanStatusCode.ERROR });
+        options.logger?.warn(
+          {
+            jobId: lease.id,
+            generationId: lease.generationId,
+            attempt: lease.attempt,
+            transient: delay !== undefined && !terminal,
+          },
+          'index job failed',
+        );
+      }
+    }
+  } finally {
+    clearInterval(timer);
+    span.end();
+  }
+  return true;
+}
+
 export async function runOne(jobs: Jobs, options: WorkerOptions) {
   const lease = jobs.claim();
-  if (!lease) return false;
+  if (!lease) {
+    if (!options.indexBuilder || !options.indexes) return false;
+    const indexLease = jobs.claimIndex();
+    if (!indexLease) return false;
+    return runIndexJob(jobs, indexLease, options);
+  }
   const span = trace.getTracer('rag-eval.jobs').startSpan('job.run', {
     attributes: {
       'job.id': lease.id,
-      'job.parser': lease.parser,
+      'job.parser': lease.parser ?? 'local',
       'job.attempt': lease.attempt,
     },
   });

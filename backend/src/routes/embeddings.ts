@@ -1,6 +1,9 @@
 import type { Request, Response } from 'express';
-import type { OpenAIClient } from '../lib/openaiClient.js';
-import type { QdrantClient, QdrantPoint } from '../lib/qdrantClient.js';
+import {
+  hasReservedPayloadField,
+  type LegacyPoint,
+  type QdrantStore,
+} from '../retrieval/qdrant.js';
 
 interface ChunkPayload {
   documentId?: string;
@@ -16,8 +19,20 @@ interface UpsertRequestBody {
   chunks: ChunkPayload[];
 }
 
+export interface LegacyEmbedder {
+  embed(inputs: string[], model?: string): Promise<{ vectors: number[][] }>;
+}
+
 export const createEmbeddingsHandler =
-  (openai: Pick<OpenAIClient, 'createEmbeddings'>, qdrant: QdrantClient) =>
+  (
+    embedder: LegacyEmbedder,
+    qdrant: Pick<
+      QdrantStore,
+      | 'collectionForLegacyPipeline'
+      | 'ensureLegacyCollection'
+      | 'replaceLegacyPipelinePoints'
+    >,
+  ) =>
   async (req: Request<unknown, unknown, UpsertRequestBody>, res: Response) => {
     if (
       !req.body ||
@@ -69,22 +84,17 @@ export const createEmbeddingsHandler =
           (!metadata ||
             typeof metadata !== 'object' ||
             Array.isArray(metadata) ||
-            ['pipelineId', 'documentId', 'chunkId', 'text'].some((key) =>
-              Object.hasOwn(metadata, key),
-            )),
+            hasReservedPayloadField(metadata)),
       )
     ) {
       return res
         .status(400)
         .json({ error: 'Invalid chunk metadata or reserved payload field.' });
     }
+
     const texts = chunks.map((chunk) => chunk.text.trim());
-
     try {
-      const { vectors } = await openai.createEmbeddings(texts, {
-        model: normalizedEmbeddingModel,
-      });
-
+      const { vectors } = await embedder.embed(texts, normalizedEmbeddingModel);
       if (vectors.length !== chunks.length) {
         throw new Error('Mismatch between embedding vectors and chunk count.');
       }
@@ -101,15 +111,14 @@ export const createEmbeddingsHandler =
           'Embedding API returned invalid or inconsistent vectors.',
         );
       }
-      const targetCollection = qdrant.collectionNameForPipeline(
+
+      const targetCollection = qdrant.collectionForLegacyPipeline(
         vectorSize,
         normalizedPipelineId,
       );
+      await qdrant.ensureLegacyCollection(targetCollection, vectorSize);
 
-      await qdrant.ensureCollection(vectorSize, targetCollection);
-      await qdrant.deletePipelinePoints(normalizedPipelineId, targetCollection);
-
-      const points: QdrantPoint[] = vectors.map((vector, index) => {
+      const points: LegacyPoint[] = vectors.map((vector, index) => {
         const chunk = chunks[index];
         return {
           id: chunk.id,
@@ -124,7 +133,11 @@ export const createEmbeddingsHandler =
         };
       });
 
-      await qdrant.upsertPoints(points, targetCollection);
+      await qdrant.replaceLegacyPipelinePoints(
+        targetCollection,
+        normalizedPipelineId,
+        points,
+      );
 
       res.json({
         upserted: points.length,

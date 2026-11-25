@@ -1,7 +1,8 @@
 import { loadEnvironment, readConfig } from './config/env.js';
 import { openDatabase, ready } from './db/database.js';
-import { Jobs } from './db/jobs.js';
 import { Datasets } from './db/datasets.js';
+import { Indexes } from './db/indexes.js';
+import { Jobs } from './db/jobs.js';
 import { Pipelines } from './db/pipelines.js';
 import { createApp } from './http/app.js';
 import { createLogger } from './lib/logger.js';
@@ -15,15 +16,16 @@ let stopping = false;
 const app = createApp({
   config,
   logger,
-  datasets: new Datasets(db),
+  datasets: new Datasets(db, jobs),
   pipelines: new Pipelines(db),
+  indexes: new Indexes(db, jobs),
   ready: async () => {
     if (stopping || !ready(db) || !jobs.online()) return false;
-    if (config.env.QDRANT_REQUIRED !== 'true') return true;
+    if (config.env.QDRANT_REQUIRED !== 'true' || !config.qdrant) return true;
     try {
-      const response = await fetch(`${config.legacy.qdrantUrl}/readyz`, {
-        headers: config.legacy.qdrantApiKey
-          ? { 'api-key': config.legacy.qdrantApiKey }
+      const response = await fetch(`${config.qdrant.url}/readyz`, {
+        headers: config.qdrant.apiKey
+          ? { 'api-key': config.qdrant.apiKey }
           : {},
         signal: AbortSignal.timeout(2000),
         redirect: 'error',

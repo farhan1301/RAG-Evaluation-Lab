@@ -2,7 +2,11 @@ import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-const migrations = ['001-definitions.sql', '002-ingestion.sql'];
+const migrations = [
+  '001-definitions.sql',
+  '002-ingestion.sql',
+  '003-retrieval.sql',
+];
 
 export function transaction<T>(db: DatabaseSync, work: () => T): T {
   db.exec('BEGIN IMMEDIATE');

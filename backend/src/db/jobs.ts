@@ -5,6 +5,7 @@ import {
   jobEvent,
   chunkOptions,
   chunkRow,
+  type Job,
   type Parser,
   z,
   pageSpan,
@@ -18,8 +19,10 @@ import {
   type ArtifactChunk,
 } from '../ingestion/chunks.js';
 
-const fields =
-  'id, version_id AS versionId, parser, state, stage, attempt, message, parent_id AS parentId, artifact_id AS artifactId';
+const parseFields =
+  "id, 'parse' AS kind, version_id AS versionId, parser, NULL AS generationId, state, stage, attempt, message, parent_id AS parentId, artifact_id AS artifactId";
+const indexFields =
+  "id, 'index' AS kind, NULL AS versionId, NULL AS parser, generation_id AS generationId, state, stage, attempt, message, parent_id AS parentId, NULL AS artifactId";
 export interface Lease {
   id: string;
   token: number;
@@ -34,21 +37,34 @@ export class Jobs {
     readonly now = Date.now,
     readonly leaseMs = 30000,
   ) {}
-  get(id: string) {
-    return job.parse(
-      this.db.prepare(`SELECT ${fields} FROM jobs WHERE id=?`).get(id) ??
-        missing(),
-    );
+
+  private parseRow(row: Record<string, unknown>): Job {
+    return job.parse({ ...row, workerOnline: this.online() });
   }
+
+  get(id: string): Job {
+    const parsed = this.db
+      .prepare(`SELECT ${parseFields} FROM jobs WHERE id=?`)
+      .get(id);
+    if (parsed) return this.parseRow(parsed);
+    const indexed = this.db
+      .prepare(`SELECT ${indexFields} FROM index_jobs WHERE id=?`)
+      .get(id);
+    if (indexed) return this.parseRow(indexed);
+    return missing();
+  }
+
   events(id: string, after: number) {
-    this.get(id);
+    const found = this.get(id);
+    const table = found.kind === 'index' ? 'index_job_events' : 'job_events';
     return this.db
       .prepare(
-        'SELECT seq,state,stage,message,time FROM job_events WHERE job_id=? AND seq>? ORDER BY seq LIMIT 100',
+        `SELECT seq,state,stage,message,time FROM ${table} WHERE job_id=? AND seq>? ORDER BY seq LIMIT 100`,
       )
       .all(id, after)
       .map((row) => jobEvent.parse(row));
   }
+
   private event(id: string) {
     this.db
       .prepare(
@@ -56,6 +72,15 @@ export class Jobs {
       )
       .run(this.now(), id);
   }
+
+  private indexEvent(id: string) {
+    this.db
+      .prepare(
+        'INSERT INTO index_job_events(job_id,state,stage,message,time) SELECT id,state,stage,message,? FROM index_jobs WHERE id=?',
+      )
+      .run(this.now(), id);
+  }
+
   replay(key: string | null, hash: string) {
     if (!key) return;
     const row = this.db
@@ -69,6 +94,27 @@ export class Jobs {
       );
     if (row) return String(row.id);
   }
+
+  replayIndex(key: string | null, hash: string) {
+    if (!key) return;
+    const row = this.db
+      .prepare(
+        'SELECT id,generation_id,request_hash FROM index_jobs WHERE request_key=?',
+      )
+      .get(key);
+    if (row && row.request_hash !== hash)
+      throw new ApiError(
+        409,
+        'conflict',
+        'Idempotency key was used with different input.',
+      );
+    if (row)
+      return {
+        jobId: String(row.id),
+        generationId: String(row.generation_id),
+      };
+  }
+
   // Caller owns the write transaction, including document/revision creation.
   enqueue(
     version: string,
@@ -87,9 +133,64 @@ export class Jobs {
     this.event(id);
     return id;
   }
+
+  // Caller owns the write transaction, including index_generations creation.
+  enqueueIndex(
+    generationId: string,
+    key: string | null = null,
+    hash: string | null = null,
+    parent: string | null = null,
+  ) {
+    const id = randomUUID(),
+      now = this.now();
+    this.db
+      .prepare(
+        "INSERT INTO index_jobs(id,generation_id,state,stage,eligible,deadline,parent_id,request_key,request_hash) VALUES (?,?,'queued','waiting',?,?,?,?,?)",
+      )
+      .run(id, generationId, now, now + duration, parent, key, hash);
+    this.indexEvent(id);
+    return id;
+  }
+
   retry(id: string) {
     return transaction(this.db, () => {
       const previous = this.get(id);
+      if (previous.kind === 'index') {
+        const child = this.db
+          .prepare('SELECT id FROM index_jobs WHERE parent_id=?')
+          .get(id);
+        if (child) return this.get(String(child.id));
+        if (!['failed', 'cancelled'].includes(previous.state))
+          throw new ApiError(
+            409,
+            'conflict',
+            'Only a failed or cancelled job can be retried.',
+          );
+        const orig = this.db
+          .prepare(
+            'SELECT dataset_id,dataset_revision,fingerprint,mode,chunk_config,embedding_provider,embedding_model FROM index_generations WHERE id=?',
+          )
+          .get(previous.generationId ?? missing());
+        if (!orig) return missing();
+        const nextGenerationId = randomUUID();
+        this.db
+          .prepare(
+            "INSERT INTO index_generations(id,dataset_id,dataset_revision,fingerprint,state,mode,chunk_config,embedding_provider,embedding_model,created_at) VALUES (?,?,?,?,'building',?,?,?,?,?)",
+          )
+          .run(
+            nextGenerationId,
+            orig.dataset_id,
+            orig.dataset_revision,
+            orig.fingerprint,
+            orig.mode,
+            orig.chunk_config,
+            orig.embedding_provider,
+            orig.embedding_model,
+            new Date(this.now()).toISOString(),
+          );
+        const next = this.enqueueIndex(nextGenerationId, null, null, id);
+        return this.get(next);
+      }
       const child = this.db
         .prepare('SELECT id FROM jobs WHERE parent_id=?')
         .get(id);
@@ -100,6 +201,7 @@ export class Jobs {
           'conflict',
           'Only a failed or cancelled job can be retried.',
         );
+      if (!previous.versionId || !previous.parser) return missing();
       const next = this.enqueue(
         previous.versionId,
         previous.parser,
@@ -122,9 +224,32 @@ export class Jobs {
       return this.get(next);
     });
   }
+
   cancel(id: string) {
     return transaction(this.db, () => {
       const j = this.get(id);
+      if (j.kind === 'index') {
+        if (j.state === 'queued' || j.state === 'running') {
+          this.db
+            .prepare('UPDATE index_jobs SET state=?,message=NULL WHERE id=?')
+            .run(
+              j.state === 'queued' ? 'cancelled' : 'cancellation_requested',
+              id,
+            );
+          if (j.state === 'queued' && j.generationId) {
+            this.db
+              .prepare(
+                "UPDATE index_generations SET state='failed',error_message=? WHERE id=? AND state='building'",
+              )
+              .run('Index build cancelled.', j.generationId);
+            this.db
+              .prepare('DELETE FROM chunk_fts WHERE generation_id=?')
+              .run(j.generationId);
+          }
+          this.indexEvent(id);
+        }
+        return this.get(id);
+      }
       if (j.state === 'queued' || j.state === 'running') {
         this.db
           .prepare('UPDATE jobs SET state=?,message=NULL WHERE id=?')
@@ -137,17 +262,20 @@ export class Jobs {
       return this.get(id);
     });
   }
+
   presence() {
     this.db
       .prepare('INSERT OR REPLACE INTO worker_presence VALUES (1,?)')
       .run(this.now());
   }
+
   online() {
     return !!this.db
       .prepare('SELECT 1 FROM worker_presence WHERE seen>=?')
       .get(this.now() - this.leaseMs);
   }
-  claim() {
+
+  claim(): (Job & Lease) | undefined {
     return transaction(this.db, () => {
       const now = this.now();
       for (const row of this.db
@@ -180,6 +308,55 @@ export class Jobs {
       return { ...this.get(id), token: Number(lease?.token) };
     });
   }
+
+  claimIndex(): (Job & Lease & { generationId: string }) | undefined {
+    return transaction(this.db, () => {
+      const now = this.now();
+      for (const row of this.db
+        .prepare(`SELECT id,generation_id,state FROM index_jobs WHERE state IN ('queued','running','cancellation_requested') AND
+        (deadline<=? OR (state!='queued' AND expires<=? AND (attempt>=? OR state='cancellation_requested')))`)
+        .all(now, now, attempts)) {
+        const cancelled = row.state === 'cancellation_requested';
+        const message = cancelled
+          ? null
+          : 'Index build deadline or attempt limit reached.';
+        this.db
+          .prepare('UPDATE index_jobs SET state=?,message=? WHERE id=?')
+          .run(cancelled ? 'cancelled' : 'failed', message, row.id);
+        this.db
+          .prepare(
+            "UPDATE index_generations SET state='failed',error_message=? WHERE id=? AND state='building'",
+          )
+          .run(
+            cancelled ? 'Index build cancelled.' : message,
+            row.generation_id,
+          );
+        this.db
+          .prepare('DELETE FROM chunk_fts WHERE generation_id=?')
+          .run(row.generation_id);
+        this.indexEvent(String(row.id));
+      }
+      const row = this.db
+        .prepare(
+          `SELECT id FROM index_jobs WHERE (state='queued' AND eligible<=?) OR (state='running' AND expires<=?) ORDER BY eligible,rowid LIMIT 1`,
+        )
+        .get(now, now);
+      if (!row) return;
+      const id = String(row.id);
+      const lease = this.db
+        .prepare(
+          "UPDATE index_jobs SET state='running',message=NULL,attempt=attempt+1,token=token+1,expires=? WHERE id=? RETURNING token,generation_id",
+        )
+        .get(now + this.leaseMs, id);
+      this.indexEvent(id);
+      return {
+        ...this.get(id),
+        generationId: String(lease?.generation_id),
+        token: Number(lease?.token),
+      };
+    });
+  }
+
   private guard(l: Lease) {
     const row = this.db
       .prepare(
@@ -188,6 +365,16 @@ export class Jobs {
       .get(l.id, l.token, this.now(), this.now());
     if (!row) throw new LostLease();
   }
+
+  guardIndex(l: Lease) {
+    const row = this.db
+      .prepare(
+        "SELECT 1 FROM index_jobs WHERE id=? AND token=? AND state='running' AND expires>? AND deadline>?",
+      )
+      .get(l.id, l.token, this.now(), this.now());
+    if (!row) throw new LostLease();
+  }
+
   heartbeat(l: Lease) {
     return transaction(this.db, () => {
       const now = this.now();
@@ -208,11 +395,48 @@ export class Jobs {
       return false;
     });
   }
+
+  heartbeatIndex(l: Lease) {
+    return transaction(this.db, () => {
+      const now = this.now();
+      const cancelled = this.db
+        .prepare(
+          "UPDATE index_jobs SET state='cancelled' WHERE id=? AND token=? AND state='cancellation_requested' AND expires>?",
+        )
+        .run(l.id, l.token, now);
+      if (cancelled.changes) {
+        const gen = this.db
+          .prepare('SELECT generation_id FROM index_jobs WHERE id=?')
+          .get(l.id);
+        if (gen?.generation_id) {
+          this.db
+            .prepare(
+              "UPDATE index_generations SET state='failed',error_message=? WHERE id=? AND state='building'",
+            )
+            .run('Index build cancelled.', gen.generation_id);
+          this.db
+            .prepare('DELETE FROM chunk_fts WHERE generation_id=?')
+            .run(gen.generation_id);
+        }
+        this.indexEvent(l.id);
+      } else if (
+        this.db
+          .prepare(
+            "UPDATE index_jobs SET expires=? WHERE id=? AND token=? AND state='running' AND expires>? AND deadline>?",
+          )
+          .run(now + this.leaseMs, l.id, l.token, now, now).changes
+      )
+        return true;
+      return false;
+    });
+  }
+
   step(id: string, stage: string) {
     return this.db
       .prepare('SELECT value FROM job_steps WHERE job_id=? AND stage=?')
       .get(id, stage)?.value as string | undefined;
   }
+
   checkpoint(l: Lease, stage: string, value = 'done') {
     transaction(this.db, () => {
       this.guard(l);
@@ -223,6 +447,50 @@ export class Jobs {
       this.event(l.id);
     });
   }
+
+  checkpointIndex(l: Lease, stage: string) {
+    transaction(this.db, () => {
+      this.guardIndex(l);
+      this.db
+        .prepare('UPDATE index_jobs SET stage=? WHERE id=?')
+        .run(stage, l.id);
+      this.indexEvent(l.id);
+    });
+  }
+
+  finishIndex(l: Lease) {
+    transaction(this.db, () => {
+      this.guardIndex(l);
+      this.db
+        .prepare(
+          "UPDATE index_jobs SET state='succeeded',stage='complete' WHERE id=?",
+        )
+        .run(l.id);
+      this.indexEvent(l.id);
+    });
+  }
+
+  failIndex(l: Lease, message: string, delay?: number) {
+    return transaction(this.db, () => {
+      this.guardIndex(l);
+      const eligible = this.now() + Math.min(delay ?? 0, duration);
+      const updated = this.db
+        .prepare(
+          `UPDATE index_jobs SET state=CASE WHEN ? AND attempt<? AND deadline>? THEN 'queued' ELSE 'failed' END,message=?,eligible=? WHERE id=? RETURNING state`,
+        )
+        .get(
+          Number(delay !== undefined),
+          attempts,
+          eligible,
+          message,
+          eligible,
+          l.id,
+        );
+      this.indexEvent(l.id);
+      return String(updated?.state) === 'failed';
+    });
+  }
+
   chunkOptions(id: string) {
     const value = this.db
       .prepare('SELECT chunk_config FROM jobs WHERE id=?')
@@ -231,6 +499,7 @@ export class Jobs {
       ? chunkOptions.parse(JSON.parse(String(value)))
       : chunkOptions.parse(defaultChunks);
   }
+
   requestChunks(
     version: string,
     options: z.infer<typeof chunkOptions>,
@@ -271,6 +540,7 @@ export class Jobs {
       return this.get(id);
     });
   }
+
   chunks(id: string, after: number) {
     const job = this.get(id);
     if (!job.artifactId || job.state !== 'succeeded')
@@ -299,6 +569,7 @@ export class Jobs {
       nextCursor: rows.length > 100 ? String(items[99].ordinal) : null,
     };
   }
+
   source(version: string) {
     const row =
       this.db
@@ -314,6 +585,7 @@ export class Jobs {
       inline: row.bytes as Uint8Array,
     };
   }
+
   artifact(id: string): Extraction | undefined {
     const row = this.db
       .prepare('SELECT text,pages FROM parse_artifacts WHERE id=?')
@@ -324,6 +596,7 @@ export class Jobs {
         pages: z.array(pageSpan).parse(JSON.parse(String(row.pages))),
       };
   }
+
   saveExtraction(
     l: Lease,
     id: string,
@@ -343,6 +616,7 @@ export class Jobs {
       this.event(l.id);
     });
   }
+
   saveChunks(l: Lease, artifact: string, rows: ArtifactChunk[]) {
     transaction(this.db, () => {
       this.guard(l);
@@ -364,6 +638,7 @@ export class Jobs {
         );
     });
   }
+
   finish(l: Lease, artifact: string) {
     transaction(this.db, () => {
       this.guard(l);
@@ -375,6 +650,7 @@ export class Jobs {
       this.event(l.id);
     });
   }
+
   fail(l: Lease, message: string, delay?: number, uploadRejected = false) {
     transaction(this.db, () => {
       this.guard(l);

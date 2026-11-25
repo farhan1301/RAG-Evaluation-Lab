@@ -7,7 +7,11 @@ process.env.NODE_ENV = 'test';
 process.env.PORT = '0';
 process.env.DATABASE_PATH = ':memory:';
 for (const key of Object.keys(process.env)) {
-  if (/^(OPENAI_|LOCAL_EMBED_|QDRANT_|LLAMA_)/.test(key))
+  if (
+    /^(OPENAI_|ANTHROPIC_|LOCAL_EMBED_|LOCAL_CHAT_|LOCAL_JUDGE_|RERANK_|QDRANT_|LLAMA_)/.test(
+      key,
+    )
+  )
     delete process.env[key];
 }
 const listen = mock.method(Server.prototype, 'listen', function () {

@@ -1,6 +1,6 @@
 import type { Request, Response } from 'express';
-import type { OpenAIClient } from '../lib/openaiClient.js';
-import type { QdrantClient } from '../lib/qdrantClient.js';
+import type { QdrantStore } from '../retrieval/qdrant.js';
+import type { LegacyEmbedder } from './embeddings.js';
 
 interface SearchRequestBody {
   pipelineId: string;
@@ -10,7 +10,13 @@ interface SearchRequestBody {
 }
 
 export const createSearchHandler =
-  (openai: Pick<OpenAIClient, 'createEmbeddings'>, qdrant: QdrantClient) =>
+  (
+    embedder: LegacyEmbedder,
+    qdrant: Pick<
+      QdrantStore,
+      'collectionForLegacyPipeline' | 'searchLegacyPipeline'
+    >,
+  ) =>
   async (req: Request<unknown, unknown, SearchRequestBody>, res: Response) => {
     if (
       !req.body ||
@@ -39,24 +45,24 @@ export const createSearchHandler =
     }
 
     try {
-      const { vectors } = await openai.createEmbeddings([question], {
-        model: normalizedEmbeddingModel,
-      });
+      const { vectors } = await embedder.embed(
+        [question],
+        normalizedEmbeddingModel,
+      );
       if (!vectors.length) {
         throw new Error('Embedding API returned no vectors.');
       }
 
       const vectorSize = vectors[0].length;
-      const targetCollection = qdrant.collectionNameForPipeline(
+      const targetCollection = qdrant.collectionForLegacyPipeline(
         vectorSize,
         normalizedPipelineId,
       );
-
-      const results = await qdrant.search(
+      const results = await qdrant.searchLegacyPipeline(
+        targetCollection,
         vectors[0],
         Math.max(1, Math.min(50, topK)),
-        { pipelineId: normalizedPipelineId },
-        targetCollection,
+        normalizedPipelineId,
       );
 
       res.json({ matches: results, collection: targetCollection, vectorSize });

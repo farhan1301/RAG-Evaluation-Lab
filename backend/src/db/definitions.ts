@@ -30,6 +30,10 @@ export class Definitions {
     private readonly kind: Table,
   ) {}
 
+  get database() {
+    return this.db;
+  }
+
   list(limit: number, cursor = '') {
     const { history, fk } = tables(this.kind);
     const rows = this.db

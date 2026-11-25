@@ -33,3 +33,24 @@ jobs:
           worker=$!
           trap 'kill "$pid" "$worker"' EXIT
           curl --fail --retry 10 --retry-connrefused --retry-delay 1 http://127.0.0.1:17070/health/ready | jq -e '.status == "ok"'
+
+  qdrant-integration:
+    runs-on: ubuntu-latest
+    services:
+      qdrant:
+        image: qdrant/qdrant:v1.20.2@sha256:d277592721d2e3b73f9b797b53cf05e6a5bb2134f6d13fdbda4ca51782afbcac
+        ports:
+          - 6333:6333
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.22.3"
+          cache: npm
+      - run: npm ci
+      - name: Wait for Qdrant readiness
+        run: curl --fail --retry 15 --retry-connrefused --retry-delay 1 http://127.0.0.1:6333/readyz
+      - name: Run Qdrant integration tests
+        env:
+          QDRANT_URL: http://127.0.0.1:6333
+        run: npm test -- tests/qdrant-integration.test.ts

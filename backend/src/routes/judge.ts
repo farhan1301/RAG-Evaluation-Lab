@@ -1,5 +1,33 @@
 import type { Request, Response } from 'express';
-import type { OpenAIClient, ChatResponse } from '../lib/openaiClient.js';
+
+export interface LegacyChatUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+}
+
+export interface LegacyChatResponse {
+  content: string;
+  usage?: LegacyChatUsage;
+}
+
+export interface LegacyChatClient {
+  chatCompletion(
+    messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
+    options?: {
+      model?: string;
+      temperature?: number;
+      maxTokens?: number;
+      responseFormat?:
+        | { type: 'json_object' }
+        | {
+            type: 'json_schema';
+            name: string;
+            schema: Record<string, unknown>;
+          };
+    },
+  ): Promise<LegacyChatResponse>;
+}
 
 interface JudgeEvaluationInput {
   taskId: string;
@@ -35,7 +63,7 @@ interface JudgeDetail {
   rationale: string;
   missingCriteria: string[];
   latencyMs: number;
-  usage?: ChatResponse['usage'];
+  usage?: LegacyChatUsage;
 }
 
 const score = (value: unknown) => {
@@ -134,7 +162,7 @@ const average = (values: number[]) =>
     : null;
 
 export const createJudgeHandler =
-  (openai: Pick<OpenAIClient, 'chatCompletion'>) =>
+  (client: LegacyChatClient) =>
   async (req: Request<unknown, unknown, JudgeRequestBody>, res: Response) => {
     const { pipelineId, evaluations, model } = req.body ?? {};
 
@@ -153,10 +181,10 @@ export const createJudgeHandler =
 
       for (const evaluation of evaluations) {
         const evalStarted = Date.now();
-        let usage: ChatResponse['usage'];
+        let usage: LegacyChatUsage | undefined;
         try {
           const messages = buildJudgePrompt(evaluation);
-          const completion = await openai.chatCompletion(messages, {
+          const completion = await client.chatCompletion(messages, {
             model: model?.trim() || undefined,
             temperature: 0,
             responseFormat: { type: 'json_object' },

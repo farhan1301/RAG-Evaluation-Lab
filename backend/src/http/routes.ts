@@ -1,9 +1,11 @@
 import { Router, type Request, type Response } from 'express';
 import * as c from '@rag-eval/contracts';
 import type { Datasets } from '../db/datasets.js';
+import type { Indexes } from '../db/indexes.js';
 import type { Pipelines } from '../db/pipelines.js';
 import { parseTaskCsv } from '../ingestion/taskCsv.js';
 import { mediaType } from '../ingestion/blobs.js';
+import { validatePipelineCapabilities } from '../providers/registry.js';
 import { requestKey, checkParser } from './uploads.js';
 import { ApiError } from '../errors.js';
 
@@ -46,41 +48,14 @@ export function checkProfiles(
   config: c.PipelineConfig,
   capabilities: c.Capabilities,
 ) {
-  const chat = capabilities.profiles.find(
-    (p) =>
-      p.role === 'chat' && (!config.llm.model || p.model === config.llm.model),
-  );
-  if (
-    chat &&
-    !chat.options.includes('temperature') &&
-    config.llm.temperature !== 1
-  )
-    throw new ApiError(
-      422,
-      'missing_capability',
-      'The selected answer profile requires the default temperature of 1.',
-    );
-  for (const [role, model] of [
-    ['embedding', config.embedding.model],
-    ['chat', config.llm.model],
-    ['judge', config.judge.model],
-  ]) {
-    if (
-      model &&
-      !capabilities.profiles.some((p) => p.role === role && p.model === model)
-    )
-      throw new ApiError(
-        422,
-        'missing_capability',
-        `The selected ${role} profile is unavailable.`,
-      );
-  }
+  validatePipelineCapabilities(config, capabilities);
 }
 
 export function definitionsRouter(
   datasets: Datasets,
   pipelines: Pipelines,
   capabilities: c.Capabilities,
+  indexes?: Indexes,
 ) {
   const router = Router();
   for (const param of ['id', 'taskId', 'docId'])
@@ -276,6 +251,29 @@ export function definitionsRouter(
         'missing_capability',
         'Configure LlamaParse to use the cloud parser.',
       );
+    if (previous.kind === 'index' && previous.generationId && indexes) {
+      const gen = indexes.get(previous.generationId);
+      if (gen.mode === 'dense' || gen.mode === 'hybrid') {
+        if (!capabilities.denseStore)
+          throw new ApiError(
+            422,
+            'missing_capability',
+            'Configure Qdrant before retrying a dense or hybrid index job.',
+          );
+        if (
+          !capabilities.profiles.some(
+            (p) =>
+              p.role === 'embedding' &&
+              (!gen.embeddingModel || p.model === gen.embeddingModel),
+          )
+        )
+          throw new ApiError(
+            422,
+            'missing_capability',
+            'The required embedding profile is unavailable.',
+          );
+      }
+    }
     const job = datasets.jobs.retry(req.params.id);
     res.location(`/api/v1/jobs/${job.id}`).status(202).json(job);
   });

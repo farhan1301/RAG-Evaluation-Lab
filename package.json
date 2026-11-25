@@ -28,5 +28,10 @@
     "vitest": "5.1.1",
     "@biomejs/biome": "2.6.9",
     "@types/node": "26.6.6"
+  },
+  "overrides": {
+    "@qdrant/js-client-rest": {
+      "undici": "7.30.2"
+    }
   }
 }

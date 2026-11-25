@@ -270,16 +270,26 @@ it('streams raw File uploads without base64 and renders refreshable document par
 
     const queuedHtml = await renderWithJob();
     expect(queuedHtml).toContain('local · queued · waiting · attempt 0');
+    expect(queuedHtml).toContain(
+      'No worker is running — start it with npm run dev:worker',
+    );
     expect(queuedHtml).toContain('Refresh status');
     expect(queuedHtml).toContain('Cancel parsing');
+
+    datasets.jobs.presence();
+    const onlineQueuedHtml = await renderWithJob();
+    expect(onlineQueuedHtml).toContain('local · queued · waiting · attempt 0');
+    expect(onlineQueuedHtml).not.toContain('No worker is running');
 
     const lease = datasets.jobs.claim();
     if (!lease) throw new Error('Expected claimed job.');
     datasets.jobs.fail(lease, 'Simulated extraction error.');
+    db.exec('DELETE FROM worker_presence');
     const failedHtml = await renderWithJob();
     expect(failedHtml).toContain(
       'local · failed · waiting · attempt 1 · Simulated extraction error.',
     );
+    expect(failedHtml).not.toContain('No worker is running');
     expect(failedHtml).toContain('Retry local parse');
   } finally {
     db.close();

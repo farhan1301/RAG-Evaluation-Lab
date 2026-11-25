@@ -3,7 +3,8 @@ import type { DatabaseSync } from 'node:sqlite';
 import {
   pipeline,
   pipelineInput,
-  type PipelineInput,
+  type PipelineInputRaw,
+  type PipelinePatchRaw,
   type SavedPipeline,
 } from '@rag-eval/contracts';
 import { transaction } from './database.js';
@@ -28,7 +29,7 @@ export class Pipelines extends Definitions {
     });
   }
 
-  private insert(id: string, revision: number, input: PipelineInput) {
+  private insert(id: string, revision: number, input: PipelineInputRaw) {
     const { name, description, config } = pipelineInput.parse(input);
     const json = JSON.stringify(config);
     this.db
@@ -48,15 +49,15 @@ export class Pipelines extends Definitions {
     return this.get(id);
   }
 
-  private fresh(input: PipelineInput) {
+  private fresh(input: PipelineInputRaw) {
     const id = randomUUID();
     this.db.prepare('INSERT INTO pipelines(id,revision) VALUES (?,1)').run(id);
     return this.insert(id, 1, input);
   }
-  create(input: PipelineInput) {
+  create(input: PipelineInputRaw) {
     return transaction(this.db, () => this.fresh(input));
   }
-  edit(id: string, expected: number, patch: Partial<PipelineInput>) {
+  edit(id: string, expected: number, patch: PipelinePatchRaw) {
     return transaction(this.db, () => {
       this.writable(id, expected);
       const { name, description, config } = this.get(id);

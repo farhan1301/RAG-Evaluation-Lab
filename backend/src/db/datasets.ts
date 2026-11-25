@@ -20,9 +20,9 @@ import type { StoredBlob } from '../ingestion/blobs.js';
 
 export class Datasets extends Definitions {
   readonly jobs: Jobs;
-  constructor(db: DatabaseSync) {
+  constructor(db: DatabaseSync, jobs?: Jobs) {
     super(db, 'datasets');
-    this.jobs = new Jobs(db);
+    this.jobs = jobs ?? new Jobs(db);
   }
 
   private fresh(name: string, seed: string | null = null) {

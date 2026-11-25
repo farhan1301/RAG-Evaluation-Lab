@@ -49,7 +49,18 @@ it('exposes safe capabilities and process/database health with zero credentials'
   expect((await send(api, 'GET', '/health/ready')).status).toBe(503);
   expect(
     c.capabilities.parse((await send(api, 'GET', '/api/v1/capabilities')).body),
-  ).toEqual({ profiles: [], cloudParser: false, denseStore: false });
+  ).toEqual({
+    profiles: [],
+    cloudParser: false,
+    denseStore: false,
+    workerOnline: false,
+  });
+  const datasets = new Datasets(db);
+  datasets.jobs.presence();
+  expect(
+    c.capabilities.parse((await send(api, 'GET', '/api/v1/capabilities')).body)
+      .workerOnline,
+  ).toBe(true);
   expect((await send(api, 'POST', '/api/answer', {})).body).toMatchObject({
     error: { code: 'missing_capability' },
   });

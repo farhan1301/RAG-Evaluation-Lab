@@ -1,10 +1,14 @@
 import { setTimeout as wait } from 'node:timers/promises';
 import { loadEnvironment, readConfig } from '../config/env.js';
 import { openDatabase } from '../db/database.js';
+import { Indexes } from '../db/indexes.js';
 import { Jobs } from '../db/jobs.js';
 import { blobDirectory } from '../ingestion/blobs.js';
 import { CloudParser } from '../ingestion/cloud.js';
 import { createLogger } from '../lib/logger.js';
+import { ProviderRegistry } from '../providers/registry.js';
+import { IndexBuilder } from '../retrieval/indexer.js';
+import { QdrantStore } from '../retrieval/qdrant.js';
 import { runOne } from './run.js';
 
 if (process.env.NODE_ENV !== 'test') loadEnvironment();
@@ -12,6 +16,22 @@ const config = readConfig(),
   logger = createLogger();
 const db = openDatabase(config.env.DATABASE_PATH),
   jobs = new Jobs(db, Date.now, config.env.WORKER_LEASE_MS);
+const indexes = new Indexes(db, jobs);
+const providers = new ProviderRegistry(config);
+const qdrant = config.qdrant
+  ? new QdrantStore({
+      url: config.qdrant.url,
+      apiKey: config.qdrant.apiKey,
+      collectionPrefix: config.qdrant.collectionPrefix,
+      timeoutMs: config.env.PROVIDER_TIMEOUT_MS,
+    })
+  : undefined;
+const indexBuilder = new IndexBuilder({
+  indexes,
+  providers,
+  qdrant,
+  embedBatchSize: config.env.EMBED_BATCH_SIZE,
+});
 const controller = new AbortController();
 function stop() {
   controller.abort();
@@ -22,9 +42,11 @@ process.once('SIGINT', stop);
 const options = {
   directory: blobDirectory(config),
   cloud: new CloudParser(
-    config.legacy.llamaParseBaseUrl,
-    config.legacy.llamaParseApiKey,
+    config.parser.llamaParseBaseUrl,
+    config.parser.llamaParseApiKey,
   ),
+  indexes,
+  indexBuilder,
   signal: controller.signal,
   logger,
 };

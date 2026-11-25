@@ -1,6 +1,8 @@
 import type { Request, Response } from 'express';
-import type { OpenAIClient } from '../lib/openaiClient.js';
-import type { QdrantClient } from '../lib/qdrantClient.js';
+import { generateGroundedAnswer } from '../providers/answer.js';
+import type { ChatProvider } from '../providers/types.js';
+import type { QdrantStore } from '../retrieval/qdrant.js';
+import type { LegacyEmbedder } from './embeddings.js';
 
 interface AnswerRequestBody {
   pipelineId: string;
@@ -12,38 +14,20 @@ interface AnswerRequestBody {
   embeddingModel?: string;
 }
 
-const buildAnswerPrompt = (question: string, contextSnippets: string[]) => {
-  const context = contextSnippets.length
-    ? contextSnippets
-        .map((snippet, index) => `Context ${index + 1}:\n${snippet}`)
-        .join('\n\n')
-    : 'No relevant context was retrieved. Reason from prior knowledge if possible.';
-
-  return [
-    {
-      role: 'system' as const,
-      content:
-        'You are an assistant that answers questions using the provided context. ' +
-        'Respond with a concise answer grounded in the context. If the context does not contain the answer, say that explicitly.',
-    },
-    {
-      role: 'user' as const,
-      content: [
-        'Context:',
-        context,
-        '',
-        `Question: ${question}`,
-        '',
-        'Answer:',
-      ].join('\n'),
-    },
-  ];
-};
+export interface LegacyAnswerDeps extends LegacyEmbedder {
+  resolveChat(model?: string): {
+    profile: { model: string };
+    provider: ChatProvider;
+  };
+}
 
 export const createAnswerHandler =
   (
-    openai: Pick<OpenAIClient, 'createEmbeddings' | 'chatCompletion'>,
-    qdrant: QdrantClient,
+    deps: LegacyAnswerDeps,
+    qdrant: Pick<
+      QdrantStore,
+      'collectionForLegacyPipeline' | 'searchLegacyPipeline'
+    >,
   ) =>
   async (req: Request<unknown, unknown, AnswerRequestBody>, res: Response) => {
     if (
@@ -74,43 +58,63 @@ export const createAnswerHandler =
 
     try {
       const startedAt = Date.now();
-      const { vectors } = await openai.createEmbeddings([question], {
-        model: normalizedEmbeddingModel,
-      });
+      const { vectors } = await deps.embed(
+        [question],
+        normalizedEmbeddingModel,
+      );
       if (!vectors.length) {
         throw new Error('Embedding API returned no vectors.');
       }
 
       const vectorSize = vectors[0].length;
-      const targetCollection = qdrant.collectionNameForPipeline(
+      const targetCollection = qdrant.collectionForLegacyPipeline(
         vectorSize,
         normalizedPipelineId,
       );
 
-      const matches = await qdrant.search(
+      const matches = await qdrant.searchLegacyPipeline(
+        targetCollection,
         vectors[0],
         Math.max(1, Math.min(20, topK)),
-        { pipelineId: normalizedPipelineId },
-        targetCollection,
+        normalizedPipelineId,
       );
 
-      const contextSnippets = matches
-        .map((match) => String(match.payload?.text ?? '').trim())
-        .filter(Boolean)
-        .slice(0, topK);
-
-      const messages = buildAnswerPrompt(question, contextSnippets);
-      const completion = await openai.chatCompletion(messages, {
-        model: model?.trim() || undefined,
+      const { profile, provider } = deps.resolveChat(
+        model?.trim() || undefined,
+      );
+      const grounded = await generateGroundedAnswer({
+        question,
+        items: matches.slice(0, topK).map((match) => ({
+          chunkId: String(match.payload?.chunkId ?? match.id),
+          documentId: String(match.payload?.documentId ?? ''),
+          documentName: String(match.payload?.documentName ?? 'document'),
+          page:
+            typeof match.payload?.page === 'number' && match.payload.page > 0
+              ? match.payload.page
+              : 1,
+          start: 0,
+          end: String(match.payload?.text ?? '').length,
+          content: String(match.payload?.text ?? ''),
+        })),
+        provider,
+        model: profile.model,
         temperature: req.body.temperature,
         maxTokens: req.body.maxTokens,
       });
-      const latencyMs = Date.now() - startedAt;
 
+      const latencyMs = Date.now() - startedAt;
       res.json({
-        answer: completion.content,
+        answer: grounded.answer,
+        abstained: grounded.abstained,
+        citations: grounded.citations,
         matches,
-        usage: completion.usage,
+        usage: grounded.usage
+          ? {
+              promptTokens: grounded.usage.inputTokens,
+              completionTokens: grounded.usage.outputTokens,
+              totalTokens: grounded.usage.totalTokens,
+            }
+          : undefined,
         latencyMs,
         collection: targetCollection,
         vectorSize,

@@ -282,6 +282,16 @@ function DocumentProgress({
           {job.message && ` · ${job.message}`}
         </p>
       )}
+      {job &&
+        ['queued', 'running', 'cancellation_requested'].includes(job.state) &&
+        !job.workerOnline && (
+          <p
+            role="alert"
+            className="text-sm text-amber-700 dark:text-amber-300"
+          >
+            No worker is running — start it with npm run dev:worker
+          </p>
+        )}
       <div className="flex flex-wrap gap-1">
         {doc.jobId &&
           (!job ||

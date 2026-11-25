@@ -58,6 +58,9 @@ function PipelineEditor({
   );
   const fixedTemperature =
     answerProfile && !answerProfile.options.includes('temperature');
+  const maxTemperature = fixedTemperature
+    ? 1
+    : (answerProfile?.capabilities.maxTemperature ?? 2);
   const selectProfile = (
     role: c.Role,
     stage: 'llm' | 'judge' | 'embedding',
@@ -240,7 +243,7 @@ function PipelineEditor({
                   type="number"
                   disabled={fixedTemperature && config.llm.temperature === 1}
                   min={fixedTemperature ? 1 : 0}
-                  max={fixedTemperature ? 1 : 2}
+                  max={maxTemperature}
                   step={0.1}
                   value={config.llm.temperature}
                   onChange={(e) =>

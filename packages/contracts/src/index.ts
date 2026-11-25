@@ -96,6 +96,8 @@ export type Task = z.infer<typeof task>;
 
 export const parser = z.enum(['local', 'llama-parse']);
 export type Parser = z.infer<typeof parser>;
+export const jobKind = z.enum(['parse', 'index']);
+export type JobKind = z.infer<typeof jobKind>;
 export const jobState = z.enum([
   'queued',
   'running',
@@ -106,14 +108,17 @@ export const jobState = z.enum([
 ]);
 export const job = z.strictObject({
   id,
-  versionId: id,
-  parser,
+  kind: jobKind.default('parse'),
+  versionId: id.nullable(),
+  parser: parser.nullable(),
+  generationId: id.nullable().default(null),
   state: jobState,
   stage: z.string(),
   attempt: z.int().nonnegative(),
   message: z.string().nullable(),
   parentId: id.nullable(),
   artifactId: z.string().nullable(),
+  workerOnline: z.boolean(),
 });
 export type Job = z.infer<typeof job>;
 export const jobEvent = job
@@ -172,17 +177,38 @@ export const csvPreview = z.strictObject({
 });
 export const role = z.enum(['embedding', 'chat', 'judge', 'rerank']);
 export type Role = z.infer<typeof role>;
+export const providerKind = z.enum([
+  'openai',
+  'openai-compatible',
+  'anthropic',
+  'http',
+]);
+export type ProviderKind = z.infer<typeof providerKind>;
+export const providerCapabilities = z.strictObject({
+  chat: z.boolean(),
+  embeddings: z.boolean(),
+  rerank: z.boolean(),
+  structuredOutput: z.boolean(),
+  temperature: z.boolean(),
+  maxTemperature: z.number().min(0).max(2).nullable(),
+  maxTokens: z.boolean(),
+  requiresMaxTokens: z.boolean(),
+});
+export type ProviderCapabilities = z.infer<typeof providerCapabilities>;
 export const profile = z.strictObject({
   role,
   name,
   model: name,
-  options: z.array(z.enum(['temperature', 'maxTokens'])),
-  provider: z.enum(['openai', 'openai-compatible', 'anthropic', 'http']),
+  options: z.array(z.enum(['temperature', 'maxTokens', 'structuredOutput'])),
+  provider: providerKind,
+  capabilities: providerCapabilities,
 });
+export type Profile = z.infer<typeof profile>;
 export const capabilities = z.strictObject({
   profiles: z.array(profile),
   cloudParser: z.boolean(),
   denseStore: z.boolean(),
+  workerOnline: z.boolean(),
 });
 export type Capabilities = z.infer<typeof capabilities>;
 const profileRef = z.strictObject({
@@ -218,6 +244,15 @@ export const chunkRow = z.strictObject({
   page: z.int(),
   content: z.string(),
 });
+export const retrievalMode = z.enum(['keyword', 'dense', 'hybrid']);
+export type RetrievalMode = z.infer<typeof retrievalMode>;
+export const rerankFailurePolicy = z.enum(['fail', 'fallback']);
+export type RerankFailurePolicy = z.infer<typeof rerankFailurePolicy>;
+export const fusionWeights = z.strictObject({
+  keyword: z.number().positive().max(100),
+  dense: z.number().positive().max(100),
+});
+export type FusionWeights = z.infer<typeof fusionWeights>;
 export const pipelineConfig = z.strictObject({
   schemaVersion: z.literal(1).default(1),
   parsing: z
@@ -231,13 +266,25 @@ export const pipelineConfig = z.strictObject({
   embedding: profileRef.default({ model: '' }),
   retriever: z
     .strictObject({
+      mode: retrievalMode.default('keyword'),
       topK: z.int().min(1).max(20),
-      deduplicate: z.literal(false),
+      candidateDepth: z.int().min(1).max(100).optional(),
+      fusionWeights: fusionWeights.default({ keyword: 1, dense: 1 }),
+      deduplicate: z.boolean().default(false),
     })
-    .default({ topK: 5, deduplicate: false }),
+    .default({
+      mode: 'keyword',
+      topK: 5,
+      fusionWeights: { keyword: 1, dense: 1 },
+      deduplicate: false,
+    }),
   reranker: z
-    .strictObject({ enabled: z.literal(false), model: z.literal('') })
-    .default({ enabled: false, model: '' }),
+    .strictObject({
+      enabled: z.boolean().default(false),
+      model: name.or(z.literal('')).default(''),
+      failurePolicy: rerankFailurePolicy.default('fail'),
+    })
+    .default({ enabled: false, model: '', failurePolicy: 'fail' }),
   llm: profileRef
     .extend({
       temperature: z.number().min(0).max(2),
@@ -262,8 +309,202 @@ export const pipeline = summary.extend({
   hash: z.string().length(64),
 });
 export type PipelineInput = z.infer<typeof pipelineInput>;
+export type PipelineInputRaw = z.input<typeof pipelineInput>;
+export type PipelinePatchRaw = z.input<typeof pipelinePatch>;
 export type SavedPipeline = z.infer<typeof pipeline>;
 export type PipelineConfig = z.infer<typeof pipelineConfig>;
+
+export const metadataFilters = z
+  .strictObject({
+    documentIds: z.array(id).max(100).optional(),
+    documentNames: z.array(name).max(100).optional(),
+    mimeTypes: z.array(z.string().trim().min(1).max(120)).max(20).optional(),
+    pageMin: z.int().positive().optional(),
+    pageMax: z.int().positive().optional(),
+  })
+  .refine(
+    (f) =>
+      f.pageMin === undefined ||
+      f.pageMax === undefined ||
+      f.pageMin <= f.pageMax,
+    'pageMin must be less than or equal to pageMax.',
+  );
+export type MetadataFilters = z.infer<typeof metadataFilters>;
+
+export const indexState = z.enum(['building', 'ready', 'failed']);
+export type IndexState = z.infer<typeof indexState>;
+export const createIndexRequest = z.strictObject({
+  datasetId: id,
+  datasetRevision: revision.optional(),
+  mode: retrievalMode.default('keyword'),
+  chunking: chunkOptions.default({
+    strategy: 'character-window',
+    chunkSize: 300,
+    overlap: 20,
+  }),
+  embeddingModel: name.or(z.literal('')).default(''),
+  forceRebuild: z.boolean().default(false),
+});
+export type CreateIndexRequest = z.infer<typeof createIndexRequest>;
+export const indexGeneration = z.strictObject({
+  id,
+  datasetId: id,
+  datasetRevision: revision,
+  fingerprint: z.string().length(64),
+  state: indexState,
+  mode: retrievalMode,
+  chunking: chunkOptions,
+  embeddingProvider: z.enum(['openai', 'openai-compatible']).nullable(),
+  embeddingModel: z.string().nullable(),
+  embeddingDimensions: z.int().positive().nullable(),
+  chunkCount: z.int().nonnegative(),
+  errorMessage: z.string().nullable(),
+  createdAt: z.iso.datetime(),
+  readyAt: z.iso.datetime().nullable(),
+  jobId: id.nullable(),
+});
+export type IndexGeneration = z.infer<typeof indexGeneration>;
+export const createIndexResult = z.strictObject({
+  index: indexGeneration,
+  jobId: id.nullable(),
+  reused: z.boolean(),
+});
+export type CreateIndexResult = z.infer<typeof createIndexResult>;
+export const generationChunk = z.strictObject({
+  chunkId: id,
+  documentId: id,
+  documentVersionId: id,
+  documentName: name,
+  mimeType: z.string(),
+  ordinal: z.int().nonnegative(),
+  start: z.int().nonnegative(),
+  end: z.int().nonnegative(),
+  page: z.int().positive(),
+  contentHash: z.string().length(64),
+  content: z.string(),
+});
+export type GenerationChunk = z.infer<typeof generationChunk>;
+
+export const indexSearchRequest = z.strictObject({
+  query: z.string().trim().min(1).max(4000),
+  mode: retrievalMode.optional(),
+  topK: z.int().min(1).max(50).default(5),
+  candidateDepth: z.int().min(1).max(100).optional(),
+  fusionWeights: fusionWeights.default({ keyword: 1, dense: 1 }),
+  filters: metadataFilters.optional(),
+  reranker: z
+    .strictObject({
+      enabled: z.boolean().default(false),
+      model: name.or(z.literal('')).default(''),
+      failurePolicy: rerankFailurePolicy.default('fail'),
+    })
+    .default({ enabled: false, model: '', failurePolicy: 'fail' }),
+});
+export type IndexSearchRequest = z.infer<typeof indexSearchRequest>;
+export const providerUsage = z.strictObject({
+  inputTokens: z.int().nonnegative(),
+  outputTokens: z.int().nonnegative(),
+  totalTokens: z.int().nonnegative(),
+  cacheReadTokens: z.int().nonnegative().optional(),
+  cacheCreationTokens: z.int().nonnegative().optional(),
+});
+export type ProviderUsage = z.infer<typeof providerUsage>;
+export const retrievedTraceItem = z.strictObject({
+  chunkId: id,
+  documentId: id,
+  documentVersionId: id,
+  documentName: name,
+  mimeType: z.string(),
+  ordinal: z.int().nonnegative(),
+  start: z.int().nonnegative(),
+  end: z.int().nonnegative(),
+  page: z.int().positive(),
+  content: z.string(),
+  keywordRank: z.int().positive().nullable(),
+  keywordScore: z.number().nullable(),
+  denseRank: z.int().positive().nullable(),
+  denseScore: z.number().nullable(),
+  fusedRank: z.int().positive().nullable(),
+  fusedScore: z.number().nullable(),
+  rerankRank: z.int().positive().nullable(),
+  rerankScore: z.number().nullable(),
+  finalRank: z.int().positive(),
+  finalScore: z.number(),
+});
+export type RetrievedTraceItem = z.infer<typeof retrievedTraceItem>;
+export const indexSearchResult = z.strictObject({
+  generationId: id,
+  datasetId: id,
+  datasetRevision: revision,
+  mode: retrievalMode,
+  query: z.string(),
+  topK: z.int().positive(),
+  candidateDepth: z.int().positive(),
+  filters: metadataFilters.nullable(),
+  items: z.array(retrievedTraceItem),
+  stages: z.strictObject({
+    keywordCount: z.int().nonnegative(),
+    denseCount: z.int().nonnegative(),
+    fusedCount: z.int().nonnegative(),
+    reranked: z.boolean(),
+    rerankStatus: z.enum(['skipped', 'applied', 'fallback']),
+    rerankError: z.string().nullable(),
+    timingsMs: z.strictObject({
+      keyword: z.number().nonnegative().optional(),
+      embed: z.number().nonnegative().optional(),
+      dense: z.number().nonnegative().optional(),
+      rerank: z.number().nonnegative().optional(),
+      total: z.number().nonnegative(),
+    }),
+  }),
+  usage: z
+    .strictObject({
+      embedding: providerUsage.optional(),
+      rerank: providerUsage.optional(),
+    })
+    .optional(),
+});
+export type IndexSearchResult = z.infer<typeof indexSearchResult>;
+
+export const recordedContextItem = z.strictObject({
+  index: z.int().positive(),
+  chunkId: id,
+  documentId: id,
+  documentName: name,
+  page: z.int().positive(),
+  start: z.int().nonnegative(),
+  end: z.int().nonnegative(),
+  content: z.string(),
+  truncated: z.boolean(),
+});
+export type RecordedContextItem = z.infer<typeof recordedContextItem>;
+export const indexAnswerRequest = indexSearchRequest.extend({
+  model: name.or(z.literal('')).default(''),
+  temperature: z.number().min(0).max(2).optional(),
+  maxTokens: z.int().min(1).max(32768).default(500),
+  contextBudgetChars: z.int().min(200).max(64000).default(12000),
+});
+export type IndexAnswerRequest = z.infer<typeof indexAnswerRequest>;
+export const indexAnswerResult = z.strictObject({
+  answer: z.string(),
+  abstained: z.boolean(),
+  citations: z.array(id),
+  invalidCitations: z.array(z.string()),
+  context: z.array(recordedContextItem),
+  retrieval: indexSearchResult,
+  model: z.string(),
+  provider: providerKind,
+  requestId: z.string().nullable(),
+  usage: providerUsage.optional(),
+  effectiveParams: z.strictObject({
+    temperature: z.number().optional(),
+    maxTokens: z.int().positive().optional(),
+    structuredOutput: z.boolean(),
+  }),
+  latencyMs: z.number().nonnegative(),
+});
+export type IndexAnswerResult = z.infer<typeof indexAnswerResult>;
+
 export const health = z.strictObject({ status: z.literal('ok') });
 export { z };
 export const replaceLabels = z.strictObject({

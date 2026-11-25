@@ -1,31 +1,68 @@
 import { beforeEach, expect, it, vi } from 'vitest';
-import { QdrantClient } from '../backend/src/lib/qdrantClient';
+import type { ChatProvider, ChatResult } from '../backend/src/providers/types';
+import {
+  QdrantStore,
+  type QdrantClientLike,
+} from '../backend/src/retrieval/qdrant';
 import { createAnswerHandler } from '../backend/src/routes/answer';
 import { createEmbeddingsHandler } from '../backend/src/routes/embeddings';
 import { createSearchHandler } from '../backend/src/routes/search';
 import { invoke } from './handler';
 
-const { transport } = vi.hoisted(() => ({ transport: vi.fn() }));
-vi.mock('node-fetch', () => ({ default: transport }));
+const client: { [K in keyof QdrantClientLike]: ReturnType<typeof vi.fn> } = {
+  collectionExists: vi.fn(),
+  getCollection: vi.fn(),
+  createCollection: vi.fn(),
+  createPayloadIndex: vi.fn(),
+  upsert: vi.fn(),
+  query: vi.fn(),
+  count: vi.fn(),
+  delete: vi.fn(),
+  deleteCollection: vi.fn(),
+};
 
-const qdrant = new QdrantClient({
-  qdrantUrl: 'http://qdrant.invalid',
-  qdrantCollection: 'fixture',
-  qdrantCollections: {},
-  openaiApiKey: 'unused',
-  openaiEmbeddingModel: 'fixture',
-  openaiChatModel: 'fixture',
-  llamaParseBaseUrl: 'http://parser.invalid',
+const qdrant = new QdrantStore({
+  url: 'http://qdrant.invalid',
+  collectionPrefix: 'fixture',
+  client: client as unknown as QdrantClientLike,
 });
+
 const vector = [1, 0];
-const createEmbeddings = vi.fn();
-const chatCompletion = vi.fn();
-const openai = { createEmbeddings, chatCompletion };
-const chunksHandler = createEmbeddingsHandler(openai, qdrant);
-const searchHandler = createSearchHandler(openai, qdrant);
-const answerHandler = createAnswerHandler(openai, qdrant);
+const embed = vi.fn();
+const chat = vi.fn();
+const chatProvider: ChatProvider = {
+  kind: 'openai',
+  capabilities: {
+    chat: true,
+    embeddings: false,
+    rerank: false,
+    structuredOutput: true,
+    temperature: true,
+    maxTemperature: 2,
+    maxTokens: true,
+    requiresMaxTokens: false,
+  },
+  chat,
+};
+
+const chunksHandler = createEmbeddingsHandler({ embed }, qdrant);
+const searchHandler = createSearchHandler({ embed }, qdrant);
+const answerHandler = createAnswerHandler(
+  {
+    embed,
+    resolveChat: () => ({
+      profile: { model: 'fixture-chat' },
+      provider: chatProvider,
+    }),
+  },
+  qdrant,
+);
+
 const pipelineId = 'Pipeline A';
-const collection = qdrant.collectionNameForPipeline(vector.length, pipelineId);
+const collection = qdrant.collectionForLegacyPipeline(
+  vector.length,
+  pipelineId,
+);
 const body = {
   pipelineId,
   question: 'Where?',
@@ -33,38 +70,73 @@ const body = {
   chunks: [{ id: 'chunk', text: 'Here.' }],
 };
 const filter = { must: [{ key: 'pipelineId', match: { value: pipelineId } }] };
+
 beforeEach(() => {
   vi.resetAllMocks();
-  createEmbeddings.mockResolvedValue({ vectors: [vector] });
+  embed.mockResolvedValue({ vectors: [vector] });
+  client.collectionExists.mockResolvedValue({ exists: false });
+  client.createCollection.mockResolvedValue(true);
+  client.createPayloadIndex.mockResolvedValue({ status: 'completed' });
+  client.delete.mockResolvedValue({ status: 'completed' });
+  client.upsert.mockResolvedValue({ status: 'completed' });
 });
 
 it.each([searchHandler, answerHandler])(
   'stops on missing index without retrying unfiltered or generating an answer',
   async (handler) => {
-    transport.mockResolvedValue(
-      new Response('Index required but not found', { status: 400 }),
-    );
+    client.query.mockRejectedValue(new Error('Index required but not found'));
     const result = await invoke(handler, body);
     expect(result.status).toBe(500);
-    expect(transport).toHaveBeenCalledTimes(1);
-    const [url, options] = transport.mock.calls[0];
-    expect(url).toBe(
-      `http://qdrant.invalid/collections/${collection}/points/search`,
-    );
-    expect(JSON.parse(options.body)).toMatchObject({
-      filter,
-      vector,
+    expect(client.query).toHaveBeenCalledTimes(1);
+    expect(client.query).toHaveBeenCalledWith(collection, {
+      query: vector,
       limit: 1,
+      filter,
+      with_payload: true,
+      with_vector: false,
     });
-    expect(chatCompletion).not.toHaveBeenCalled();
+    expect(chat).not.toHaveBeenCalled();
   },
 );
 
-it('rejects an empty scope before any transport call', async () => {
+it('stops on missing index in generation search without retrying unfiltered', async () => {
+  client.query.mockRejectedValue(new Error('Index required but not found'));
   await expect(
-    qdrant.search(vector, 1, { pipelineId: '' }, collection),
+    qdrant.searchGeneration('fixture-d2', vector, 5, {
+      generationId: 'gen-1',
+      datasetId: 'ds-1',
+      datasetRevision: 1,
+    }),
+  ).rejects.toThrow('Index required but not found');
+  expect(client.query).toHaveBeenCalledTimes(1);
+  expect(client.query.mock.calls[0][1].filter).toEqual({
+    must: [
+      { key: 'generationId', match: { value: 'gen-1' } },
+      { key: 'datasetId', match: { value: 'ds-1' } },
+      { key: 'datasetRevision', match: { value: 1 } },
+    ],
+  });
+});
+
+it('rejects an empty scope before any client call', async () => {
+  await expect(
+    qdrant.searchLegacyPipeline(collection, vector, 1, ''),
   ).rejects.toThrow('filter is required');
-  expect(transport).not.toHaveBeenCalled();
+  await expect(
+    qdrant.searchGeneration('fixture-d2', vector, 1, {
+      generationId: '',
+      datasetId: 'ds-1',
+      datasetRevision: 1,
+    }),
+  ).rejects.toThrow('scope are required');
+  await expect(
+    qdrant.searchGeneration('fixture-d2', vector, 1, {
+      generationId: 'gen-1',
+      datasetId: 'ds-1',
+      datasetRevision: 0,
+    }),
+  ).rejects.toThrow('scope are required');
+  expect(client.query).not.toHaveBeenCalled();
 });
 
 it('isolates colliding sanitized names, long IDs, and dimensions', () => {
@@ -77,10 +149,16 @@ it('isolates colliding sanitized names, long IDs, and dimensions', () => {
     [3, pipelineId],
   ] as const;
   const names = scopes.map(([dimension, id]) =>
-    qdrant.collectionNameForPipeline(dimension, id),
+    qdrant.collectionForLegacyPipeline(dimension, id),
   );
   expect(new Set(names).size).toBe(scopes.length);
   expect(names.every((name) => name.length <= 64)).toBe(true);
+
+  const dimNames = [2, 384, 1536, 3072].map((d) =>
+    qdrant.collectionForDimension(d),
+  );
+  expect(new Set(dimNames).size).toBe(4);
+  expect(dimNames.every((name) => name.length <= 64)).toBe(true);
 });
 
 it.each([chunksHandler, searchHandler, answerHandler])(
@@ -94,24 +172,33 @@ it.each([chunksHandler, searchHandler, answerHandler])(
         400,
       );
     }
-    expect(createEmbeddings).not.toHaveBeenCalled();
-    expect(transport).not.toHaveBeenCalled();
+    expect(embed).not.toHaveBeenCalled();
+    expect(client.query).not.toHaveBeenCalled();
+    expect(client.upsert).not.toHaveBeenCalled();
   },
 );
 
-it.each(['pipelineId', 'documentId', 'text', 'chunkId'])(
-  'rejects reserved metadata %s',
-  async (key) => {
-    const chunks = [{ ...body.chunks[0], metadata: { [key]: 'override' } }];
-    expect((await invoke(chunksHandler, { ...body, chunks })).status).toBe(400);
-    expect(transport).not.toHaveBeenCalled();
-    expect(createEmbeddings).not.toHaveBeenCalled();
-  },
-);
+it.each([
+  'pipelineId',
+  'documentId',
+  'text',
+  'chunkId',
+  'generationId',
+  'datasetId',
+  'datasetRevision',
+  'documentVersionId',
+  'documentName',
+  'mimeType',
+  'page',
+])('rejects reserved metadata %s', async (key) => {
+  const chunks = [{ ...body.chunks[0], metadata: { [key]: 'override' } }];
+  expect((await invoke(chunksHandler, { ...body, chunks })).status).toBe(400);
+  expect(client.upsert).not.toHaveBeenCalled();
+  expect(embed).not.toHaveBeenCalled();
+});
 
 it('writes each document ID explicitly and replaces only the scoped points', async () => {
-  createEmbeddings.mockResolvedValue({ vectors: [vector, vector] });
-  transport.mockResolvedValue(new Response());
+  embed.mockResolvedValue({ vectors: [vector, vector] });
   const chunks = [
     { id: 'a', text: 'First', metadata: { ordinal: 0 } },
     { id: 'b', text: 'Second', documentId: 'two' },
@@ -122,49 +209,57 @@ it('writes each document ID explicitly and replaces only the scoped points', asy
     chunks,
   });
   expect(result.body).toMatchObject({ collection, upserted: 2 });
-  const calls = transport.mock.calls.map(([url, options]) => ({
-    url,
-    method: options.method,
-    body: JSON.parse(options.body),
-  }));
+  expect(client.deleteCollection).not.toHaveBeenCalled();
+  expect(client.delete).toHaveBeenCalledWith(collection, {
+    wait: true,
+    filter,
+  });
+  expect(client.upsert).toHaveBeenCalledTimes(1);
   expect(
-    calls.every((call) =>
-      call.url.startsWith(`http://qdrant.invalid/collections/${collection}`),
+    client.upsert.mock.calls[0][1].points.map(
+      (point: { payload: unknown }) => point.payload,
     ),
-  ).toBe(true);
-  expect(calls.map((call) => call.method)).not.toContain('DELETE');
-  expect(
-    calls.find((call) => call.url.includes('/points/delete'))?.body,
-  ).toEqual({ filter });
-  expect(
-    calls
-      .at(-1)
-      ?.body.points.map((point: { payload: unknown }) => point.payload),
   ).toEqual([
     { pipelineId, documentId: 'one', chunkId: 'a', text: 'First', ordinal: 0 },
     { pipelineId, documentId: 'two', chunkId: 'b', text: 'Second' },
   ]);
 });
 
-it('uses retrieved text for generation and returns the retrieved matches', async () => {
-  const match = { id: 'chunk', score: 0.9, payload: { text: 'Here.' } };
-  transport.mockResolvedValue(Response.json({ result: [match] }));
-  chatCompletion.mockResolvedValue({ content: 'Here.' });
+it('uses retrieved text for generation and returns the retrieved matches and citations', async () => {
+  const match = {
+    id: 'chunk',
+    score: 0.9,
+    payload: { chunkId: 'chunk', text: 'Here.' },
+  };
+  client.query.mockResolvedValue({ points: [match] });
+  const chatResponse: ChatResult = {
+    content: JSON.stringify({
+      answer: 'Here.',
+      citations: ['chunk'],
+      abstained: false,
+    }),
+    model: 'fixture-chat',
+    provider: 'openai',
+    requestId: 'req-1',
+    effectiveParams: { structuredOutput: true },
+  };
+  chat.mockResolvedValue(chatResponse);
   const result = await invoke(answerHandler, body);
   expect(result.body).toMatchObject({
     answer: 'Here.',
+    abstained: false,
+    citations: ['chunk'],
     matches: [match],
     collection,
   });
-  expect(chatCompletion.mock.calls[0][0][1].content).toContain(
-    'Context 1:\nHere.',
-  );
+  expect(chat.mock.calls[0][0].messages[1].content).toContain('Here.');
 });
 
 it('validates all vector dimensions before replacing scoped points', async () => {
-  createEmbeddings.mockResolvedValue({ vectors: [[1, 0], [1]] });
+  embed.mockResolvedValue({ vectors: [[1, 0], [1]] });
   const chunks = [body.chunks[0], { id: 'second', text: 'Second.' }];
   const result = await invoke(chunksHandler, { ...body, chunks });
   expect(result.status).toBe(500);
-  expect(transport).not.toHaveBeenCalled();
+  expect(client.delete).not.toHaveBeenCalled();
+  expect(client.upsert).not.toHaveBeenCalled();
 });

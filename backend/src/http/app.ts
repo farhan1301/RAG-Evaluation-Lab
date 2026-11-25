@@ -4,16 +4,26 @@ import { trace, SpanStatusCode } from '@opentelemetry/api';
 import type { Logger } from 'pino';
 import type { Config } from '../config/env.js';
 import type { Datasets } from '../db/datasets.js';
+import { Indexes } from '../db/indexes.js';
 import type { Pipelines } from '../db/pipelines.js';
 import { ApiError } from '../errors.js';
+import { ProviderError } from '../providers/errors.js';
+import { ProviderRegistry } from '../providers/registry.js';
+import { QdrantStore } from '../retrieval/qdrant.js';
+import { RetrievalService } from '../retrieval/service.js';
+import { indexesRouter } from './indexes.js';
+import { legacyRouter } from './legacy.js';
 import { definitionsRouter, InputError } from './routes.js';
 import { uploadsRouter } from './uploads.js';
-import { legacyRouter } from './legacy.js';
 
 interface Dependencies {
   config: Config;
   datasets: Datasets;
   pipelines: Pipelines;
+  indexes?: Indexes;
+  providers?: ProviderRegistry;
+  qdrant?: QdrantStore;
+  retrieval?: RetrievalService;
   logger: Logger;
   ready: () => boolean | Promise<boolean>;
   now?: () => number;
@@ -22,10 +32,30 @@ export function createApp({
   config,
   datasets,
   pipelines,
+  indexes: providedIndexes,
+  providers: providedProviders,
+  qdrant: providedQdrant,
+  retrieval: providedRetrieval,
   logger,
   ready,
   now = Date.now,
 }: Dependencies) {
+  const indexes =
+    providedIndexes ?? new Indexes(datasets.database, datasets.jobs, now);
+  const providers = providedProviders ?? new ProviderRegistry(config);
+  const qdrant =
+    providedQdrant ??
+    (config.qdrant
+      ? new QdrantStore({
+          url: config.qdrant.url,
+          apiKey: config.qdrant.apiKey,
+          collectionPrefix: config.qdrant.collectionPrefix,
+          timeoutMs: config.env.PROVIDER_TIMEOUT_MS,
+        })
+      : undefined);
+  const retrieval =
+    providedRetrieval ??
+    new RetrievalService({ indexes, providers, qdrant, now });
   const app = express();
   const { env } = config;
   const clients = new Map<string, number>();
@@ -109,7 +139,9 @@ export function createApp({
       throw new ApiError(503, 'not_ready', 'Service is not ready.');
     res.json({ status: 'ok' });
   });
-  app.get('/api/v1/capabilities', (_req, res) => res.json(config.capabilities));
+  app.get('/api/v1/capabilities', (_req, res) =>
+    res.json({ ...config.capabilities, workerOnline: datasets.jobs.online() }),
+  );
   app.use('/api/v1', uploadsRouter(datasets, config));
   const regular = express.json({ limit: env.JSON_LIMIT_BYTES });
   const documents = express.json({ limit: env.DOCUMENT_LIMIT_BYTES });
@@ -130,9 +162,10 @@ export function createApp({
   });
   app.use(
     '/api/v1',
-    definitionsRouter(datasets, pipelines, config.capabilities),
+    definitionsRouter(datasets, pipelines, config.capabilities, indexes),
   );
-  app.use('/api', legacyRouter(config));
+  app.use('/api/v1', indexesRouter(indexes, retrieval, providers, config));
+  app.use('/api', legacyRouter(config, providers, qdrant));
   app.use(() => {
     throw new ApiError(404, 'not_found', 'Route not found.');
   });
@@ -144,6 +177,7 @@ export function createApp({
       'Request could not be completed.',
     );
     if (err instanceof ApiError) problem = err;
+    else if (err instanceof ProviderError) problem = err.toApiError();
     else if (err.type === 'entity.too.large')
       problem = new ApiError(413, 'size_limit', 'Request body is too large.');
     else if (err.status === 415)
