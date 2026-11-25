@@ -1,5 +1,5 @@
 import { setImmediate } from 'node:timers/promises';
-import type { GenerationChunk } from '@rag-eval/contracts';
+import type { GenerationChunk, ProviderUsage } from '@rag-eval/contracts';
 import type { Indexes } from '../db/indexes.js';
 import { ApiError } from '../errors.js';
 import { chunkArtifact } from '../ingestion/chunks.js';
@@ -15,12 +15,24 @@ export interface IndexBuilderOptions {
   qdrant?: QdrantStore;
   embedBatchSize?: number;
   qdrantBatchSize?: number;
+  now?: () => number;
+}
+
+export interface EmbedCallAudit {
+  provider: 'openai' | 'openai-compatible';
+  model: string;
+  requestIds: string[];
+  usage?: ProviderUsage;
+  latencyMs: number;
+  status: 'succeeded' | 'failed' | 'timeout' | 'cancelled';
+  errorCode: string | null;
 }
 
 export interface BuildHooks {
   signal?: AbortSignal;
   guard?: () => void;
   checkpoint?: (stage: string) => void;
+  onEmbedCall?: (audit: EmbedCallAudit) => void;
 }
 
 export class IndexBuilder {
@@ -29,6 +41,7 @@ export class IndexBuilder {
   private readonly qdrant?: QdrantStore;
   private readonly embedBatchSize: number;
   private readonly qdrantBatchSize: number;
+  private readonly now: () => number;
 
   constructor(options: IndexBuilderOptions) {
     this.indexes = options.indexes;
@@ -36,6 +49,7 @@ export class IndexBuilder {
     this.qdrant = options.qdrant;
     this.embedBatchSize = options.embedBatchSize ?? 64;
     this.qdrantBatchSize = options.qdrantBatchSize ?? 100;
+    this.now = options.now ?? Date.now;
   }
 
   async build(generationId: string, hooks: BuildHooks = {}) {
@@ -161,13 +175,40 @@ export class IndexBuilder {
       hooks.guard?.();
       hooks.checkpoint?.('embedding');
 
-      const embedded = await provider.embed({
-        model: profile.model,
-        inputs: allChunks.map((c) => c.content),
-        expectedDimensions: profile.expectedDimensions,
-        batchSize: this.embedBatchSize,
-        signal: hooks.signal,
-      });
+      const embedStart = this.now();
+      let embedded: Awaited<ReturnType<typeof provider.embed>>;
+      try {
+        embedded = await provider.embed({
+          model: profile.model,
+          inputs: allChunks.map((c) => c.content),
+          expectedDimensions: profile.expectedDimensions,
+          batchSize: this.embedBatchSize,
+          signal: hooks.signal,
+        });
+        hooks.onEmbedCall?.({
+          provider: embedded.provider,
+          model: embedded.model,
+          requestIds: embedded.requestIds,
+          usage: embedded.usage,
+          latencyMs: Math.max(0, this.now() - embedStart),
+          status: 'succeeded',
+          errorCode: null,
+        });
+      } catch (err) {
+        const isTimeout =
+          err instanceof ProviderError && err.code === 'timeout';
+        const isAborted = Boolean(hooks.signal?.aborted);
+        hooks.onEmbedCall?.({
+          provider: provider.kind,
+          model: profile.model,
+          requestIds: [],
+          latencyMs: Math.max(0, this.now() - embedStart),
+          status: isAborted ? 'cancelled' : isTimeout ? 'timeout' : 'failed',
+          errorCode:
+            err instanceof ProviderError ? err.code : 'upstream_failure',
+        });
+        throw err;
+      }
 
       if (
         embedded.vectors.length !== allChunks.length ||

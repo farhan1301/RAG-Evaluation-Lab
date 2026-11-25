@@ -1,9 +1,12 @@
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
   capabilities,
+  priceSchedule,
   profile,
   z,
   type Capabilities,
+  type PriceSchedule,
   type Profile,
   type ProviderCapabilities,
   type ProviderKind,
@@ -103,10 +106,16 @@ const envSchema = z
     LLAMA_CLOUD_BASE_URL: endpoint.default(
       'https://api.cloud.llamaindex.ai/api',
     ),
+    PRICE_SCHEDULE_JSON: z.string().optional(),
+    PRICE_SCHEDULE_PATH: z.string().min(1).optional(),
+    RUN_MAX_TOKENS: positive.max(100_000_000).optional(),
+    RUN_MAX_COST_USD: z.coerce.number().positive().finite().optional(),
   })
   .superRefine((env, ctx) => {
     const require = (field: string, message: string) =>
       ctx.addIssue({ code: 'custom', path: [field], message });
+    if (env.PRICE_SCHEDULE_JSON && env.PRICE_SCHEDULE_PATH)
+      require('PRICE_SCHEDULE_JSON', 'Set either PRICE_SCHEDULE_JSON or PRICE_SCHEDULE_PATH, not both.');
     if (
       (env.OPENAI_CHAT_MODEL ||
         env.OPENAI_JUDGE_MODEL ||
@@ -408,9 +417,31 @@ export function readConfig(input: NodeJS.ProcessEnv = process.env) {
     ({ apiKey: _k, baseURL: _u, expectedDimensions: _d, ...safe }) => safe,
   );
   const llamaParseApiKey = env.LLAMA_CLOUD_API_KEY ?? env.LLAMA_PARSE_API_KEY;
+  let pricing: PriceSchedule = priceSchedule.parse({
+    version: 'unconfigured-v1',
+    currency: 'USD',
+    entries: [],
+  });
+  if (env.PRICE_SCHEDULE_JSON || env.PRICE_SCHEDULE_PATH) {
+    try {
+      const raw = env.PRICE_SCHEDULE_JSON
+        ? env.PRICE_SCHEDULE_JSON
+        : readFileSync(env.PRICE_SCHEDULE_PATH as string, 'utf8');
+      pricing = priceSchedule.parse(JSON.parse(raw));
+    } catch {
+      throw new Error(
+        `Invalid environment settings: ${env.PRICE_SCHEDULE_JSON ? 'PRICE_SCHEDULE_JSON' : 'PRICE_SCHEDULE_PATH'}`,
+      );
+    }
+  }
   return {
     env,
     providerProfiles,
+    pricing,
+    budgets: {
+      maxTokens: env.RUN_MAX_TOKENS ?? null,
+      maxCostUsd: env.RUN_MAX_COST_USD ?? null,
+    },
     capabilities: capabilities.parse({
       profiles,
       cloudParser: Boolean(llamaParseApiKey),

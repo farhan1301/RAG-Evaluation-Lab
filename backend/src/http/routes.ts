@@ -3,6 +3,7 @@ import * as c from '@rag-eval/contracts';
 import type { Datasets } from '../db/datasets.js';
 import type { Indexes } from '../db/indexes.js';
 import type { Pipelines } from '../db/pipelines.js';
+import type { Runs } from '../db/runs.js';
 import { parseTaskCsv } from '../ingestion/taskCsv.js';
 import { mediaType } from '../ingestion/blobs.js';
 import { validatePipelineCapabilities } from '../providers/registry.js';
@@ -56,6 +57,7 @@ export function definitionsRouter(
   pipelines: Pipelines,
   capabilities: c.Capabilities,
   indexes?: Indexes,
+  runs?: Runs,
 ) {
   const router = Router();
   for (const param of ['id', 'taskId', 'docId'])
@@ -272,6 +274,39 @@ export function definitionsRouter(
             'missing_capability',
             'The required embedding profile is unavailable.',
           );
+      }
+    }
+    if (previous.kind === 'run' && previous.runId && runs) {
+      const existingRun = runs.getRun(previous.runId);
+      for (const p of existingRun.pipelines) {
+        checkProfiles(p.config, capabilities);
+        if (existingRun.mode === 'full_rag') {
+          if (
+            !capabilities.profiles.some(
+              (pr) =>
+                pr.role === 'chat' &&
+                (!p.config.llm.model || pr.model === p.config.llm.model),
+            )
+          )
+            throw new ApiError(
+              422,
+              'missing_capability',
+              'The required chat profile is unavailable for retrying this run.',
+            );
+          if (
+            existingRun.snapshot.judgeEnabled &&
+            !capabilities.profiles.some(
+              (pr) =>
+                pr.role === 'judge' &&
+                (!p.config.judge.model || pr.model === p.config.judge.model),
+            )
+          )
+            throw new ApiError(
+              422,
+              'missing_capability',
+              'The required judge profile is unavailable for retrying this run.',
+            );
+        }
       }
     }
     const job = datasets.jobs.retry(req.params.id);

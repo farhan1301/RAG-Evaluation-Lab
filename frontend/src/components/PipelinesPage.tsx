@@ -14,6 +14,7 @@ import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Card, CardHeader, CardTitle, CardContent } from './ui/card';
 import { EditorActions } from './EditorActions';
+import { RetrievalPreviewPanel } from './RetrievalPreviewPanel';
 
 // Keep incomplete numeric edits recoverable. Saving still uses the strict wire contract.
 const form = c.pipelineInput.extend({
@@ -206,6 +207,25 @@ function PipelineEditor({
           <details open>
             <summary>Embedding and retrieval</summary>
             <div className="space-y-2 p-2">
+              <label className="block">
+                Retrieval mode{' '}
+                <select
+                  className="block rounded border p-2"
+                  value={config.retriever.mode}
+                  onChange={(e) =>
+                    update({
+                      retriever: {
+                        ...config.retriever,
+                        mode: c.retrievalMode.parse(e.target.value),
+                      },
+                    })
+                  }
+                >
+                  <option value="keyword">Keyword (FTS5 BM25 — offline)</option>
+                  <option value="dense">Dense (Qdrant cosine)</option>
+                  <option value="hybrid">Hybrid (RRF fusion)</option>
+                </select>
+              </label>
               {selectProfile('embedding', 'embedding')}
               <label htmlFor={`${saved.id}-top-k-results`} className="block">
                 Top-K results
@@ -225,10 +245,46 @@ function PipelineEditor({
                   }
                 />
               </label>
-              <p className="text-sm">
-                The current runner uses Qdrant dense retrieval. Reranking is
-                unavailable.
-              </p>
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={config.reranker.enabled}
+                  disabled={!profiles.some((p) => p.role === 'rerank')}
+                  onChange={(e) =>
+                    update({
+                      reranker: {
+                        ...config.reranker,
+                        enabled: e.target.checked,
+                      },
+                    })
+                  }
+                />
+                Enable HTTP reranker
+                {!profiles.some((p) => p.role === 'rerank') &&
+                  ' (configure RERANK_BASE_URL & RERANK_MODEL)'}
+              </label>
+              {config.reranker.enabled && (
+                <label className="block text-sm">
+                  Rerank failure policy{' '}
+                  <select
+                    className="block rounded border p-2"
+                    value={config.reranker.failurePolicy}
+                    onChange={(e) =>
+                      update({
+                        reranker: {
+                          ...config.reranker,
+                          failurePolicy: c.rerankFailurePolicy.parse(
+                            e.target.value,
+                          ),
+                        },
+                      })
+                    }
+                  >
+                    <option value="fail">Fail request</option>
+                    <option value="fallback">Fallback to pre-rerank</option>
+                  </select>
+                </label>
+              )}
             </div>
           </details>
           <details>
@@ -395,6 +451,7 @@ export function PipelinesPage() {
           <Link to="/experiments">Proceed to experiments</Link>
         </Button>
       )}
+      <RetrievalPreviewPanel />
     </div>
   );
 }

@@ -20,9 +20,11 @@ import {
 } from '../ingestion/chunks.js';
 
 const parseFields =
-  "id, 'parse' AS kind, version_id AS versionId, parser, NULL AS generationId, state, stage, attempt, message, parent_id AS parentId, artifact_id AS artifactId";
+  "id, 'parse' AS kind, version_id AS versionId, parser, NULL AS generationId, NULL AS runId, state, stage, attempt, message, parent_id AS parentId, artifact_id AS artifactId";
 const indexFields =
-  "id, 'index' AS kind, NULL AS versionId, NULL AS parser, generation_id AS generationId, state, stage, attempt, message, parent_id AS parentId, NULL AS artifactId";
+  "id, 'index' AS kind, NULL AS versionId, NULL AS parser, generation_id AS generationId, NULL AS runId, state, stage, attempt, message, parent_id AS parentId, NULL AS artifactId";
+const runFields =
+  "id, 'run' AS kind, NULL AS versionId, NULL AS parser, NULL AS generationId, run_id AS runId, state, stage, attempt, message, parent_id AS parentId, NULL AS artifactId";
 export interface Lease {
   id: string;
   token: number;
@@ -51,12 +53,21 @@ export class Jobs {
       .prepare(`SELECT ${indexFields} FROM index_jobs WHERE id=?`)
       .get(id);
     if (indexed) return this.parseRow(indexed);
+    const runRow = this.db
+      .prepare(`SELECT ${runFields} FROM run_jobs WHERE id=?`)
+      .get(id);
+    if (runRow) return this.parseRow(runRow);
     return missing();
   }
 
   events(id: string, after: number) {
     const found = this.get(id);
-    const table = found.kind === 'index' ? 'index_job_events' : 'job_events';
+    const table =
+      found.kind === 'index'
+        ? 'index_job_events'
+        : found.kind === 'run'
+          ? 'run_job_events'
+          : 'job_events';
     return this.db
       .prepare(
         `SELECT seq,state,stage,message,time FROM ${table} WHERE job_id=? AND seq>? ORDER BY seq LIMIT 100`,
@@ -77,6 +88,14 @@ export class Jobs {
     this.db
       .prepare(
         'INSERT INTO index_job_events(job_id,state,stage,message,time) SELECT id,state,stage,message,? FROM index_jobs WHERE id=?',
+      )
+      .run(this.now(), id);
+  }
+
+  private runEvent(id: string) {
+    this.db
+      .prepare(
+        'INSERT INTO run_job_events(job_id,state,stage,message,time) SELECT id,state,stage,message,? FROM run_jobs WHERE id=?',
       )
       .run(this.now(), id);
   }
@@ -134,6 +153,44 @@ export class Jobs {
     return id;
   }
 
+  replayRun(key: string | null, hash: string) {
+    if (!key) return;
+    const row = this.db
+      .prepare(
+        'SELECT id,run_id,request_hash FROM run_jobs WHERE request_key=?',
+      )
+      .get(key);
+    if (row && row.request_hash !== hash)
+      throw new ApiError(
+        409,
+        'conflict',
+        'Idempotency key was used with different input.',
+      );
+    if (row)
+      return {
+        jobId: String(row.id),
+        runId: String(row.run_id),
+      };
+  }
+
+  // Caller owns the write transaction, including run snapshot creation.
+  enqueueRun(
+    runId: string,
+    key: string | null = null,
+    hash: string | null = null,
+    parent: string | null = null,
+  ) {
+    const id = randomUUID(),
+      now = this.now();
+    this.db
+      .prepare(
+        "INSERT INTO run_jobs(id,run_id,state,stage,eligible,deadline,parent_id,request_key,request_hash) VALUES (?,?,'queued','waiting',?,?,?,?,?)",
+      )
+      .run(id, runId, now, now + duration, parent, key, hash);
+    this.runEvent(id);
+    return id;
+  }
+
   // Caller owns the write transaction, including index_generations creation.
   enqueueIndex(
     generationId: string,
@@ -155,6 +212,43 @@ export class Jobs {
   retry(id: string) {
     return transaction(this.db, () => {
       const previous = this.get(id);
+      if (previous.kind === 'run') {
+        const child = this.db
+          .prepare('SELECT id FROM run_jobs WHERE parent_id=?')
+          .get(id);
+        if (child) return this.get(String(child.id));
+        if (!['failed', 'cancelled'].includes(previous.state))
+          throw new ApiError(
+            409,
+            'conflict',
+            'Only a failed or cancelled job can be retried.',
+          );
+        const runId = previous.runId ?? missing();
+        // Keep already-succeeded tasks checkpointed; reset only unfinished/failed/cancelled tasks.
+        this.db
+          .prepare(
+            "UPDATE runs SET state='queued',stage='queued',completed_at=NULL,error_message=NULL WHERE id=?",
+          )
+          .run(runId);
+        this.db
+          .prepare(
+            "UPDATE run_pipelines SET state='queued',error_message=NULL WHERE run_id=? AND state NOT IN ('succeeded')",
+          )
+          .run(runId);
+        this.db
+          .prepare(
+            `UPDATE run_tasks
+             SET state='pending',
+                 retrieval_state=CASE WHEN retrieval_state='succeeded' THEN 'succeeded' ELSE 'pending' END,
+                 answer_state=CASE WHEN answer_state IN ('succeeded','skipped') THEN answer_state ELSE 'pending' END,
+                 judge_state=CASE WHEN judge_state IN ('succeeded','skipped') THEN judge_state ELSE 'pending' END,
+                 error_code=NULL,error_message=NULL,completed_at=NULL
+             WHERE run_id=? AND state!='succeeded'`,
+          )
+          .run(runId);
+        const next = this.enqueueRun(runId, null, null, id);
+        return this.get(next);
+      }
       if (previous.kind === 'index') {
         const child = this.db
           .prepare('SELECT id FROM index_jobs WHERE parent_id=?')
@@ -228,6 +322,43 @@ export class Jobs {
   cancel(id: string) {
     return transaction(this.db, () => {
       const j = this.get(id);
+      if (j.kind === 'run') {
+        if (j.state === 'queued' || j.state === 'running') {
+          const nextState =
+            j.state === 'queued' ? 'cancelled' : 'cancellation_requested';
+          this.db
+            .prepare('UPDATE run_jobs SET state=?,message=NULL WHERE id=?')
+            .run(nextState, id);
+          if (j.runId) {
+            if (j.state === 'queued') {
+              const nowIso = new Date(this.now()).toISOString();
+              this.db
+                .prepare(
+                  "UPDATE runs SET state='cancelled',stage='cancelled',completed_at=?,error_message=? WHERE id=?",
+                )
+                .run(nowIso, 'Run cancelled.', j.runId);
+              this.db
+                .prepare(
+                  "UPDATE run_pipelines SET state='cancelled' WHERE run_id=? AND state IN ('queued','indexing','running')",
+                )
+                .run(j.runId);
+              this.db
+                .prepare(
+                  "UPDATE run_tasks SET state='cancelled',error_code='cancelled',error_message='Run cancelled.' WHERE run_id=? AND state IN ('pending','running')",
+                )
+                .run(j.runId);
+            } else {
+              this.db
+                .prepare(
+                  "UPDATE runs SET state='cancellation_requested' WHERE id=? AND state='running'",
+                )
+                .run(j.runId);
+            }
+          }
+          this.runEvent(id);
+        }
+        return this.get(id);
+      }
       if (j.kind === 'index') {
         if (j.state === 'queued' || j.state === 'running') {
           this.db
@@ -357,6 +488,54 @@ export class Jobs {
     });
   }
 
+  claimRun(): (Job & Lease & { runId: string }) | undefined {
+    return transaction(this.db, () => {
+      const now = this.now();
+      for (const row of this.db
+        .prepare(`SELECT id,run_id,state FROM run_jobs WHERE state IN ('queued','running','cancellation_requested') AND
+        (deadline<=? OR (state!='queued' AND expires<=? AND (attempt>=? OR state='cancellation_requested')))`)
+        .all(now, now, attempts)) {
+        const cancelled = row.state === 'cancellation_requested';
+        const message = cancelled
+          ? null
+          : 'Run deadline or attempt limit reached.';
+        this.db
+          .prepare('UPDATE run_jobs SET state=?,message=? WHERE id=?')
+          .run(cancelled ? 'cancelled' : 'failed', message, row.id);
+        this.db
+          .prepare(
+            "UPDATE runs SET state=?,stage=?,completed_at=?,error_message=? WHERE id=? AND state IN ('queued','running','cancellation_requested')",
+          )
+          .run(
+            cancelled ? 'cancelled' : 'failed',
+            cancelled ? 'cancelled' : 'failed',
+            new Date(now).toISOString(),
+            cancelled ? 'Run cancelled.' : message,
+            row.run_id,
+          );
+        this.runEvent(String(row.id));
+      }
+      const row = this.db
+        .prepare(
+          `SELECT id FROM run_jobs WHERE (state='queued' AND eligible<=?) OR (state='running' AND expires<=?) ORDER BY eligible,rowid LIMIT 1`,
+        )
+        .get(now, now);
+      if (!row) return;
+      const id = String(row.id);
+      const lease = this.db
+        .prepare(
+          "UPDATE run_jobs SET state='running',message=NULL,attempt=attempt+1,token=token+1,expires=? WHERE id=? RETURNING token,run_id",
+        )
+        .get(now + this.leaseMs, id);
+      this.runEvent(id);
+      return {
+        ...this.get(id),
+        runId: String(lease?.run_id),
+        token: Number(lease?.token),
+      };
+    });
+  }
+
   private guard(l: Lease) {
     const row = this.db
       .prepare(
@@ -370,6 +549,15 @@ export class Jobs {
     const row = this.db
       .prepare(
         "SELECT 1 FROM index_jobs WHERE id=? AND token=? AND state='running' AND expires>? AND deadline>?",
+      )
+      .get(l.id, l.token, this.now(), this.now());
+    if (!row) throw new LostLease();
+  }
+
+  guardRun(l: Lease) {
+    const row = this.db
+      .prepare(
+        "SELECT 1 FROM run_jobs WHERE id=? AND token=? AND state='running' AND expires>? AND deadline>?",
       )
       .get(l.id, l.token, this.now(), this.now());
     if (!row) throw new LostLease();
@@ -428,6 +616,92 @@ export class Jobs {
       )
         return true;
       return false;
+    });
+  }
+
+  heartbeatRun(l: Lease) {
+    return transaction(this.db, () => {
+      const now = this.now();
+      const cancelled = this.db
+        .prepare(
+          "UPDATE run_jobs SET state='cancelled' WHERE id=? AND token=? AND state='cancellation_requested' AND expires>?",
+        )
+        .run(l.id, l.token, now);
+      if (cancelled.changes) {
+        const row = this.db
+          .prepare('SELECT run_id FROM run_jobs WHERE id=?')
+          .get(l.id);
+        if (row?.run_id) {
+          const nowIso = new Date(now).toISOString();
+          this.db
+            .prepare(
+              "UPDATE runs SET state='cancelled',stage='cancelled',completed_at=?,error_message=? WHERE id=? AND state IN ('queued','running','cancellation_requested')",
+            )
+            .run(nowIso, 'Run cancelled.', row.run_id);
+          this.db
+            .prepare(
+              "UPDATE run_pipelines SET state='cancelled' WHERE run_id=? AND state IN ('queued','indexing','running')",
+            )
+            .run(row.run_id);
+          this.db
+            .prepare(
+              "UPDATE run_tasks SET state='cancelled',error_code='cancelled',error_message='Run cancelled.' WHERE run_id=? AND state IN ('pending','running')",
+            )
+            .run(row.run_id);
+        }
+        this.runEvent(l.id);
+      } else if (
+        this.db
+          .prepare(
+            "UPDATE run_jobs SET expires=? WHERE id=? AND token=? AND state='running' AND expires>? AND deadline>?",
+          )
+          .run(now + this.leaseMs, l.id, l.token, now, now).changes
+      )
+        return true;
+      return false;
+    });
+  }
+
+  checkpointRun(l: Lease, stage: string) {
+    transaction(this.db, () => {
+      this.guardRun(l);
+      this.db
+        .prepare('UPDATE run_jobs SET stage=? WHERE id=?')
+        .run(stage, l.id);
+      this.runEvent(l.id);
+    });
+  }
+
+  finishRun(l: Lease) {
+    transaction(this.db, () => {
+      this.guardRun(l);
+      this.db
+        .prepare(
+          "UPDATE run_jobs SET state='succeeded',stage='complete' WHERE id=?",
+        )
+        .run(l.id);
+      this.runEvent(l.id);
+    });
+  }
+
+  failRun(l: Lease, message: string, delay?: number) {
+    return transaction(this.db, () => {
+      this.guardRun(l);
+      const eligible = this.now() + Math.min(delay ?? 0, duration);
+      const updated = this.db
+        .prepare(
+          `UPDATE run_jobs SET state=CASE WHEN ? AND attempt<? AND deadline>? THEN 'queued' ELSE 'failed' END,message=?,eligible=? WHERE id=? RETURNING state`,
+        )
+        .get(
+          Number(delay !== undefined),
+          attempts,
+          eligible,
+          message,
+          eligible,
+          l.id,
+        );
+      this.runEvent(l.id);
+      return String(updated?.state) === 'failed';
     });
   }
 

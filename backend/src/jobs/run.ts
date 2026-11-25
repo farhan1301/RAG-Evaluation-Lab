@@ -6,7 +6,9 @@ import type { Job } from '@rag-eval/contracts';
 import type { Logger } from 'pino';
 import type { Indexes } from '../db/indexes.js';
 import { type Jobs, LostLease, type Lease } from '../db/jobs.js';
+import type { Runs } from '../db/runs.js';
 import { ApiError } from '../errors.js';
+import type { EvaluationRunner } from '../evaluation/runner.js';
 import { mediaType, validateContent } from '../ingestion/blobs.js';
 import {
   chunkArtifact,
@@ -31,6 +33,8 @@ export interface WorkerOptions {
   cloud: CloudParser;
   indexes?: Indexes;
   indexBuilder?: IndexBuilder;
+  runs?: Runs;
+  evaluationRunner?: EvaluationRunner;
   signal?: AbortSignal;
   random?: () => number;
   pollMs?: number;
@@ -179,13 +183,104 @@ async function runIndexJob(
   return true;
 }
 
+async function runEvaluationJob(
+  jobs: Jobs,
+  lease: Job & Lease & { runId: string },
+  options: WorkerOptions,
+) {
+  if (!options.evaluationRunner || !options.runs) return false;
+  const span = trace.getTracer('rag-eval.jobs').startSpan('run.execute', {
+    attributes: {
+      'job.id': lease.id,
+      'run.id': lease.runId,
+      'job.attempt': lease.attempt,
+    },
+  });
+  const controller = new AbortController();
+  const signal = options.signal
+    ? AbortSignal.any([controller.signal, options.signal])
+    : controller.signal;
+  const timer = setInterval(
+    () => {
+      if (options.signal?.aborted || !jobs.heartbeatRun(lease))
+        controller.abort();
+    },
+    Math.floor(jobs.leaseMs / 3),
+  );
+  try {
+    await options.evaluationRunner.execute(lease.runId, {
+      signal,
+      guard: () => jobs.guardRun(lease),
+      checkpoint: (stage) => jobs.checkpointRun(lease, stage),
+      isRetryJob: lease.parentId !== null,
+    });
+    const finalRun = options.runs.getRun(lease.runId);
+    if (finalRun.state === 'failed') {
+      jobs.failRun(
+        lease,
+        finalRun.errorMessage ?? 'Evaluation run failed.',
+        undefined,
+      );
+    } else if (finalRun.state !== 'cancelled') {
+      jobs.finishRun(lease);
+    }
+    options.logger?.info(
+      {
+        jobId: lease.id,
+        runId: lease.runId,
+        attempt: lease.attempt,
+        state: finalRun.state,
+      },
+      'run job complete',
+    );
+  } catch (err) {
+    if (!options.signal?.aborted) {
+      const active = jobs.heartbeatRun(lease);
+      if (active && !(err instanceof LostLease) && !signal.aborted) {
+        const backoff =
+          Math.min(maxBackoffMs, 1000 * 2 ** (lease.attempt - 1)) *
+          (0.5 + (options.random ?? Math.random)());
+        const delay =
+          err instanceof ProviderError && err.retryable
+            ? Math.ceil(Math.max(backoff, err.retryAfterMs ?? 0))
+            : undefined;
+        const message =
+          err instanceof ProviderError || err instanceof ApiError
+            ? err.message
+            : 'Evaluation run failed. Inspect run details and retry.';
+        const terminal = jobs.failRun(lease, message, delay);
+        if (terminal) options.runs.markRunFailed(lease.runId, message);
+        span.setStatus({ code: SpanStatusCode.ERROR });
+        options.logger?.warn(
+          {
+            jobId: lease.id,
+            runId: lease.runId,
+            attempt: lease.attempt,
+            transient: delay !== undefined && !terminal,
+          },
+          'run job failed',
+        );
+      }
+    }
+  } finally {
+    clearInterval(timer);
+    span.end();
+  }
+  return true;
+}
+
 export async function runOne(jobs: Jobs, options: WorkerOptions) {
   const lease = jobs.claim();
   if (!lease) {
-    if (!options.indexBuilder || !options.indexes) return false;
-    const indexLease = jobs.claimIndex();
-    if (!indexLease) return false;
-    return runIndexJob(jobs, indexLease, options);
+    if (options.indexBuilder && options.indexes) {
+      const indexLease = jobs.claimIndex();
+      if (indexLease) return runIndexJob(jobs, indexLease, options);
+    }
+    if (options.evaluationRunner && options.runs) {
+      const runLease = jobs.claimRun();
+      if (runLease) return runEvaluationJob(jobs, runLease, options);
+    }
+    return false;
   }
   const span = trace.getTracer('rag-eval.jobs').startSpan('job.run', {
     attributes: {

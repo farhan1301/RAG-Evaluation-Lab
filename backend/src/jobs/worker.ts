@@ -1,14 +1,19 @@
 import { setTimeout as wait } from 'node:timers/promises';
 import { loadEnvironment, readConfig } from '../config/env.js';
 import { openDatabase } from '../db/database.js';
+import { Datasets } from '../db/datasets.js';
 import { Indexes } from '../db/indexes.js';
 import { Jobs } from '../db/jobs.js';
+import { Pipelines } from '../db/pipelines.js';
+import { Runs } from '../db/runs.js';
+import { EvaluationRunner } from '../evaluation/runner.js';
 import { blobDirectory } from '../ingestion/blobs.js';
 import { CloudParser } from '../ingestion/cloud.js';
 import { createLogger } from '../lib/logger.js';
 import { ProviderRegistry } from '../providers/registry.js';
 import { IndexBuilder } from '../retrieval/indexer.js';
 import { QdrantStore } from '../retrieval/qdrant.js';
+import { RetrievalService } from '../retrieval/service.js';
 import { runOne } from './run.js';
 
 if (process.env.NODE_ENV !== 'test') loadEnvironment();
@@ -16,7 +21,10 @@ const config = readConfig(),
   logger = createLogger();
 const db = openDatabase(config.env.DATABASE_PATH),
   jobs = new Jobs(db, Date.now, config.env.WORKER_LEASE_MS);
+const datasets = new Datasets(db, jobs);
+const pipelines = new Pipelines(db);
 const indexes = new Indexes(db, jobs);
+const runs = new Runs(db, datasets, pipelines, indexes, jobs);
 const providers = new ProviderRegistry(config);
 const qdrant = config.qdrant
   ? new QdrantStore({
@@ -31,6 +39,18 @@ const indexBuilder = new IndexBuilder({
   providers,
   qdrant,
   embedBatchSize: config.env.EMBED_BATCH_SIZE,
+});
+const retrieval = new RetrievalService({
+  indexes,
+  providers,
+  qdrant,
+});
+const evaluationRunner = new EvaluationRunner({
+  runs,
+  indexes,
+  indexBuilder,
+  retrieval,
+  providers,
 });
 const controller = new AbortController();
 function stop() {
@@ -47,6 +67,8 @@ const options = {
   ),
   indexes,
   indexBuilder,
+  runs,
+  evaluationRunner,
   signal: controller.signal,
   logger,
 };

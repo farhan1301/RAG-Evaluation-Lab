@@ -96,7 +96,7 @@ export type Task = z.infer<typeof task>;
 
 export const parser = z.enum(['local', 'llama-parse']);
 export type Parser = z.infer<typeof parser>;
-export const jobKind = z.enum(['parse', 'index']);
+export const jobKind = z.enum(['parse', 'index', 'run']);
 export type JobKind = z.infer<typeof jobKind>;
 export const jobState = z.enum([
   'queued',
@@ -106,12 +106,14 @@ export const jobState = z.enum([
   'succeeded',
   'failed',
 ]);
+export type JobState = z.infer<typeof jobState>;
 export const job = z.strictObject({
   id,
   kind: jobKind.default('parse'),
   versionId: id.nullable(),
   parser: parser.nullable(),
   generationId: id.nullable().default(null),
+  runId: id.nullable().default(null),
   state: jobState,
   stage: z.string(),
   attempt: z.int().nonnegative(),
@@ -510,4 +512,545 @@ export { z };
 export const replaceLabels = z.strictObject({
   pool: labels.shape.pool.unwrap(),
   qrels: labels.shape.qrels.unwrap(),
+});
+
+// Phase 6: Pricing, Experiments, Runs, Observations, and Evaluation Contracts
+export const priceUnit = z.enum([
+  'per_1m_tokens',
+  'per_1k_tokens',
+  'per_request',
+]);
+export type PriceUnit = z.infer<typeof priceUnit>;
+
+export const priceScheduleEntry = z
+  .strictObject({
+    model: name,
+    provider: providerKind.optional(),
+    unit: priceUnit,
+    inputUsd: z.number().nonnegative().finite().optional(),
+    outputUsd: z.number().nonnegative().finite().optional(),
+    cacheReadUsd: z.number().nonnegative().finite().optional(),
+    cacheCreationUsd: z.number().nonnegative().finite().optional(),
+    requestUsd: z.number().nonnegative().finite().optional(),
+  })
+  .refine(
+    (entry) =>
+      entry.unit === 'per_request'
+        ? entry.requestUsd !== undefined
+        : entry.inputUsd !== undefined || entry.outputUsd !== undefined,
+    'Provide a valid rate for the configured price unit.',
+  );
+export type PriceScheduleEntry = z.infer<typeof priceScheduleEntry>;
+
+export const priceSchedule = z.strictObject({
+  version: name,
+  currency: z.literal('USD').default('USD'),
+  entries: z.array(priceScheduleEntry).default([]),
+});
+export type PriceSchedule = z.infer<typeof priceSchedule>;
+
+export const runMode = z.enum(['retrieval_only', 'full_rag']);
+export type RunMode = z.infer<typeof runMode>;
+
+export const metricId = z.enum([
+  'hit_at_k',
+  'precision_at_k',
+  'recall_at_k',
+  'mrr_at_k',
+  'mrr',
+  'ndcg_at_k',
+  'faithfulness',
+  'answer_relevance',
+  'context_precision',
+  'context_recall',
+  'answer_correctness',
+  'abstention_answerable',
+  'abstention_unanswerable',
+]);
+export type MetricId = z.infer<typeof metricId>;
+
+export const judgeMetricId = z.enum([
+  'faithfulness',
+  'answer_relevance',
+  'context_precision',
+  'context_recall',
+  'answer_correctness',
+]);
+export type JudgeMetricId = z.infer<typeof judgeMetricId>;
+
+export const evaluationUnit = z.enum([
+  'document',
+  'chunk',
+  'answer',
+  'passage',
+  'reference_fact',
+  'task',
+]);
+export type EvaluationUnit = z.infer<typeof evaluationUnit>;
+
+export const observationStatus = z.enum([
+  'scored',
+  'no_relevant_docs',
+  'unanswerable',
+  'missing_qrels',
+  'missing_reference_facts',
+  'retrieval_failed',
+  'generation_failed',
+  'judge_malformed',
+  'judge_refused',
+  'judge_timeout',
+  'judge_failed',
+  'unresolved_evidence',
+  'not_applicable',
+  'skipped',
+]);
+export type ObservationStatus = z.infer<typeof observationStatus>;
+
+export const judgeAttemptStatus = z.enum([
+  'succeeded',
+  'malformed',
+  'refused',
+  'timeout',
+  'upstream_failure',
+  'unresolved_evidence',
+  'missing_prerequisite',
+]);
+export type JudgeAttemptStatus = z.infer<typeof judgeAttemptStatus>;
+
+export const providerOperation = z.enum([
+  'corpus_embed',
+  'query_embed',
+  'rerank',
+  'generate',
+  'judge',
+]);
+export type ProviderOperation = z.infer<typeof providerOperation>;
+
+export const cutoffList = z
+  .array(z.int().min(1).max(50))
+  .min(1)
+  .max(10)
+  .transform((vals) => Array.from(new Set(vals)).sort((a, b) => a - b));
+
+export const experimentConfig = z.strictObject({
+  judgeEnabled: z.boolean().default(true),
+  cutoffs: cutoffList.default([1, 3, 5]),
+  contextBudgetChars: z.int().min(200).max(64000).default(12000),
+  filters: metadataFilters.optional(),
+});
+export type ExperimentConfig = z.infer<typeof experimentConfig>;
+
+export const experimentInput = z
+  .strictObject({
+    name,
+    description: z.string().max(2000).default(''),
+    datasetId: id,
+    baselinePipelineId: id,
+    pipelineIds: z
+      .array(id)
+      .min(1)
+      .max(20)
+      .refine(
+        (ids) => new Set(ids).size === ids.length,
+        'Pipeline IDs must be unique.',
+      ),
+    mode: runMode.default('retrieval_only'),
+    config: experimentConfig.prefault({}),
+  })
+  .refine(
+    (exp) => exp.pipelineIds.includes(exp.baselinePipelineId),
+    'Baseline pipeline must be included in pipelineIds.',
+  );
+export type ExperimentInput = z.infer<typeof experimentInput>;
+export type ExperimentInputRaw = z.input<typeof experimentInput>;
+
+export const experimentPatch = z
+  .strictObject({
+    name: name.optional(),
+    description: z.string().max(2000).optional(),
+    datasetId: id.optional(),
+    baselinePipelineId: id.optional(),
+    pipelineIds: z
+      .array(id)
+      .min(1)
+      .max(20)
+      .refine(
+        (ids) => new Set(ids).size === ids.length,
+        'Pipeline IDs must be unique.',
+      )
+      .optional(),
+    mode: runMode.optional(),
+    config: experimentConfig.optional(),
+  })
+  .refine(nonemptyPatch, 'Provide at least one change.');
+export type ExperimentPatch = z.infer<typeof experimentPatch>;
+
+export const experiment = summary.extend({
+  description: z.string(),
+  datasetId: id,
+  baselinePipelineId: id,
+  pipelineIds: z.array(id).min(1),
+  mode: runMode,
+  config: experimentConfig,
+  createdAt: z.iso.datetime(),
+  updatedAt: z.iso.datetime(),
+});
+export type Experiment = z.infer<typeof experiment>;
+
+export const createRunRequest = z.strictObject({
+  name: name.optional(),
+  datasetRevision: revision.optional(),
+  mode: runMode.optional(),
+  judgeEnabled: z.boolean().optional(),
+  cutoffs: cutoffList.optional(),
+  contextBudgetChars: z.int().min(200).max(64000).optional(),
+  filters: metadataFilters.optional(),
+});
+export type CreateRunRequest = z.infer<typeof createRunRequest>;
+
+export const costStatus = z.enum(['known', 'partial', 'unknown', 'zero']);
+export type CostStatus = z.infer<typeof costStatus>;
+
+export const costBucket = z.strictObject({
+  status: costStatus,
+  totalUsd: z.number().nonnegative().nullable(),
+  knownUsd: z.number().nonnegative(),
+  pricedCalls: z.int().nonnegative(),
+  totalCalls: z.int().nonnegative(),
+  unpricedModels: z.array(z.string()),
+});
+export type CostBucket = z.infer<typeof costBucket>;
+
+export const perQueryCost = z.strictObject({
+  status: costStatus,
+  usdPerQuery: z.number().nonnegative().nullable(),
+  knownUsdPerQuery: z.number().nonnegative().nullable(),
+  queryCount: z.int().nonnegative(),
+});
+export type PerQueryCost = z.infer<typeof perQueryCost>;
+
+export const costBreakdown = z.strictObject({
+  priceVersion: z.string(),
+  currency: z.literal('USD'),
+  indexing: costBucket,
+  serving: costBucket,
+  perQueryServing: perQueryCost,
+  judging: costBucket,
+  retry: costBucket,
+  total: costBucket,
+});
+export type CostBreakdown = z.infer<typeof costBreakdown>;
+
+export const tokenBreakdown = z.strictObject({
+  inputTokens: z.int().nonnegative(),
+  outputTokens: z.int().nonnegative(),
+  cacheReadTokens: z.int().nonnegative(),
+  cacheCreationTokens: z.int().nonnegative(),
+  totalTokens: z.int().nonnegative(),
+  retryTokens: z.int().nonnegative(),
+  callsWithUsage: z.int().nonnegative(),
+  totalCalls: z.int().nonnegative(),
+});
+export type TokenBreakdown = z.infer<typeof tokenBreakdown>;
+
+export const latencyStats = z.strictObject({
+  sampleSize: z.int().nonnegative(),
+  meanMs: z.number().nonnegative().nullable(),
+  p50Ms: z.number().nonnegative().nullable(),
+  p95Ms: z.number().nonnegative().nullable(),
+});
+export type LatencyStats = z.infer<typeof latencyStats>;
+
+export const pipelineLatencySummary = z.strictObject({
+  indexTimeMs: z.number().nonnegative().nullable(),
+  retrieval: latencyStats,
+  rerank: latencyStats,
+  generation: latencyStats,
+  serving: latencyStats,
+  evaluation: latencyStats,
+  timeoutCount: z.int().nonnegative(),
+  cancellationCount: z.int().nonnegative(),
+});
+export type PipelineLatencySummary = z.infer<typeof pipelineLatencySummary>;
+
+export const metricAggregate = z.strictObject({
+  metricId,
+  metricVersion: z.string(),
+  cutoff: z.int().nonnegative(),
+  evaluationUnit,
+  displayLabel: z.string(),
+  mean: z.number().nullable(),
+  eligibleCount: z.int().nonnegative(),
+  totalCount: z.int().nonnegative(),
+  failedCount: z.int().nonnegative(),
+  excludedCount: z.int().nonnegative(),
+  exclusionBreakdown: z.record(z.string(), z.int().nonnegative()),
+  completionRate: z.number().min(0).max(1).nullable(),
+  hasPartialPool: z.boolean().default(false),
+  meanJudgedCoverage: z.number().min(0).max(1).nullable().default(null),
+  passRate: z.number().min(0).max(1).nullable().default(null),
+  criticalContradictionCount: z.int().nonnegative().default(0),
+});
+export type MetricAggregate = z.infer<typeof metricAggregate>;
+
+export const runPipelineState = z.enum([
+  'queued',
+  'indexing',
+  'running',
+  'succeeded',
+  'partial',
+  'failed',
+  'cancelled',
+]);
+export type RunPipelineState = z.infer<typeof runPipelineState>;
+
+export const runPipelineSummary = z.strictObject({
+  pipelineId: id,
+  pipelineRevision: revision,
+  ordinal: z.int().nonnegative(),
+  pipelineName: z.string(),
+  isBaseline: z.boolean(),
+  config: pipelineConfig,
+  configHash: z.string().length(64),
+  resolvedModels: z.strictObject({
+    embedding: z
+      .strictObject({ provider: providerKind, model: z.string() })
+      .nullable(),
+    rerank: z
+      .strictObject({ provider: providerKind, model: z.string() })
+      .nullable(),
+    chat: z
+      .strictObject({
+        provider: providerKind,
+        model: z.string(),
+        effectiveTemperature: z.number().nullable(),
+        effectiveMaxTokens: z.int().positive().nullable(),
+        structuredOutput: z.boolean(),
+      })
+      .nullable(),
+    judge: z
+      .strictObject({
+        provider: providerKind,
+        model: z.string(),
+        effectiveTemperature: z.number().nullable(),
+        structuredOutput: z.boolean(),
+      })
+      .nullable(),
+  }),
+  indexGenerationId: id.nullable(),
+  indexReused: z.boolean(),
+  state: runPipelineState,
+  errorMessage: z.string().nullable(),
+  completedTasks: z.int().nonnegative(),
+  failedTasks: z.int().nonnegative(),
+  totalTasks: z.int().nonnegative(),
+  retrievalMetrics: z.array(metricAggregate),
+  judgeMetrics: z.array(metricAggregate),
+  abstentionMetrics: z.array(metricAggregate),
+  latency: pipelineLatencySummary,
+  cost: costBreakdown,
+  tokens: tokenBreakdown,
+});
+export type RunPipelineSummary = z.infer<typeof runPipelineSummary>;
+
+export const runSnapshotSummary = z.strictObject({
+  softwareVersion: z.string(),
+  datasetId: id,
+  datasetRevision: revision,
+  datasetName: z.string(),
+  mode: runMode,
+  judgeEnabled: z.boolean(),
+  cutoffs: z.array(z.int().positive()),
+  contextBudgetChars: z.int().positive(),
+  filters: metadataFilters.nullable(),
+  promptVersion: z.string(),
+  retrievalMetricVersion: z.string(),
+  rubricVersions: z.record(z.string(), z.string()),
+  priceScheduleVersion: z.string(),
+  budgets: z.strictObject({
+    maxTokens: z.int().positive().nullable(),
+    maxCostUsd: z.number().positive().nullable(),
+  }),
+});
+export type RunSnapshotSummary = z.infer<typeof runSnapshotSummary>;
+
+export const runSummary = z.strictObject({
+  id,
+  experimentId: id,
+  name: z.string(),
+  mode: runMode,
+  state: jobState,
+  stage: z.string(),
+  datasetId: id,
+  datasetRevision: revision,
+  datasetName: z.string(),
+  baselinePipelineId: id,
+  pipelineCount: z.int().nonnegative(),
+  taskCount: z.int().nonnegative(),
+  completedUnits: z.int().nonnegative(),
+  failedUnits: z.int().nonnegative(),
+  totalUnits: z.int().nonnegative(),
+  jobId: id,
+  workerOnline: z.boolean(),
+  queuedAt: z.iso.datetime(),
+  startedAt: z.iso.datetime().nullable(),
+  completedAt: z.iso.datetime().nullable(),
+  queueWaitMs: z.number().nonnegative().nullable(),
+  wallClockMs: z.number().nonnegative().nullable(),
+  errorMessage: z.string().nullable(),
+});
+export type RunSummary = z.infer<typeof runSummary>;
+
+export const runDetail = runSummary.extend({
+  baselinePipelineRevision: revision,
+  snapshot: runSnapshotSummary,
+  pipelines: z.array(runPipelineSummary),
+  cost: costBreakdown,
+  tokens: tokenBreakdown,
+  latency: z.strictObject({
+    queueWaitMs: z.number().nonnegative().nullable(),
+    wallClockMs: z.number().nonnegative().nullable(),
+    serving: latencyStats,
+    evaluation: latencyStats,
+    timeoutCount: z.int().nonnegative(),
+    cancellationCount: z.int().nonnegative(),
+  }),
+});
+export type RunDetail = z.infer<typeof runDetail>;
+
+export const createRunResult = z.strictObject({
+  run: runDetail,
+  job,
+  reused: z.boolean(),
+});
+export type CreateRunResult = z.infer<typeof createRunResult>;
+
+export const metricObservation = z.strictObject({
+  id,
+  metricId,
+  metricVersion: z.string(),
+  cutoff: z.int().nonnegative(),
+  evaluationUnit,
+  status: observationStatus,
+  value: z.number().nullable(),
+  reason: z.string().nullable(),
+  metadata: z.record(z.string(), z.unknown()).nullable(),
+  judgeAttemptId: id.nullable(),
+});
+export type MetricObservation = z.infer<typeof metricObservation>;
+
+export const judgeAttemptRecord = z.strictObject({
+  id,
+  metricId,
+  rubricVersion: z.string(),
+  attemptNumber: z.int().positive(),
+  isRepair: z.boolean(),
+  provider: providerKind,
+  model: z.string(),
+  effectiveParams: z.record(z.string(), z.unknown()),
+  status: judgeAttemptStatus,
+  reason: z.string().nullable(),
+  rawResponseHash: z.string().nullable(),
+  parsedOutput: z.unknown().nullable(),
+  score: z.number().nullable(),
+  requestId: z.string().nullable(),
+  latencyMs: z.number().nonnegative(),
+  createdAt: z.iso.datetime(),
+});
+export type JudgeAttemptRecord = z.infer<typeof judgeAttemptRecord>;
+
+export const recordedAnswer = z.strictObject({
+  answerText: z.string(),
+  abstained: z.boolean(),
+  citations: z.array(id),
+  invalidCitations: z.array(z.string()),
+  context: z.array(recordedContextItem),
+  promptVersion: z.string(),
+  provider: providerKind,
+  model: z.string(),
+  effectiveParams: z.record(z.string(), z.unknown()),
+  requestId: z.string().nullable(),
+  latencyMs: z.number().nonnegative(),
+  reusedFromRunTaskId: id.nullable(),
+});
+export type RecordedAnswer = z.infer<typeof recordedAnswer>;
+
+export const providerCallRecord = z.strictObject({
+  id,
+  operation: providerOperation,
+  provider: providerKind,
+  model: z.string(),
+  requestId: z.string().nullable(),
+  attemptNumber: z.int().positive(),
+  isRetry: z.boolean(),
+  status: z.enum(['succeeded', 'failed', 'timeout', 'cancelled', 'ambiguous']),
+  errorCode: z.string().nullable(),
+  latencyMs: z.number().nonnegative(),
+  inputTokens: z.int().nonnegative().nullable(),
+  outputTokens: z.int().nonnegative().nullable(),
+  cacheReadTokens: z.int().nonnegative().nullable(),
+  cacheCreationTokens: z.int().nonnegative().nullable(),
+  totalTokens: z.int().nonnegative().nullable(),
+  usageStatus: z.enum(['known', 'missing']),
+  priceVersion: z.string(),
+  costStatus: z.enum(['known', 'unknown']),
+  costUsd: z.number().nonnegative().nullable(),
+  createdAt: z.iso.datetime(),
+});
+export type ProviderCallRecord = z.infer<typeof providerCallRecord>;
+
+export const runTaskDetail = z.strictObject({
+  id,
+  runId: id,
+  pipelineId: id,
+  pipelineName: z.string(),
+  taskId: id,
+  taskVersionId: id,
+  ordinal: z.int().nonnegative(),
+  question: z.string(),
+  expectedAnswer: z.string(),
+  acceptanceRule: z.string(),
+  referenceFacts: z.array(z.string()),
+  answerable: z.boolean(),
+  pool: z.enum(['complete', 'partial']),
+  qrels: z.array(qrel),
+  state: z.enum([
+    'pending',
+    'running',
+    'succeeded',
+    'partial',
+    'failed',
+    'cancelled',
+  ]),
+  retrievalState: z.enum(['pending', 'succeeded', 'failed', 'skipped']),
+  answerState: z.enum(['pending', 'succeeded', 'failed', 'skipped']),
+  judgeState: z.enum(['pending', 'succeeded', 'partial', 'failed', 'skipped']),
+  retrievalLatencyMs: z.number().nonnegative().nullable(),
+  rerankLatencyMs: z.number().nonnegative().nullable(),
+  generationLatencyMs: z.number().nonnegative().nullable(),
+  judgeLatencyMs: z.number().nonnegative().nullable(),
+  servingLatencyMs: z.number().nonnegative().nullable(),
+  retrievedDepth: z.int().nonnegative().nullable(),
+  retrievedCount: z.int().nonnegative().nullable(),
+  rerankStatus: z.enum(['skipped', 'applied', 'fallback']).nullable(),
+  rerankError: z.string().nullable(),
+  errorCode: z.string().nullable(),
+  errorMessage: z.string().nullable(),
+  retrievedItems: z.array(retrievedTraceItem),
+  answer: recordedAnswer.nullable(),
+  observations: z.array(metricObservation),
+  judgeAttempts: z.array(judgeAttemptRecord),
+  providerCalls: z.array(providerCallRecord),
+});
+export type RunTaskDetail = z.infer<typeof runTaskDetail>;
+
+export const runListQuery = z.strictObject({
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  cursor: z.string().min(1).max(200).optional(),
+  experimentId: id.optional(),
+});
+export const runTasksQuery = z.strictObject({
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  cursor: z.coerce.number().int().nonnegative().optional(),
+  pipelineId: id.optional(),
 });

@@ -6,11 +6,13 @@ import type { Config } from '../config/env.js';
 import type { Datasets } from '../db/datasets.js';
 import { Indexes } from '../db/indexes.js';
 import type { Pipelines } from '../db/pipelines.js';
+import { Runs } from '../db/runs.js';
 import { ApiError } from '../errors.js';
 import { ProviderError } from '../providers/errors.js';
 import { ProviderRegistry } from '../providers/registry.js';
 import { QdrantStore } from '../retrieval/qdrant.js';
 import { RetrievalService } from '../retrieval/service.js';
+import { experimentsRouter } from './experiments.js';
 import { indexesRouter } from './indexes.js';
 import { legacyRouter } from './legacy.js';
 import { definitionsRouter, InputError } from './routes.js';
@@ -21,6 +23,7 @@ interface Dependencies {
   datasets: Datasets;
   pipelines: Pipelines;
   indexes?: Indexes;
+  runs?: Runs;
   providers?: ProviderRegistry;
   qdrant?: QdrantStore;
   retrieval?: RetrievalService;
@@ -33,6 +36,7 @@ export function createApp({
   datasets,
   pipelines,
   indexes: providedIndexes,
+  runs: providedRuns,
   providers: providedProviders,
   qdrant: providedQdrant,
   retrieval: providedRetrieval,
@@ -42,6 +46,16 @@ export function createApp({
 }: Dependencies) {
   const indexes =
     providedIndexes ?? new Indexes(datasets.database, datasets.jobs, now);
+  const runs =
+    providedRuns ??
+    new Runs(
+      datasets.database,
+      datasets,
+      pipelines,
+      indexes,
+      datasets.jobs,
+      now,
+    );
   const providers = providedProviders ?? new ProviderRegistry(config);
   const qdrant =
     providedQdrant ??
@@ -162,9 +176,10 @@ export function createApp({
   });
   app.use(
     '/api/v1',
-    definitionsRouter(datasets, pipelines, config.capabilities, indexes),
+    definitionsRouter(datasets, pipelines, config.capabilities, indexes, runs),
   );
   app.use('/api/v1', indexesRouter(indexes, retrieval, providers, config));
+  app.use('/api/v1', experimentsRouter(runs, config));
   app.use('/api', legacyRouter(config, providers, qdrant));
   app.use(() => {
     throw new ApiError(404, 'not_found', 'Route not found.');

@@ -3,7 +3,6 @@ import { createRoot } from 'react-dom/client';
 import { createBrowserRouter, RouterProvider } from 'react-router';
 import { createRoutes } from './App';
 import './index.css';
-import { ExperimentResultsProvider } from './state/experimentResults';
 
 const router = createBrowserRouter(createRoutes());
 const queryClient = new QueryClient();
@@ -12,8 +11,6 @@ if (!root) throw new Error('Missing application root');
 
 createRoot(root).render(
   <QueryClientProvider client={queryClient}>
-    <ExperimentResultsProvider>
-      <RouterProvider router={router} />
-    </ExperimentResultsProvider>
+    <RouterProvider router={router} />
   </QueryClientProvider>,
 );

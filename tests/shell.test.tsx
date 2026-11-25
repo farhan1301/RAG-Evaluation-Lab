@@ -3,7 +3,6 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { createMemoryRouter, RouterProvider } from 'react-router';
 import { describe, expect, it } from 'vitest';
 import { createRoutes } from '../frontend/src/App';
-import { ExperimentResultsProvider } from '../frontend/src/state/experimentResults';
 
 async function openPage(path: string) {
   const router = createMemoryRouter(createRoutes(), { initialEntries: [path] });
@@ -23,9 +22,7 @@ async function openPage(path: string) {
 function markup(router: ReturnType<typeof createMemoryRouter>) {
   return renderToStaticMarkup(
     <QueryClientProvider client={new QueryClient()}>
-      <ExperimentResultsProvider>
-        <RouterProvider router={router} />
-      </ExperimentResultsProvider>
+      <RouterProvider router={router} />
     </QueryClientProvider>,
   );
 }

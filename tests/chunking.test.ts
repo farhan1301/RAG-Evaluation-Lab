@@ -5,7 +5,6 @@ import {
 } from '../backend/src/ingestion/chunks';
 import { fromPages } from '../backend/src/ingestion/local';
 import { legacyStrategies } from '@rag-eval/contracts';
-import { summarizeChunkGroups } from '../frontend/src/lib/chunking';
 
 function chunk(
   strategy: ChunkOptions['strategy'],
@@ -22,34 +21,17 @@ function chunk(
     }),
   ];
 }
-it('preserves character-window overlap and statistics', () => {
+it('preserves character-window overlap and offsets', () => {
   const text = '0123456789'.repeat(8);
   const chunks = chunk('recursive', [text], 50, 5);
   expect(chunks.map((c) => c.content)).toEqual([
     text.slice(0, 50),
     text.slice(45),
   ]);
-  expect(
-    summarizeChunkGroups([
-      {
-        documentId: 'doc',
-        strategy: 'character-window',
-        chunks: chunks.map((c) => ({
-          ...c,
-          documentId: 'doc',
-          index: c.ordinal,
-          charCount: c.content.length,
-          tokenEstimate: Math.round(c.content.length / 4),
-        })),
-      },
-    ]),
-  ).toEqual({
-    totalChunks: 2,
-    averageChars: 43,
-    averageTokens: 11,
-    maxChunkSize: 50,
-    minChunkSize: 35,
-  });
+  expect(chunks.map((c) => [c.start, c.end])).toEqual([
+    [0, 50],
+    [45, 80],
+  ]);
 });
 it.each([
   [

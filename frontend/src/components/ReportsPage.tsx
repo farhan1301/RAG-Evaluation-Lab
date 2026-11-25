@@ -1,5 +1,9 @@
+import * as c from '@rag-eval/contracts';
+import { useQuery } from '@tanstack/react-query';
+import { Download } from 'lucide-react';
 import { Link, useParams } from 'react-router';
-import { Download, FileText } from 'lucide-react';
+import { request } from '../data/workspace';
+import { Badge } from './ui/badge';
 import { Button } from './ui/button';
 import {
   Card,
@@ -8,7 +12,6 @@ import {
   CardHeader,
   CardTitle,
 } from './ui/card';
-import { Badge } from './ui/badge';
 import {
   Table,
   TableBody,
@@ -17,43 +20,13 @@ import {
   TableHeader,
   TableRow,
 } from './ui/table';
-import { useExperimentResults } from '../state/experimentResults';
-import { cn } from './ui/utils';
-import {
-  METRIC_DEFINITIONS,
-  type MetricKey,
-  type ExperimentRun,
-  type PipelineMetrics,
-  type ExperimentPipelineResult,
-} from '../types/experiment';
-
-const PIPELINE_COLORS: Record<string, string> = {
-  A: '#3b82f6',
-  B: '#22c55e',
-  C: '#f97316',
-};
-
-const FALLBACK_COLORS = ['#a855f7', '#ec4899', '#14b8a6'];
-
-const METRIC_LOOKUP = Object.fromEntries(
-  METRIC_DEFINITIONS.map((definition) => [definition.key, definition]),
-) as Record<MetricKey, (typeof METRIC_DEFINITIONS)[number]>;
-
-const NEXT_STEPS = [
-  'Tune chunking or retriever settings on the recommended configuration and rerun experiments to confirm the performance lift.',
-  'Export this report for stakeholders to review quality, latency, and cost trade-offs before promoting changes.',
-  'Capture qualitative feedback from subject-matter experts to complement the quantitative metrics shown here.',
-];
 
 const triggerDownload = (
   content: BlobPart,
   filename: string,
   mimeType: string,
 ) => {
-  if (typeof window === 'undefined') {
-    return;
-  }
-
+  if (typeof window === 'undefined') return;
   const blob = new Blob([content], { type: mimeType });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
@@ -65,181 +38,62 @@ const triggerDownload = (
   URL.revokeObjectURL(url);
 };
 
-const wrapText = (line: string, maxLength = 90) => {
-  const segments: string[] = [];
-  let remaining = line.trim();
+function formatMetric(value: number | null) {
+  return value === null ? 'Unavailable' : value.toFixed(3);
+}
 
-  while (remaining.length > maxLength) {
-    let splitIndex = remaining.lastIndexOf(' ', maxLength);
-    if (splitIndex <= 0) {
-      splitIndex = maxLength;
-    }
-    segments.push(remaining.slice(0, splitIndex).trim());
-    remaining = remaining.slice(splitIndex).trimStart();
+function formatMs(value: number | null) {
+  return value === null ? 'Unavailable' : `${Math.round(value)} ms`;
+}
+
+function formatCost(bucket: c.CostBucket) {
+  if (bucket.status === 'zero') return '$0.0000';
+  if (bucket.status === 'known' && bucket.totalUsd !== null) {
+    return `$${bucket.totalUsd.toFixed(4)}`;
   }
-
-  if (remaining.length) {
-    segments.push(remaining);
+  if (bucket.status === 'partial') {
+    return `$${bucket.knownUsd.toFixed(4)} (${bucket.pricedCalls}/${bucket.totalCalls} priced)`;
   }
-
-  return segments.length ? segments : [''];
-};
-
-const sanitizePdfText = (line: string) =>
-  line.replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)');
-
-const buildPdfDocument = (lines: string[]) => {
-  const sanitizedLines = lines
-    .flatMap((line) => wrapText(line))
-    .map(sanitizePdfText);
-  const textLines = sanitizedLines.length ? sanitizedLines : [''];
-
-  const textContent = [
-    'BT',
-    '/F1 12 Tf',
-    ...textLines.map((line, index) => {
-      const y = 780 - index * 16;
-      return `1 0 0 1 72 ${y} Tm (${line}) Tj`;
-    }),
-    'ET',
-  ].join('\n');
-
-  const header = '%PDF-1.4\n';
-  const offsets: string[] = ['0000000000 65535 f \n'];
-  let body = '';
-
-  const appendObject = (object: string) => {
-    offsets.push(
-      `${String(header.length + body.length).padStart(10, '0')} 00000 n \n`,
-    );
-    body += object;
-  };
-
-  appendObject('1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n');
-  appendObject('2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n');
-  appendObject(
-    '3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>\nendobj\n',
-  );
-  appendObject(
-    `4 0 obj\n<< /Length ${textContent.length} >>\nstream\n${textContent}\nendstream\nendobj\n`,
-  );
-  appendObject(
-    '5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n',
-  );
-
-  const xrefOffset = header.length + body.length;
-  const xref = `xref\n0 ${offsets.length}\n${offsets.join('')}`;
-  const trailer = `trailer\n<< /Size ${offsets.length} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`;
-
-  return header + body + xref + trailer;
-};
-
-const formatMetricValue = (key: MetricKey, value: number) =>
-  METRIC_LOOKUP[key].format(value);
-
-const capitalize = (text: string) =>
-  text.charAt(0).toUpperCase() + text.slice(1);
-
-const boolLabel = (value: boolean) => (value ? 'Enabled' : 'Disabled');
-const dedupeLabel = (value: boolean) => (value ? 'On' : 'Off');
-
-const roundValue = (value: number | undefined, decimals: number) => {
-  if (typeof value !== 'number' || !Number.isFinite(value)) {
-    return 0;
-  }
-  const factor = 10 ** decimals;
-  return Math.round(value * factor) / factor;
-};
-
-const VALUE_EPSILON = 1e-6;
-
-const deriveMetricValue = (
-  pipeline: ExperimentPipelineResult,
-  key: MetricKey,
-): number | null => {
-  const baseValue = pipeline.metrics?.[key];
-  if (baseValue === null) return null;
-  if (typeof baseValue === 'number' && Number.isFinite(baseValue)) {
-    return baseValue;
-  }
-
-  switch (key) {
-    case 'judgePassRate':
-      return pipeline.judgingSummary?.judgePassRate ?? null;
-    case 'judgedContextPrecision':
-      return (
-        pipeline.judgingSummary?.averageScores.judgedContextPrecision ?? null
-      );
-    case 'groundedness':
-      return pipeline.judgingSummary?.averageScores.groundedness ?? null;
-    case 'latencyP95': {
-      const answerLatencyMs = pipeline.answeringSummary?.latencyMs;
-      if (
-        typeof answerLatencyMs === 'number' &&
-        Number.isFinite(answerLatencyMs)
-      ) {
-        return roundValue(answerLatencyMs / 1000, 2);
-      }
-      const averageJudgeLatencyMs =
-        typeof pipeline.judgingSummary?.latencyMs === 'number' &&
-        pipeline.judgingSummary?.details.length
-          ? pipeline.judgingSummary.latencyMs /
-            pipeline.judgingSummary.details.length
-          : 0;
-      return roundValue(averageJudgeLatencyMs / 1000, 2);
-    }
-    case 'costPerQuery': {
-      const questionCount =
-        pipeline.judgingSummary?.details.length ??
-        pipeline.answeringSummary?.details.length ??
-        0;
-      if (!questionCount) {
-        return 0;
-      }
-      const answerCost = pipeline.answeringSummary?.costUsd ?? 0;
-      return roundValue(answerCost / questionCount, 4);
-    }
-    case 'tokensUsed': {
-      const answerTokens = pipeline.answeringSummary?.tokensUsed ?? 0;
-      const judgeTokens = pipeline.judgingSummary?.tokensUsed ?? 0;
-      const totalTokens = answerTokens + judgeTokens;
-      return Number.isFinite(totalTokens) ? Math.round(totalTokens) : 0;
-    }
-    default:
-      return 0;
-  }
-};
-
-const buildPipelineMetrics = (
-  pipeline: ExperimentPipelineResult,
-): PipelineMetrics =>
-  (
-    [
-      'judgePassRate',
-      'judgedContextPrecision',
-      'latencyP95',
-      'groundedness',
-      'costPerQuery',
-      'tokensUsed',
-    ] as MetricKey[]
-  ).reduce((acc, key) => {
-    acc[key] = deriveMetricValue(pipeline, key);
-    return acc;
-  }, {} as PipelineMetrics);
+  return 'Unknown';
+}
 
 export function ReportsPage() {
-  const { latestRun } = useExperimentResults();
-
   const { runId } = useParams();
-  if (!latestRun?.pipelines.length || (runId && runId !== latestRun.id)) {
+  const validParam = Boolean(runId && c.id.safeParse(runId).success);
+
+  const latestList = useQuery({
+    queryKey: ['runs', 'latest'],
+    queryFn: () => request(c.page(c.runSummary), 'runs?limit=1'),
+    enabled: !runId,
+  });
+
+  const resolvedRunId = runId
+    ? validParam
+      ? runId
+      : ''
+    : (latestList.data?.items[0]?.id ?? '');
+
+  const runQuery = useQuery({
+    queryKey: ['runs', resolvedRunId],
+    queryFn: () => request(c.runDetail, `runs/${resolvedRunId}`),
+    enabled: Boolean(resolvedRunId),
+  });
+
+  if (!runQuery.data?.pipelines.length) {
     return (
       <section className="page max-w-4xl">
         <h1>{runId ? 'Report unavailable' : 'No experiment results yet'}</h1>
         <p className="my-3 text-muted-foreground">
           {runId
-            ? 'This run is no longer available in this tab.'
+            ? 'This saved run could not be loaded.'
             : 'Complete an experiment to compare metrics and export its report.'}
         </p>
+        {(runQuery.isPending && resolvedRunId) ||
+        (!runId && latestList.isPending) ? (
+          <p role="status" className="my-2 text-sm text-muted-foreground">
+            Loading report…
+          </p>
+        ) : null}
         <Link
           className="text-primary underline"
           to={runId ? '/history' : '/experiments'}
@@ -249,689 +103,177 @@ export function ReportsPage() {
       </section>
     );
   }
-  return <RunReport latestRun={latestRun} />;
+
+  return <SavedRunReport run={runQuery.data} />;
 }
 
-function RunReport({ latestRun }: { latestRun: ExperimentRun }) {
-  const pipelineMap = Object.fromEntries(
-    latestRun.pipelines.map((pipeline) => [pipeline.pipelineId, pipeline]),
-  );
-  const pipelineOrder = latestRun.pipelines.map(
-    (pipeline) => pipeline.pipelineId,
-  );
-  const baselineId =
-    (latestRun?.baselinePipelineId && pipelineMap[latestRun.baselinePipelineId]
-      ? latestRun.baselinePipelineId
-      : undefined) ?? pipelineOrder[0];
-
-  const baselinePipeline = baselineId ? pipelineMap[baselineId] : undefined;
-
-  const recommendedId =
-    latestRun?.bestByMetric.judgePassRate &&
-    pipelineMap[latestRun.bestByMetric.judgePassRate]
-      ? latestRun.bestByMetric.judgePassRate
-      : undefined;
-
-  const recommendedPipeline = recommendedId
-    ? pipelineMap[recommendedId]
-    : undefined;
-  const recommendedSnapshot = recommendedPipeline?.pipelineSnapshot;
-
-  const generatedAt =
-    latestRun?.completedAt ?? latestRun?.startedAt ?? new Date().toISOString();
-  const formattedTimestamp = new Intl.DateTimeFormat(undefined, {
+function SavedRunReport({ run }: { run: c.RunDetail }) {
+  const baseline = run.pipelines.find((p) => p.isBaseline) ?? run.pipelines[0];
+  const timestamp = new Intl.DateTimeFormat(undefined, {
     dateStyle: 'full',
     timeStyle: 'short',
-  }).format(new Date(generatedAt));
+  }).format(new Date(run.completedAt ?? run.queuedAt));
 
-  const pipelineEntries = pipelineOrder
-    .map((id, index) => ({
-      id,
-      pipeline: pipelineMap[id],
-      color:
-        PIPELINE_COLORS[id] ?? FALLBACK_COLORS[index % FALLBACK_COLORS.length],
-    }))
-    .filter((entry) => entry.pipeline);
-
-  const pipelineMetrics = pipelineEntries.reduce(
-    (acc, entry) => {
-      const { id, pipeline } = entry;
-      if (!pipeline) {
-        return acc;
-      }
-
-      acc[id] = {
-        name: pipeline.pipelineName,
-        metrics: buildPipelineMetrics(pipeline),
-      };
-
-      return acc;
-    },
-    {} as Record<
-      string,
-      {
-        name: string;
-        metrics: PipelineMetrics;
-      }
-    >,
+  const metricKeys = Array.from(
+    new Map(
+      run.pipelines
+        .flatMap((p) => [
+          ...p.retrievalMetrics,
+          ...p.judgeMetrics,
+          ...p.abstentionMetrics,
+        ])
+        .map((m) => [`${m.metricId}:${m.cutoff}`, m]),
+    ).values(),
   );
 
-  const baselineMetrics = baselineId
-    ? pipelineMetrics[baselineId]?.metrics
-    : undefined;
-  const recommendedMetrics = recommendedPipeline
-    ? pipelineMetrics[recommendedPipeline.pipelineId]?.metrics
-    : undefined;
-
-  const highlightMetrics =
-    recommendedMetrics && baselineMetrics
-      ? METRIC_DEFINITIONS.filter((definition) => {
-          const recommendedValue = recommendedMetrics[definition.key];
-          const baselineValue = baselineMetrics[definition.key];
-          if (
-            typeof recommendedValue !== 'number' ||
-            typeof baselineValue !== 'number'
-          ) {
-            return false;
-          }
-          if (definition.better === 'higher') {
-            return recommendedValue > baselineValue;
-          }
-          return recommendedValue < baselineValue;
-        })
-      : [];
-
-  const highlightSummary = highlightMetrics
-    .slice(0, 3)
-    .map((metric) => metric.label)
-    .join(', ');
-  const recommendationSummary =
-    highlightMetrics.length > 0 && baselinePipeline
-      ? `It outperforms your baseline (${baselinePipeline.pipelineName}) on ${highlightSummary}${
-          highlightMetrics.length > 3 ? ' and additional metrics' : ''
-        }.`
-      : 'The recommendation uses judge pass rate among completed judgments.';
-
-  const COMPARISON_METRICS: MetricKey[] = [
-    'judgePassRate',
-    'judgedContextPrecision',
-    'groundedness',
-    'latencyP95',
-    'costPerQuery',
-    'tokensUsed',
-  ];
-
-  const pipelineComparisonRows = pipelineEntries.map(
-    ({ id, pipeline, color }) => {
-      const metrics = pipelineMetrics[id]?.metrics;
-      const coverage = pipeline?.judgingSummary?.coverage;
-      return {
-        id,
-        name: pipeline?.pipelineName ?? `Pipeline ${id}`,
-        color,
-        metrics,
-        coverage: coverage
-          ? `${coverage.completed}/${coverage.total}`
-          : 'Unavailable',
-        isBaseline: id === baselineId,
-        isRecommended: id === recommendedId,
-      };
-    },
-  );
-
-  const metricExtremes = COMPARISON_METRICS.reduce(
-    (acc, metric) => {
-      const values = pipelineComparisonRows
-        .map((row) => row.metrics?.[metric])
-        .filter(
-          (value): value is number =>
-            typeof value === 'number' && Number.isFinite(value),
-        );
-
-      if (!values.length) {
-        return acc;
-      }
-
-      const betterDirection = METRIC_LOOKUP[metric]?.better ?? 'higher';
-      const best =
-        betterDirection === 'higher'
-          ? Math.max(...values)
-          : Math.min(...values);
-      const worst =
-        betterDirection === 'higher'
-          ? Math.min(...values)
-          : Math.max(...values);
-
-      acc[metric] = { best, worst };
-      return acc;
-    },
-    {} as Record<MetricKey, { best: number; worst: number }>,
-  );
-
-  const buildMarkdownReport = () => {
-    if (!latestRun) {
-      return '';
-    }
-
-    const title = latestRun.name ?? 'Experiment Report';
-    const lines: string[] = [];
-    lines.push(`# ${title}`);
-    lines.push('');
-    lines.push(`Generated on ${formattedTimestamp}`);
-    lines.push('');
-
-    if (recommendedPipeline) {
-      lines.push('## Recommendation');
-      lines.push(
-        `**${recommendedPipeline.pipelineName}** is recommended as the leading configuration. ${recommendationSummary}`.trim(),
-      );
-      if (highlightMetrics.length) {
-        lines.push('');
-        lines.push('Key improvements:');
-        highlightMetrics.forEach((metric) => {
-          lines.push(`- ${METRIC_LOOKUP[metric.key]?.label ?? metric.key}`);
-        });
-      }
-
-      if (recommendedSnapshot) {
-        lines.push('');
-        lines.push('Configuration snapshot:');
-        lines.push(
-          `- Chunking: ${capitalize(recommendedSnapshot.chunking.strategy)} chunks (${recommendedSnapshot.chunking.chunkSize} characters, ${recommendedSnapshot.chunking.overlap} character overlap)`,
-        );
-        lines.push(`- Embedding: ${recommendedSnapshot.embedding.model}`);
-        lines.push(
-          `- Retrieval: Top-K ${recommendedSnapshot.retriever.topK}, deduplication ${dedupeLabel(recommendedSnapshot.retriever.deduplicate)}`,
-        );
-        lines.push(
-          `- Reranker: ${boolLabel(recommendedSnapshot.reranker.enabled)} (${recommendedSnapshot.reranker.model})`,
-        );
-        lines.push(
-          `- LLM: ${recommendedSnapshot.llm.model} (temperature ${recommendedSnapshot.llm.temperature.toFixed(1)}, max ${recommendedSnapshot.llm.maxTokens} tokens)`,
-        );
-        lines.push(`- Judge: ${recommendedSnapshot.judge.model}`);
-      }
-    } else {
-      lines.push('## Recommendation');
-      lines.push(
-        'No clear leading configuration was identified for this experiment.',
-      );
-    }
-
-    lines.push('');
-    lines.push('## Pipeline Metrics');
-
-    const tableHeader = [
-      'Pipeline',
-      'Judge coverage (scored/total)',
-      ...COMPARISON_METRICS.map(
-        (metric) => METRIC_LOOKUP[metric]?.label ?? metric,
-      ),
+  const buildMarkdown = () => {
+    const lines: string[] = [
+      `# ${run.name}`,
+      '',
+      `Generated on ${timestamp}`,
+      `Dataset: ${run.datasetName} (revision ${run.datasetRevision}) · Mode: ${run.mode} · Price schedule: ${run.snapshot.priceScheduleVersion}`,
+      '',
+      '## Pipeline Comparison',
+      '',
     ];
-    const headerRow = `| ${tableHeader.join(' | ')} |`;
-    const separatorRow = `| ${tableHeader.map(() => '---').join(' | ')} |`;
-    lines.push(headerRow);
-    lines.push(separatorRow);
-
-    pipelineComparisonRows.forEach((row) => {
-      const valueCells = COMPARISON_METRICS.map((metric) => {
-        const value = row.metrics?.[metric];
-        if (typeof value !== 'number' || Number.isNaN(value)) {
-          return 'Unavailable';
-        }
-        return formatMetricValue(metric, value);
-      });
-
-      const labels: string[] = [];
-      if (row.isBaseline) {
-        labels.push('Baseline');
-      }
-      if (row.isRecommended) {
-        labels.push('Recommended');
-      }
-
-      const pipelineLabel = labels.length
-        ? `${row.name} (${labels.join(', ')})`
-        : row.name;
-      lines.push(
-        `| ${[pipelineLabel, row.coverage, ...valueCells].join(' | ')} |`,
+    const headers = [
+      'Pipeline',
+      ...metricKeys.map((m) => m.displayLabel),
+      'Serving p95',
+      'Total spend',
+      'Retry spend',
+    ];
+    lines.push(`| ${headers.join(' | ')} |`);
+    lines.push(`| ${headers.map(() => '---').join(' | ')} |`);
+    for (const pl of run.pipelines) {
+      const lookup = new Map(
+        [
+          ...pl.retrievalMetrics,
+          ...pl.judgeMetrics,
+          ...pl.abstentionMetrics,
+        ].map((m) => [`${m.metricId}:${m.cutoff}`, m]),
       );
-    });
-
-    lines.push('');
-    lines.push('## Suggested Next Steps');
-    NEXT_STEPS.forEach((step) => {
-      lines.push(`- ${step}`);
-    });
-
+      const cells = metricKeys.map((m) => {
+        const entry = lookup.get(`${m.metricId}:${m.cutoff}`);
+        if (!entry) return 'Unavailable';
+        return `${formatMetric(entry.mean)} (${entry.eligibleCount}/${entry.totalCount})`;
+      });
+      lines.push(
+        `| ${[
+          pl.isBaseline ? `${pl.pipelineName} (Baseline)` : pl.pipelineName,
+          ...cells,
+          formatMs(pl.latency.serving.p95Ms),
+          formatCost(pl.cost.total),
+          formatCost(pl.cost.retry),
+        ].join(' | ')} |`,
+      );
+    }
     return lines.join('\n');
-  };
-
-  const handleExportMarkdown = () => {
-    const markdown = buildMarkdownReport();
-    if (!markdown) {
-      return;
-    }
-    triggerDownload(markdown, 'experiment-report.md', 'text/markdown');
-  };
-
-  const handleExportPdf = () => {
-    if (!latestRun) {
-      return;
-    }
-
-    const title = latestRun.name ?? 'Experiment Report';
-    const lines: string[] = [];
-    lines.push(title);
-    lines.push(`Generated on ${formattedTimestamp}`);
-    lines.push('');
-
-    if (recommendedPipeline) {
-      lines.push('Recommendation:');
-      lines.push(
-        `${recommendedPipeline.pipelineName} – ${recommendationSummary.replace(/\s+/g, ' ').trim()}`,
-      );
-
-      if (recommendedSnapshot) {
-        lines.push('');
-        lines.push('Configuration Snapshot');
-        lines.push(
-          `Chunking: ${capitalize(recommendedSnapshot.chunking.strategy)} chunks (${recommendedSnapshot.chunking.chunkSize} characters, ${recommendedSnapshot.chunking.overlap} character overlap)`,
-        );
-        lines.push(`Embedding: ${recommendedSnapshot.embedding.model}`);
-        lines.push(
-          `Retrieval: Top-K ${recommendedSnapshot.retriever.topK}, deduplication ${dedupeLabel(recommendedSnapshot.retriever.deduplicate)}`,
-        );
-        lines.push(
-          `Reranker: ${boolLabel(recommendedSnapshot.reranker.enabled)} (${recommendedSnapshot.reranker.model})`,
-        );
-        lines.push(
-          `LLM: ${recommendedSnapshot.llm.model} (temperature ${recommendedSnapshot.llm.temperature.toFixed(1)}, max ${recommendedSnapshot.llm.maxTokens} tokens)`,
-        );
-        lines.push(`Judge: ${recommendedSnapshot.judge.model}`);
-      }
-    } else {
-      lines.push('Recommendation: No leading configuration identified.');
-    }
-
-    lines.push('');
-    lines.push('Pipeline Metrics');
-
-    pipelineComparisonRows.forEach((row) => {
-      const badges: string[] = [];
-      if (row.isBaseline) {
-        badges.push('Baseline');
-      }
-      if (row.isRecommended) {
-        badges.push('Recommended');
-      }
-
-      const rowTitle = badges.length
-        ? `${row.name} (${badges.join(', ')})`
-        : row.name;
-      lines.push(rowTitle);
-      lines.push(`  - Judge coverage (scored/total): ${row.coverage}`);
-
-      COMPARISON_METRICS.forEach((metric) => {
-        const label = METRIC_LOOKUP[metric]?.label ?? metric;
-        const value = row.metrics?.[metric];
-        const formattedValue =
-          typeof value !== 'number' || Number.isNaN(value)
-            ? 'Unavailable'
-            : formatMetricValue(metric, value);
-        lines.push(`  - ${label}: ${formattedValue}`);
-      });
-
-      lines.push('');
-    });
-
-    lines.push('Suggested Next Steps');
-    lines.push('');
-    NEXT_STEPS.forEach((step) => {
-      lines.push(`- ${step}`);
-    });
-
-    const pdf = buildPdfDocument(lines);
-    triggerDownload(pdf, 'experiment-report.pdf', 'application/pdf');
   };
 
   return (
     <div className="px-4 py-6 sm:p-8 bg-background">
       <div className="max-w-7xl mx-auto space-y-6">
-        {/* Header */}
-        <div className="flex items-center justify-between gap-4 flex-wrap">
+        <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
-            <h1>{latestRun.name ?? 'Experiment Report'}</h1>
+            <h1>{run.name}</h1>
             <p className="text-muted-foreground">
-              Generated on {formattedTimestamp}
+              {timestamp} · {run.datasetName} (r{run.datasetRevision}) ·{' '}
+              {run.mode}
             </p>
           </div>
-          <div className="flex gap-2 flex-wrap">
-            <Button
-              variant="outline"
-              className="gap-2"
-              onClick={handleExportPdf}
-            >
-              <FileText size={16} />
-              Export PDF
-            </Button>
-            <Button
-              variant="outline"
-              className="gap-2"
-              onClick={handleExportMarkdown}
-            >
-              <Download size={16} />
-              Export Markdown
-            </Button>
-          </div>
+          <Button
+            type="button"
+            variant="outline"
+            className="gap-2"
+            onClick={() =>
+              triggerDownload(
+                buildMarkdown(),
+                `run-${run.id.slice(0, 8)}-report.md`,
+                'text/markdown',
+              )
+            }
+          >
+            <Download size={16} aria-hidden="true" />
+            Export Markdown
+          </Button>
         </div>
 
-        {/* Recommendation */}
-        <Card>
-          <CardHeader>
-            <CardTitle>Pipeline Recommendation</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <p className="text-foreground">
-              {recommendedPipeline ? (
-                <>
-                  Based on the most recent experiment,{' '}
-                  <strong>{recommendedPipeline.pipelineName}</strong> has the
-                  highest observed judge pass rate. {recommendationSummary}
-                </>
-              ) : (
-                'Run details were recorded, but we could not identify a leading configuration.'
-              )}
-            </p>
-
-            {recommendedSnapshot && (
-              <div className="p-4 rounded-lg border border-border bg-background">
-                <p className="mb-2 text-muted-foreground">
-                  Recommended configuration snapshot:
-                </p>
-                <ul className="space-y-1 text-sm text-foreground">
-                  <li>
-                    • <strong>Chunking:</strong>{' '}
-                    {capitalize(recommendedSnapshot.chunking.strategy)} chunks (
-                    {recommendedSnapshot.chunking.chunkSize} characters,{' '}
-                    {recommendedSnapshot.chunking.overlap} character overlap)
-                  </li>
-                  <li>
-                    • <strong>Embedding:</strong>{' '}
-                    {recommendedSnapshot.embedding.model}
-                  </li>
-                  <li>
-                    • <strong>Retrieval:</strong> Top-K{' '}
-                    {recommendedSnapshot.retriever.topK}, deduplication{' '}
-                    {dedupeLabel(recommendedSnapshot.retriever.deduplicate)}
-                  </li>
-                  <li>
-                    • <strong>Reranker:</strong>{' '}
-                    {boolLabel(recommendedSnapshot.reranker.enabled)} (
-                    {recommendedSnapshot.reranker.model})
-                  </li>
-                  <li>
-                    • <strong>LLM:</strong> {recommendedSnapshot.llm.model}{' '}
-                    (temperature{' '}
-                    {recommendedSnapshot.llm.temperature.toFixed(1)}, max{' '}
-                    {recommendedSnapshot.llm.maxTokens} tokens)
-                  </li>
-                  <li>
-                    • <strong>Judge:</strong> {recommendedSnapshot.judge.model}
-                  </li>
-                </ul>
-              </div>
-            )}
-
-            <p className="text-sm text-muted-foreground">
-              Keep iterating on the recommended pipeline to validate that these
-              improvements hold up across new evaluation datasets before
-              promoting the configuration to production.
-            </p>
-          </CardContent>
-        </Card>
-
-        {/* Pipeline Comparison */}
         <Card>
           <CardHeader>
             <CardTitle>Pipeline Comparison Overview</CardTitle>
-            <CardDescription className="text-muted-foreground">
-              All metrics compared against{' '}
-              {baselinePipeline?.pipelineName ?? 'the first pipeline'}
+            <CardDescription>
+              Baseline: {baseline?.pipelineName ?? 'None'} · Price schedule:{' '}
+              {run.snapshot.priceScheduleVersion}
             </CardDescription>
           </CardHeader>
-          <CardContent>
-            {pipelineComparisonRows.length > 0 ? (
-              <div className="overflow-x-auto">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Pipeline</TableHead>
-                      <TableHead>Judge coverage (scored/total)</TableHead>
-                      {COMPARISON_METRICS.map((metric) => (
-                        <TableHead key={metric} className="text-right">
-                          {METRIC_LOOKUP[metric]?.label ?? capitalize(metric)}
-                        </TableHead>
-                      ))}
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {pipelineComparisonRows.map((row) => (
-                      <TableRow key={row.id}>
-                        <TableCell className="font-medium">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <span
-                              className="h-2.5 w-2.5 rounded-full"
-                              style={{ backgroundColor: row.color }}
-                            />
-                            <span>{row.name}</span>
-                            {row.isBaseline && (
-                              <Badge variant="outline">Baseline</Badge>
-                            )}
-                            {row.isRecommended && !row.isBaseline && (
-                              <Badge variant="outline">Recommended</Badge>
-                            )}
-                          </div>
-                        </TableCell>
-                        <TableCell>{row.coverage}</TableCell>
-                        {COMPARISON_METRICS.map((metric) => (
-                          <TableCell key={metric} className="text-right">
-                            {row.metrics &&
-                            typeof row.metrics[metric] === 'number' ? (
-                              <div className="flex flex-col items-end gap-1">
-                                {(() => {
-                                  const value = row.metrics?.[metric];
-                                  if (typeof value !== 'number') {
-                                    return null;
-                                  }
-                                  const extremes = metricExtremes[metric];
-                                  const baselineValue =
-                                    baselineMetrics?.[metric];
-                                  const betterDirection =
-                                    METRIC_LOOKUP[metric]?.better ?? 'higher';
-
-                                  const difference =
-                                    typeof baselineValue === 'number'
-                                      ? value - baselineValue
-                                      : undefined;
-
-                                  const percentChange =
-                                    typeof difference === 'number' &&
-                                    typeof baselineValue === 'number' &&
-                                    Math.abs(baselineValue) > VALUE_EPSILON
-                                      ? (difference / baselineValue) * 100
-                                      : undefined;
-
-                                  const isBest =
-                                    extremes &&
-                                    Math.abs(value - extremes.best) <
-                                      VALUE_EPSILON &&
-                                    !(
-                                      extremes &&
-                                      Math.abs(extremes.best - extremes.worst) <
-                                        VALUE_EPSILON
-                                    );
-
-                                  const isWorst =
-                                    extremes &&
-                                    Math.abs(value - extremes.worst) <
-                                      VALUE_EPSILON &&
-                                    !(
-                                      extremes &&
-                                      Math.abs(extremes.best - extremes.worst) <
-                                        VALUE_EPSILON
-                                    );
-
-                                  const highlightState:
-                                    | 'best'
-                                    | 'worst'
-                                    | 'neutral' = (() => {
-                                    if (isBest && isWorst) {
-                                      return 'neutral';
-                                    }
-                                    if (isBest) {
-                                      return 'best';
-                                    }
-                                    if (isWorst) {
-                                      return 'worst';
-                                    }
-                                    return 'neutral';
-                                  })();
-
-                                  const valueClasses = cn('font-semibold', {
-                                    'text-green-700 dark:text-green-300':
-                                      highlightState === 'best',
-                                    'text-red-700 dark:text-red-300':
-                                      highlightState === 'worst',
-                                  });
-
-                                  const arrowSymbol =
-                                    typeof percentChange === 'number'
-                                      ? percentChange > 0
-                                        ? '↑'
-                                        : percentChange < 0
-                                          ? '↓'
-                                          : '→'
-                                      : typeof difference === 'number'
-                                        ? difference > 0
-                                          ? '↑'
-                                          : difference < 0
-                                            ? '↓'
-                                            : '→'
-                                        : null;
-
-                                  const percentMagnitude =
-                                    typeof percentChange === 'number'
-                                      ? Math.abs(percentChange) >= 10
-                                        ? Math.abs(percentChange).toFixed(0)
-                                        : Math.abs(percentChange).toFixed(1)
-                                      : null;
-
-                                  const improvement =
-                                    typeof difference === 'number'
-                                      ? betterDirection === 'higher'
-                                        ? difference > 0
-                                        : difference < 0
-                                      : false;
-
-                                  const regression =
-                                    typeof difference === 'number'
-                                      ? betterDirection === 'higher'
-                                        ? difference < 0
-                                        : difference > 0
-                                      : false;
-
-                                  let deltaText: string | null = null;
-                                  let deltaClass =
-                                    'text-xs font-medium text-muted-foreground';
-
-                                  if (row.isBaseline) {
-                                    deltaText = 'Baseline';
-                                  } else if (
-                                    typeof percentChange === 'number'
-                                  ) {
-                                    deltaText = `${arrowSymbol} ${percentMagnitude ?? '0'}%`;
-                                    if (percentChange === 0) {
-                                      deltaClass =
-                                        'text-xs font-medium text-muted-foreground';
-                                    } else if (improvement) {
-                                      deltaClass =
-                                        'text-xs font-medium text-green-600 dark:text-green-300';
-                                    } else if (regression) {
-                                      deltaClass =
-                                        'text-xs font-medium text-red-600 dark:text-red-300';
-                                    }
-                                  } else if (
-                                    typeof difference === 'number' &&
-                                    typeof baselineValue === 'number'
-                                  ) {
-                                    const formattedDiff = formatMetricValue(
-                                      metric,
-                                      Math.abs(difference),
-                                    );
-                                    deltaText =
-                                      arrowSymbol && formattedDiff
-                                        ? `${arrowSymbol} ${formattedDiff}`
-                                        : null;
-                                    if (difference === 0) {
-                                      deltaClass =
-                                        'text-xs font-medium text-muted-foreground';
-                                    } else if (improvement) {
-                                      deltaClass =
-                                        'text-xs font-medium text-green-600 dark:text-green-300';
-                                    } else if (regression) {
-                                      deltaClass =
-                                        'text-xs font-medium text-red-600 dark:text-red-300';
-                                    }
-                                  }
-
-                                  return (
-                                    <>
-                                      <span className={valueClasses}>
-                                        {formatMetricValue(metric, value)}
-                                      </span>
-                                      {deltaText ? (
-                                        <span className={deltaClass}>
-                                          {deltaText}
-                                        </span>
-                                      ) : null}
-                                    </>
-                                  );
-                                })()}
+          <CardContent className="overflow-x-auto">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Pipeline</TableHead>
+                  {metricKeys.map((m) => (
+                    <TableHead
+                      key={`${m.metricId}:${m.cutoff}`}
+                      className="text-right"
+                    >
+                      {m.displayLabel}
+                    </TableHead>
+                  ))}
+                  <TableHead className="text-right">Serving p95</TableHead>
+                  <TableHead className="text-right">Total spend</TableHead>
+                  <TableHead className="text-right">Retry spend</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {run.pipelines.map((pl) => {
+                  const lookup = new Map(
+                    [
+                      ...pl.retrievalMetrics,
+                      ...pl.judgeMetrics,
+                      ...pl.abstentionMetrics,
+                    ].map((m) => [`${m.metricId}:${m.cutoff}`, m]),
+                  );
+                  return (
+                    <TableRow key={pl.pipelineId}>
+                      <TableCell className="font-medium">
+                        <div className="flex items-center gap-2">
+                          <span>{pl.pipelineName}</span>
+                          {pl.isBaseline && (
+                            <Badge variant="outline">Baseline</Badge>
+                          )}
+                        </div>
+                      </TableCell>
+                      {metricKeys.map((m) => {
+                        const entry = lookup.get(`${m.metricId}:${m.cutoff}`);
+                        return (
+                          <TableCell
+                            key={`${m.metricId}:${m.cutoff}`}
+                            className="text-right text-xs"
+                          >
+                            <div>{formatMetric(entry?.mean ?? null)}</div>
+                            {entry && (
+                              <div className="text-muted-foreground">
+                                {entry.eligibleCount}/{entry.totalCount}
                               </div>
-                            ) : (
-                              'Unavailable'
                             )}
                           </TableCell>
-                        ))}
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </div>
-            ) : (
-              <p className="text-muted-foreground">
-                No pipeline results detected in the latest experiment.
-              </p>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* Next Steps */}
-        <Card>
-          <CardHeader>
-            <CardTitle>Suggested Next Steps</CardTitle>
-            <CardDescription className="text-muted-foreground">
-              Iterate on your strongest pipeline and validate improvements with
-              fresh data.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3 text-sm text-foreground">
-            <ul className="list-disc list-inside space-y-2">
-              {NEXT_STEPS.map((step) => (
-                <li key={step}>{step}</li>
-              ))}
-            </ul>
+                        );
+                      })}
+                      <TableCell className="text-right text-xs">
+                        {formatMs(pl.latency.serving.p95Ms)}
+                      </TableCell>
+                      <TableCell className="text-right text-xs">
+                        {formatCost(pl.cost.total)}
+                      </TableCell>
+                      <TableCell className="text-right text-xs">
+                        {formatCost(pl.cost.retry)}
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
           </CardContent>
         </Card>
       </div>

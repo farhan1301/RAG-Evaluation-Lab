@@ -1,6 +1,13 @@
 import type { Pipeline } from './pipeline';
-import type { ChunkingStatistics } from '../lib/chunking';
 import type { DatasetTask } from './dataset';
+
+export interface ChunkingStatistics {
+  totalChunks: number;
+  averageChars: number;
+  averageTokens: number;
+  maxChunkSize: number;
+  minChunkSize: number;
+}
 
 export type MetricKey =
   | 'judgePassRate'

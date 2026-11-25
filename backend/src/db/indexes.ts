@@ -199,6 +199,7 @@ export class Indexes {
       expectedDimensions?: number;
     } | null,
     idempotencyKey: string | null = null,
+    enqueueJob = true,
   ) {
     return transaction(this.db, () => {
       const datasetRevision = this.resolveRevision(
@@ -272,11 +273,9 @@ export class Indexes {
           request.mode === 'keyword' ? null : (embedding?.model ?? null),
           new Date(this.now()).toISOString(),
         );
-      const jobId = this.jobs.enqueueIndex(
-        generationId,
-        idempotencyKey,
-        requestHash,
-      );
+      const jobId = enqueueJob
+        ? this.jobs.enqueueIndex(generationId, idempotencyKey, requestHash)
+        : null;
       return {
         index: this.get(generationId),
         jobId,

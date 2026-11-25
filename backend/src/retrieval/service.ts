@@ -6,6 +6,7 @@ import {
   type IndexAnswerResult,
   type IndexSearchRequest,
   type IndexSearchResult,
+  type ProviderKind,
   type ProviderUsage,
   type RetrievedTraceItem,
 } from '@rag-eval/contracts';
@@ -30,6 +31,21 @@ export interface RetrievalServiceOptions {
   providers: ProviderRegistry;
   qdrant?: QdrantStore;
   now?: () => number;
+}
+
+export interface RetrievalProviderCallAudit {
+  operation: 'query_embed' | 'rerank';
+  provider: ProviderKind;
+  model: string;
+  requestId: string | null;
+  latencyMs: number;
+  usage?: ProviderUsage;
+  status: 'succeeded' | 'failed' | 'timeout' | 'cancelled';
+  errorCode: string | null;
+}
+
+export interface SearchAuditHooks {
+  onProviderCall?: (call: RetrievalProviderCallAudit) => void;
 }
 
 interface WorkingCandidate {
@@ -63,6 +79,7 @@ export class RetrievalService {
     generationId: string,
     request: IndexSearchRequest,
     signal?: AbortSignal,
+    audit?: SearchAuditHooks,
   ): Promise<IndexSearchResult> {
     const startedAt = this.now();
     const generation = this.indexes.getStored(generationId);
@@ -145,15 +162,31 @@ export class RetrievalService {
 
       const embedStart = this.now();
       let queryVector: number[];
+      const { profile, provider } = (() => {
+        try {
+          return this.providers.resolveEmbedding(generation.embeddingModel);
+        } catch (err) {
+          if (err instanceof ProviderError) throw err.toApiError();
+          throw err;
+        }
+      })();
       try {
-        const { profile, provider } = this.providers.resolveEmbedding(
-          generation.embeddingModel,
-        );
         const embedded = await provider.embed({
           model: profile.model,
           inputs: [request.query],
           expectedDimensions: generation.embeddingDimensions,
           signal,
+        });
+        const embedLatency = Math.max(0, this.now() - embedStart);
+        audit?.onProviderCall?.({
+          operation: 'query_embed',
+          provider: embedded.provider,
+          model: embedded.model,
+          requestId: embedded.requestIds[0] ?? null,
+          latencyMs: embedLatency,
+          usage: embedded.usage,
+          status: 'succeeded',
+          errorCode: null,
         });
         if (embedded.vectors.length !== 1) {
           throw new ProviderError(
@@ -164,6 +197,25 @@ export class RetrievalService {
         queryVector = embedded.vectors[0];
         embeddingUsage = embedded.usage;
       } catch (err) {
+        const embedLatency = Math.max(0, this.now() - embedStart);
+        if (!(err instanceof ProviderError && err.code === 'partial_batch')) {
+          const isTimeout =
+            err instanceof ProviderError && err.code === 'timeout';
+          audit?.onProviderCall?.({
+            operation: 'query_embed',
+            provider: provider.kind,
+            model: profile.model,
+            requestId: null,
+            latencyMs: embedLatency,
+            status: signal?.aborted
+              ? 'cancelled'
+              : isTimeout
+                ? 'timeout'
+                : 'failed',
+            errorCode:
+              err instanceof ProviderError ? err.code : 'upstream_failure',
+          });
+        }
         if (err instanceof ProviderError) throw err.toApiError();
         throw err;
       }
@@ -267,10 +319,15 @@ export class RetrievalService {
     if (request.reranker.enabled && working.length > 0) {
       const rerankStart = this.now();
       const bounded = working.slice(0, candidateDepth);
+      const { profile, provider } = (() => {
+        try {
+          return this.providers.resolveReranker(request.reranker.model);
+        } catch (err) {
+          if (err instanceof ProviderError) throw err.toApiError();
+          throw err;
+        }
+      })();
       try {
-        const { profile, provider } = this.providers.resolveReranker(
-          request.reranker.model,
-        );
         const result = await provider.rerank({
           model: profile.model,
           query: request.query,
@@ -279,6 +336,16 @@ export class RetrievalService {
           signal,
         });
         rerankUsage = result.usage;
+        audit?.onProviderCall?.({
+          operation: 'rerank',
+          provider: provider.kind,
+          model: result.model,
+          requestId: result.requestId,
+          latencyMs: Math.max(0, this.now() - rerankStart),
+          usage: result.usage,
+          status: 'succeeded',
+          errorCode: null,
+        });
 
         const scoreByIndex = new Map<number, number>();
         for (const entry of result.results) {
@@ -307,6 +374,22 @@ export class RetrievalService {
         reranked = true;
         rerankStatus = 'applied';
       } catch (err) {
+        const isTimeout =
+          err instanceof ProviderError && err.code === 'timeout';
+        audit?.onProviderCall?.({
+          operation: 'rerank',
+          provider: provider.kind,
+          model: profile.model,
+          requestId: null,
+          latencyMs: Math.max(0, this.now() - rerankStart),
+          status: signal?.aborted
+            ? 'cancelled'
+            : isTimeout
+              ? 'timeout'
+              : 'failed',
+          errorCode:
+            err instanceof ProviderError ? err.code : 'upstream_failure',
+        });
         const safeMessage =
           err instanceof ProviderError || err instanceof ApiError
             ? err.message
@@ -380,6 +463,53 @@ export class RetrievalService {
     });
   }
 
+  async answerFromSearch(
+    retrieval: IndexSearchResult,
+    options: {
+      question?: string;
+      model?: string;
+      temperature?: number;
+      maxTokens?: number;
+      contextBudgetChars?: number;
+    },
+    signal?: AbortSignal,
+  ): Promise<IndexAnswerResult> {
+    let resolvedChat: ReturnType<ProviderRegistry['resolveChat']>;
+    try {
+      resolvedChat = this.providers.resolveChat('chat', options.model);
+    } catch (err) {
+      if (err instanceof ProviderError) throw err.toApiError();
+      throw err;
+    }
+
+    validateGenerationParams(resolvedChat.profile, {
+      temperature: options.temperature,
+      maxTokens: options.maxTokens,
+    });
+
+    try {
+      const generated = await generateGroundedAnswer({
+        question: options.question ?? retrieval.query,
+        items: retrieval.items,
+        provider: resolvedChat.provider,
+        model: resolvedChat.profile.model,
+        temperature: options.temperature,
+        maxTokens: options.maxTokens,
+        contextBudgetChars: options.contextBudgetChars,
+        signal,
+        now: this.now,
+      });
+
+      return indexAnswerResult.parse({
+        ...generated,
+        retrieval,
+      });
+    } catch (err) {
+      if (err instanceof ProviderError) throw err;
+      throw err;
+    }
+  }
+
   async answer(
     generationId: string,
     request: IndexAnswerRequest,
@@ -414,22 +544,17 @@ export class RetrievalService {
     );
 
     try {
-      const generated = await generateGroundedAnswer({
-        question: request.query,
-        items: retrieval.items,
-        provider: resolvedChat.provider,
-        model: resolvedChat.profile.model,
-        temperature: request.temperature,
-        maxTokens: request.maxTokens,
-        contextBudgetChars: request.contextBudgetChars,
-        signal,
-        now: this.now,
-      });
-
-      return indexAnswerResult.parse({
-        ...generated,
+      return await this.answerFromSearch(
         retrieval,
-      });
+        {
+          question: request.query,
+          model: request.model,
+          temperature: request.temperature,
+          maxTokens: request.maxTokens,
+          contextBudgetChars: request.contextBudgetChars,
+        },
+        signal,
+      );
     } catch (err) {
       if (err instanceof ProviderError) throw err.toApiError();
       throw err;
