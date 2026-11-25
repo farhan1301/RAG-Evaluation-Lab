@@ -2,7 +2,12 @@ import { realpathSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadEnvironment, readConfig, type Config } from '../config/env.js';
-import { canonicalPath, pathsOverlap, restoreWorkspace } from '../db/backup.js';
+import {
+  assertRestoreDestination,
+  samePath,
+  pathsOverlap,
+  restoreWorkspace,
+} from '../db/backup.js';
 import { blobDirectory } from '../ingestion/blobs.js';
 
 export interface RestoreCliArgs {
@@ -63,37 +68,23 @@ export function resolveRestoreTargets(
 ): { databasePath: string; blobDirectory: string } {
   const configuredDb = config.env.DATABASE_PATH;
   const configuredBlobs = blobDirectory(config);
-  if (args.databasePath) {
-    if (args.blobDir) {
-      return {
-        databasePath: args.databasePath,
-        blobDirectory: args.blobDir,
-      };
-    }
-    const sameDatabase =
-      configuredDb !== ':memory:' &&
-      canonicalPath(args.databasePath) === canonicalPath(configuredDb);
-    if (sameDatabase) {
-      return {
-        databasePath: args.databasePath,
-        blobDirectory: configuredBlobs,
-      };
-    }
-    const implicitBlobs = join(dirname(args.databasePath), 'blobs');
-    if (pathsOverlap(implicitBlobs, configuredBlobs)) {
+  const databasePath = args.databasePath ?? configuredDb;
+  assertRestoreDestination(databasePath);
+  let blobs = args.blobDir ?? configuredBlobs;
+  if (
+    args.databasePath &&
+    !args.blobDir &&
+    (configuredDb === ':memory:' || !samePath(databasePath, configuredDb))
+  ) {
+    blobs = join(dirname(resolve(databasePath)), 'blobs');
+    if (pathsOverlap(blobs, configuredBlobs)) {
       throw new Error(
-        `Implicit blob destination (${resolve(implicitBlobs)}) overlaps the configured workspace blob directory (${resolve(configuredBlobs)}). Pass an explicit distinct --blobs directory.`,
+        `Implicit blob destination (${resolve(blobs)}) overlaps the configured workspace blob directory (${resolve(configuredBlobs)}). Pass an explicit distinct --blobs directory.`,
       );
     }
-    return {
-      databasePath: args.databasePath,
-      blobDirectory: implicitBlobs,
-    };
   }
-  return {
-    databasePath: configuredDb,
-    blobDirectory: args.blobDir ?? configuredBlobs,
-  };
+  assertRestoreDestination(blobs);
+  return { databasePath, blobDirectory: blobs };
 }
 
 function isMainModule(): boolean {

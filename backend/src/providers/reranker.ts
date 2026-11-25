@@ -114,6 +114,13 @@ export class HttpRerankProvider implements RerankProvider {
 
     if (!response.ok) {
       await response.body?.cancel();
+      if (response.status === 504) {
+        throw new ProviderError(
+          'timeout',
+          'Reranker gateway timed out (HTTP 504).',
+          { status: response.status },
+        );
+      }
       throw new ProviderError(
         'upstream_failure',
         `Reranker returned HTTP ${response.status}.`,

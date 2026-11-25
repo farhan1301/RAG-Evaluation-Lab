@@ -24,6 +24,7 @@ import {
   acquireDestinationLock,
   backupWorkspace,
   destinationLockPath,
+  pathsOverlap,
   releaseDestinationLock,
   restoreWorkspace,
 } from '../backend/src/db/backup';
@@ -240,6 +241,181 @@ describe('Phase 8 recovery: backup, restore, Qdrant rebuild, worker health, and 
 
   afterEach(() => {
     rmSync(rootDir, { recursive: true, force: true });
+  });
+
+  async function snapshotFixture() {
+    const source = {
+      databasePath: join(rootDir, 'source', 'workspace.sqlite'),
+      blobDirectory: join(rootDir, 'source', 'blobs'),
+    };
+    openDatabase(source.databasePath).close();
+    const backupDir = join(rootDir, 'snapshot');
+    await backupWorkspace({ ...source, outputDir: backupDir });
+    const target = {
+      databasePath: join(rootDir, 'live', 'workspace.sqlite'),
+      blobDirectory: join(rootDir, 'live', 'blobs'),
+      backupDir,
+    };
+    return { source, target };
+  }
+
+  it('checks case aliases of existing ancestors and missing restore destinations', async () => {
+    const work = join(rootDir, 'Work');
+    mkdirSync(work);
+    const insensitive = existsSync(join(rootDir, 'WORK'));
+    const databasePath = join(work, 'LIVE.sqlite');
+    const configuredBlobs = join(work, 'Blobs');
+    const config = readConfig({
+      DATABASE_PATH: databasePath,
+      BLOB_DIRECTORY: configuredBlobs,
+    });
+    const targets = (name: string) =>
+      resolveRestoreTargets(
+        {
+          databasePath: join(rootDir, 'WORK', name),
+          backupDir: '',
+          force: true,
+        },
+        config,
+      );
+    expect(
+      pathsOverlap(join(rootDir, 'WORK'), join(work, 'future', 'db')),
+    ).toBe(insensitive);
+    if (insensitive) {
+      expect(targets('live.sqlite').blobDirectory).toBe(configuredBlobs);
+      expect(() => targets('copy.sqlite')).toThrow(/--blobs/);
+      openDatabase(databasePath).close();
+      await expect(
+        backupWorkspace({
+          databasePath,
+          blobDirectory: configuredBlobs,
+          outputDir: join(rootDir, 'WORK'),
+          overwrite: true,
+        }),
+      ).rejects.toThrow(/overlap/);
+      expect(existsSync(databasePath)).toBe(true);
+    } else {
+      expect(targets('live.sqlite').blobDirectory).toBe(
+        join(rootDir, 'WORK', 'blobs'),
+      );
+    }
+  });
+
+  it('rejects final database and blob symlinks before selecting or swapping destinations', async () => {
+    const { source, target } = await snapshotFixture();
+    const config = readConfig({ DATABASE_PATH: source.databasePath });
+    mkdirSync(dirname(target.databasePath));
+    symlinkSync(source.databasePath, target.databasePath);
+    const args = {
+      databasePath: target.databasePath,
+      backupDir: target.backupDir,
+      force: true,
+    };
+    expect(() => resolveRestoreTargets(args, config)).toThrow(/symlink/);
+    await expect(restoreWorkspace({ ...target, force: true })).rejects.toThrow(
+      /symlink/,
+    );
+    rmSync(target.databasePath);
+    symlinkSync(source.blobDirectory, target.blobDirectory); // dangling links count too
+    expect(() =>
+      resolveRestoreTargets({ ...args, blobDir: target.blobDirectory }, config),
+    ).toThrow(/symlink/);
+    await expect(restoreWorkspace({ ...target, force: true })).rejects.toThrow(
+      /symlink/,
+    );
+    expect(existsSync(source.databasePath)).toBe(true);
+  });
+
+  it('refuses nested destination locks in both acquisition orders', async () => {
+    const { source, target } = await snapshotFixture();
+    const parent = dirname(target.databasePath);
+    const parentLock = await acquireDestinationLock(
+      destinationLockPath(parent),
+    );
+    try {
+      await expect(restoreWorkspace(target)).rejects.toThrow(
+        /conflicting.*lock/i,
+      );
+      expect(existsSync(destinationLockPath(target.databasePath))).toBe(false);
+      expect(existsSync(destinationLockPath(target.blobDirectory))).toBe(false);
+    } finally {
+      await releaseDestinationLock(parentLock);
+    }
+    await restoreWorkspace(target, {
+      afterInstallBlobs: async () => {
+        await expect(
+          backupWorkspace({ ...source, outputDir: parent, overwrite: true }),
+        ).rejects.toThrow(/conflicting.*lock/i);
+        expect(existsSync(destinationLockPath(parent))).toBe(false);
+      },
+    });
+    expect(existsSync(target.databasePath)).toBe(true);
+    expect(existsSync(`${target.databasePath}.restoring`)).toBe(false);
+  });
+
+  it('preserves a foreign replacement at rollback', async () => {
+    const { target } = await snapshotFixture();
+    mkdirSync(target.blobDirectory, { recursive: true });
+    writeFileSync(join(target.blobDirectory, 'original'), 'original');
+    await expect(
+      restoreWorkspace(
+        { ...target, force: true },
+        {
+          afterInstallBlobs: () => {
+            renameSync(target.blobDirectory, `${target.blobDirectory}.moved`);
+            mkdirSync(target.blobDirectory);
+            writeFileSync(join(target.blobDirectory, 'foreign'), 'keep');
+            throw new Error('interrupted');
+          },
+        },
+      ),
+    ).rejects.toThrow('interrupted');
+    expect(readFileSync(join(target.blobDirectory, 'foreign'), 'utf8')).toBe(
+      'keep',
+    );
+    expect(existsSync(join(`${target.blobDirectory}.prev`, 'original'))).toBe(
+      true,
+    );
+  });
+
+  it('refuses startup after process exit between fresh blob and database installs', async () => {
+    const { target } = await snapshotFixture();
+    const script = `
+      import { restoreWorkspace } from ${JSON.stringify(pathToFileURL(resolve('backend/src/db/backup.ts')).href)};
+      await restoreWorkspace(${JSON.stringify(target)}, { afterInstallBlobs: () => process.exit(42) });
+    `;
+    expect(
+      spawnSync(process.execPath, [
+        '--import',
+        'tsx',
+        '--input-type=module',
+        '-e',
+        script,
+      ]).status,
+    ).toBe(42);
+    expect(existsSync(target.blobDirectory)).toBe(true);
+    expect(existsSync(`${target.databasePath}.prev`)).toBe(false);
+    expect(() => openDatabase(target.databasePath)).toThrow(/\.restoring/);
+    expect(existsSync(target.databasePath)).toBe(false);
+  });
+
+  it('rejects restore destinations colliding with recovery and lock names', async () => {
+    const { target } = await snapshotFixture();
+    for (const suffix of ['.prev', '.restoring', '.rag-eval.lock']) {
+      await expect(
+        restoreWorkspace({
+          ...target,
+          blobDirectory: target.databasePath + suffix,
+        }),
+      ).rejects.toThrow(/reserved/);
+      await expect(
+        restoreWorkspace({
+          ...target,
+          databasePath: target.blobDirectory + suffix,
+        }),
+      ).rejects.toThrow(/reserved/);
+    }
+    expect(existsSync(dirname(target.databasePath))).toBe(false);
   });
 
   it('backs up SQLite online plus private blobs and restores into a fresh directory with full fidelity', async () => {
@@ -1520,6 +1696,7 @@ describe('Phase 8 recovery: backup, restore, Qdrant rebuild, worker health, and 
     // Startup refuses while .prev exists; manual recovery restores full access.
     expect(() => openDatabase(liveDbPath)).toThrow(/\.prev/i);
     renameSync(prevDbPath, liveDbPath);
+    rmSync(`${liveDbPath}.restoring`);
     rmSync(destinationLockPath(liveDbPath), { force: true });
     rmSync(destinationLockPath(liveBlobDir), { force: true });
     const manualDb = openDatabase(liveDbPath);
@@ -1853,6 +2030,8 @@ describe('Phase 8 recovery: backup, restore, Qdrant rebuild, worker health, and 
     expect(readFileSync(join(liveBlobDir, liveBlobKey))).toEqual(liveBytes);
     expect(existsSync(join(liveBlobDir, replBlobKey))).toBe(false);
 
+    expect(() => openDatabase(liveDbPath)).toThrow(/\.restoring/);
+    rmSync(`${liveDbPath}.restoring`);
     const verifyDb = openDatabase(liveDbPath);
     try {
       expect(new Datasets(verifyDb).get(liveDatasetId).name).toBe(

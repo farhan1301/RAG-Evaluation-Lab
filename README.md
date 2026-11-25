@@ -253,13 +253,12 @@ docker compose exec -T app node backend/dist/ops/rebuild-qdrant.js
 
 ### Interrupted Restore
 
-If a restore is interrupted by a crash or power loss during the swap, `.prev` backup artifacts (`<database>.prev`, `<database>-wal.prev`, `<database>-shm.prev`, and/or `<blobs>.prev`) remain on disk and `openDatabase()` refuses to start `app` or `worker` rather than silently opening an incomplete workspace. To recover manually:
+Before the first live rename, restore creates and flushes `<database>.restoring`. Startup refuses to open the workspace while this marker or any `.prev` artifact exists, including after a fresh restore that installed blobs but never installed the database.
 
-1. Confirm `app`, `worker`, and any `restore` process are stopped.
-2. Inspect the workspace directory:
-   - **If the new `<database>` or `<blobs>` directory is missing or incomplete:** remove any partial replacement files and move `<database>.prev` (plus any `-wal.prev` / `-shm.prev`) back to `<database>` and `<blobs>.prev` back to `<blobs>`.
-   - **If the new `<database>` and `<blobs>` directory are complete and verified:** delete the `.prev` files/directory.
-3. If any `.rag-eval.lock` file remains and no backup/restore is running, delete it, then start `app` and `worker`.
+1. Stop the app and worker and confirm all backup and restore processes have exited. Keep the source backup intact.
+2. Inspect the database, its SQLite sidecars, the blobs directory, and their `.prev` siblings. To recover an existing workspace, move partial replacements aside and return each available `.prev` to its original name. Keep originals that were never moved. If the replacement is complete, verify its database and referenced blobs before discarding the previous copies.
+3. For an incomplete fresh restore, move any partially installed files aside. With both destinations clear, remove the marker and abandoned destination locks and rerun restore from the verified backup.
+4. For a recovered workspace, remove the marker and any abandoned destination locks after verification, then restart the app and worker.
 
 You can also force a brand-new index generation through the HTTP API at any time via `POST /api/v1/indexes` with `"forceRebuild": true`.
 

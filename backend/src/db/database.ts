@@ -55,9 +55,13 @@ export function findInterruptedRestoreArtifacts(
 ): string[] {
   if (databasePath === ':memory:') return [];
   const prev = restorePrevPaths(databasePath, blobDirectory);
-  return [prev.dbPrev, prev.walPrev, prev.shmPrev, prev.blobsPrev].filter((p) =>
-    pathExistsSync(p),
-  );
+  return [
+    `${resolve(databasePath)}.restoring`,
+    prev.dbPrev,
+    prev.walPrev,
+    prev.shmPrev,
+    prev.blobsPrev,
+  ].filter((p) => pathExistsSync(p));
 }
 
 export function assertNoInterruptedRestoreSync(
@@ -68,7 +72,7 @@ export function assertNoInterruptedRestoreSync(
   if (found.length === 0) return;
   throw new Error(
     `Refusing to open workspace because interrupted restore backup files exist: ${found.join(', ')}. ` +
-      'Manual recovery required: if the new database or blobs directory is missing or incomplete, move the .prev files back into place; otherwise verify the restored workspace and delete the .prev files before restarting.',
+      'Manual recovery required: if the new database or blobs directory is missing or incomplete, move the .prev files back into place; verify the recovered workspace before removing .prev files and the .restoring marker. See README.md, Interrupted Restore.',
   );
 }
 

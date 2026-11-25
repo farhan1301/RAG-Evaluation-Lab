@@ -1,5 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, realpathSync, type Stats } from 'node:fs';
+import {
+  existsSync,
+  lstatSync,
+  realpathSync,
+  type BigIntStats,
+  type Stats,
+} from 'node:fs';
 import {
   chmod,
   copyFile,
@@ -89,8 +95,10 @@ export interface RestoreSwapHooks {
   afterInstallBlobs?: () => void | Promise<void>;
 }
 
+const lockSuffix = '.rag-eval.lock';
+
 export function destinationLockPath(targetPath: string): string {
-  return `${canonicalPath(targetPath)}.rag-eval.lock`;
+  return `${canonicalPath(targetPath)}${lockSuffix}`;
 }
 
 /**
@@ -101,7 +109,10 @@ export function destinationLockPath(targetPath: string): string {
 export async function acquireDestinationLock(
   lockPath: string,
 ): Promise<DestinationLock> {
-  const resolvedLockPath = canonicalPath(lockPath);
+  const resolvedLockPath = join(
+    canonicalPath(dirname(lockPath)),
+    basename(lockPath),
+  );
   await mkdir(dirname(resolvedLockPath), { recursive: true, mode: 0o700 });
   const token = randomUUID();
   const payload = `${JSON.stringify({
@@ -143,13 +154,7 @@ export async function acquireDestinationLock(
   return { path: resolvedLockPath, token, pid: process.pid };
 }
 
-/**
- * Releases a destination lock file only if it is still a regular file
- * containing this lock's exact ownership token.
- */
-export async function releaseDestinationLock(
-  lock: DestinationLock,
-): Promise<boolean> {
+async function ownsDestinationLock(lock: DestinationLock): Promise<boolean> {
   let raw: string;
   try {
     const info = await lstat(lock.path);
@@ -166,20 +171,49 @@ export async function releaseDestinationLock(
   } catch {
     return false;
   }
-  if (
-    typeof parsed !== 'object' ||
-    parsed === null ||
-    (parsed as { token?: unknown }).token !== lock.token
-  ) {
-    return false;
-  }
+  return (
+    typeof parsed === 'object' &&
+    parsed !== null &&
+    (parsed as { token?: unknown }).token === lock.token
+  );
+}
 
+export async function releaseDestinationLock(
+  lock: DestinationLock,
+): Promise<boolean> {
+  if (!(await ownsDestinationLock(lock))) return false;
   try {
     await unlink(lock.path);
     return true;
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false;
     throw err;
+  }
+}
+
+async function checkNestedDestinationLocks(target: string) {
+  function conflict(path: string): never {
+    throw new Error(`Conflicting backup/restore destination lock: ${path}`);
+  }
+  for (
+    let parent = dirname(target);
+    parent !== target;
+    parent = dirname(parent)
+  ) {
+    const path = parent + lockSuffix;
+    if (lstatSync(path, { throwIfNoEntry: false })) conflict(path);
+    if (parent === dirname(parent)) break;
+  }
+
+  async function scanDirectory(dir: string): Promise<void> {
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (entry.name.endsWith(lockSuffix)) conflict(path);
+      if (entry.isDirectory()) await scanDirectory(path);
+    }
+  }
+  if (lstatSync(target, { throwIfNoEntry: false })?.isDirectory()) {
+    await scanDirectory(target);
   }
 }
 
@@ -191,14 +225,25 @@ export async function withDestinationLocks<T>(
   lockPaths: string[],
   work: () => Promise<T>,
 ): Promise<T> {
-  const uniqueSorted = Array.from(
-    new Set(lockPaths.map((p) => canonicalPath(p))),
-  ).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  const uniqueSorted = Array.from(new Set(lockPaths)).sort((a, b) =>
+    a < b ? -1 : a > b ? 1 : 0,
+  );
   const acquired: DestinationLock[] = [];
 
   try {
     for (const lockPath of uniqueSorted) {
       acquired.push(await acquireDestinationLock(lockPath));
+    }
+    for (const lock of acquired) {
+      await checkNestedDestinationLocks(lock.path.slice(0, -lockSuffix.length));
+    }
+    // An ancestor swap could have finished while we were acquiring our locks.
+    for (const lock of acquired) {
+      if (!(await ownsDestinationLock(lock))) {
+        throw new Error(
+          `Conflicting backup/restore moved destination lock: ${lock.path}`,
+        );
+      }
     }
     return await work();
   } finally {
@@ -271,14 +316,52 @@ export function canonicalPath(targetPath: string): string {
     tail.unshift(basename(current));
     current = parent;
   }
-  if (existsSync(current)) {
-    try {
-      current = realpathSync(current);
-    } catch {
-      // Keep resolved path when canonicalization is unavailable.
-    }
-  }
+  current = realpathSync.native(current);
   return tail.length ? join(current, ...tail) : current;
+}
+
+function comparisonPath(target: string): string {
+  const path = canonicalPath(target);
+  // Probe an existing component without creating files in the workspace.
+  for (let part = path; part !== dirname(part); part = dirname(part)) {
+    const name = basename(part);
+    const alias = name.replace(/[a-zA-Z]/, (c) =>
+      c === c.toUpperCase() ? c.toLowerCase() : c.toUpperCase(),
+    );
+    if (alias === name) continue;
+    const original = lstatSync(part, { throwIfNoEntry: false, bigint: true });
+    if (!original?.isDirectory()) continue;
+    const other = lstatSync(join(dirname(part), alias), {
+      throwIfNoEntry: false,
+      bigint: true,
+    });
+    return other?.dev === original.dev && other.ino === original.ino
+      ? path.toLowerCase()
+      : path;
+  }
+  return process.platform === 'win32' || process.platform === 'darwin'
+    ? path.toLowerCase()
+    : path;
+}
+
+export function samePath(a: string, b: string): boolean {
+  return comparisonPath(a) === comparisonPath(b);
+}
+
+export function assertRestoreDestination(path: string): void {
+  const dest = resolve(path);
+  if (lstatSync(dest, { throwIfNoEntry: false })?.isSymbolicLink()) {
+    throw new Error(`Restore destination must not be a symlink: ${dest}`);
+  }
+  if (
+    canonicalPath(dest)
+      .split(sep)
+      .some((part) => /(?:\.prev|\.restoring|\.rag-eval\.lock)$/i.test(part))
+  ) {
+    throw new Error(
+      `Restore destination collides with a reserved recovery or lock name: ${dest}`,
+    );
+  }
 }
 
 function isSameOrInside(parent: string, child: string): boolean {
@@ -289,8 +372,8 @@ function isSameOrInside(parent: string, child: string): boolean {
 }
 
 export function pathsOverlap(a: string, b: string): boolean {
-  const ca = canonicalPath(a);
-  const cb = canonicalPath(b);
+  const ca = comparisonPath(a);
+  const cb = comparisonPath(b);
   return isSameOrInside(ca, cb) || isSameOrInside(cb, ca);
 }
 
@@ -446,6 +529,8 @@ async function assertRestoreTargetsWritable(
   targetBlobsDir: string,
   force: boolean,
 ): Promise<void> {
+  assertRestoreDestination(targetDbPath);
+  assertRestoreDestination(targetBlobsDir);
   if (force) return;
   if (existsSync(targetDbPath)) {
     throw new Error(
@@ -612,6 +697,22 @@ export async function backupWorkspace(
   });
 }
 
+async function rollbackTarget(
+  path: string,
+  installed: BigIntStats | undefined,
+  previous: string | null,
+) {
+  if (!previous && !installed) return;
+  const current = lstatSync(path, { throwIfNoEntry: false, bigint: true });
+  if (current) {
+    if (installed?.dev !== current.dev || installed.ino !== current.ino) {
+      throw new Error(`Cannot roll back over a different destination: ${path}`);
+    }
+    await rm(path, { recursive: current.isDirectory() });
+  }
+  if (previous) await rename(previous, path);
+}
+
 /**
  * Verifies a backup directory against its manifest, SQLite snapshot references,
  * and integrity checks, then stages and swaps the replacement SQLite database
@@ -628,6 +729,8 @@ export async function restoreWorkspace(
   const backupDir = resolve(options.backupDir);
   const targetDbPath = resolve(options.databasePath);
   const targetBlobsDir = resolve(options.blobDirectory);
+  assertRestoreDestination(targetDbPath);
+  assertRestoreDestination(targetBlobsDir);
   const targetDbPaths = [
     targetDbPath,
     `${targetDbPath}-wal`,
@@ -720,8 +823,9 @@ export async function restoreWorkspace(
     let movedPrevWal = false;
     let movedPrevShm = false;
     let movedPrevBlobs = false;
-    let installedBlobs = false;
-    let installedDb = false;
+
+    let installedBlobs: BigIntStats | undefined;
+    let installedDb: BigIntStats | undefined;
 
     try {
       // 1. Copy and checksum the backup SQLite database into writable staging FIRST,
@@ -809,6 +913,12 @@ export async function restoreWorkspace(
         checkpointExistingDatabaseForRestore(targetDbPath);
       }
 
+      await writeFile(`${targetDbPath}.restoring`, 'Restore in progress\n', {
+        flag: 'wx',
+        mode: 0o600,
+        flush: true,
+      });
+
       // 4. Move previous workspace aside to .prev names without deleting yet.
       if (existsSync(targetDbPath)) {
         await rename(targetDbPath, dbPrev);
@@ -829,11 +939,13 @@ export async function restoreWorkspace(
       }
 
       // 5. Install staged replacement into live locations.
+      const blobsIdentity = await lstat(stagedBlobsDir, { bigint: true });
+      const dbIdentity = await lstat(stagedDb, { bigint: true });
       await rename(stagedBlobsDir, targetBlobsDir);
-      installedBlobs = true;
+      installedBlobs = blobsIdentity;
       await hooks?.afterInstallBlobs?.();
       await rename(stagedDb, targetDbPath);
-      installedDb = true;
+      installedDb = dbIdentity;
 
       // 6. Verify live restored workspace before discarding .prev backups.
       const restoredDb = new sqlite.DatabaseSync(targetDbPath, {
@@ -857,32 +969,26 @@ export async function restoreWorkspace(
       // removing any newly installed replacement files without touching
       // unmoved original sidecars.
       try {
-        if (installedDb) {
-          await rm(targetDbPath, { force: true });
-          await rm(`${targetDbPath}-wal`, { force: true });
-          await rm(`${targetDbPath}-shm`, { force: true });
-        }
-        if (movedPrevDb) {
-          await rename(dbPrev, targetDbPath);
-        }
-        if (movedPrevWal) {
-          await rename(walPrev, `${targetDbPath}-wal`);
-        }
-        if (movedPrevShm) {
-          await rename(shmPrev, `${targetDbPath}-shm`);
-        }
+        await rollbackTarget(
+          targetDbPath,
+          installedDb,
+          movedPrevDb ? dbPrev : null,
+        );
+        if (movedPrevWal)
+          await rollbackTarget(`${targetDbPath}-wal`, undefined, walPrev);
+        if (movedPrevShm)
+          await rollbackTarget(`${targetDbPath}-shm`, undefined, shmPrev);
       } catch {
-        // Leave .prev files in place so startup refuses and operator can recover manually.
+        // Leave .prev and sentinel in place for manual recovery.
       }
       try {
-        if (installedBlobs) {
-          await rm(targetBlobsDir, { recursive: true, force: true });
-        }
-        if (movedPrevBlobs) {
-          await rename(blobsPrev, targetBlobsDir);
-        }
+        await rollbackTarget(
+          targetBlobsDir,
+          installedBlobs,
+          movedPrevBlobs ? blobsPrev : null,
+        );
       } catch {
-        // Leave .prev blobs directory in place for manual recovery.
+        // Leave .prev and sentinel in place for manual recovery.
       }
       await rm(stagedDb, { force: true }).catch(() => {});
       await rm(`${stagedDb}-wal`, { force: true }).catch(() => {});
@@ -898,6 +1004,8 @@ export async function restoreWorkspace(
     if (movedPrevWal) await rm(walPrev, { force: true });
     if (movedPrevShm) await rm(shmPrev, { force: true });
     if (movedPrevBlobs) await rm(blobsPrev, { recursive: true, force: true });
+
+    await unlink(`${targetDbPath}.restoring`);
 
     return {
       manifest,

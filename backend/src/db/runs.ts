@@ -1634,10 +1634,11 @@ export class Runs {
   existingObservationMetrics(
     runTaskId: string,
     retryFailed = false,
-  ): Set<string> {
+  ): Map<string, boolean> {
     const rows = this.db
       .prepare(
-        'SELECT metric_id, cutoff, status FROM metric_observations WHERE run_task_id = ?',
+        `SELECT metric_id, cutoff, status, json_extract(metadata, '$.ambiguousOutcome') AS ambiguous
+         FROM metric_observations WHERE run_task_id = ?`,
       )
       .all(runTaskId);
     const failedStatuses = new Set([
@@ -1649,11 +1650,14 @@ export class Runs {
       'judge_failed',
       'unresolved_evidence',
     ]);
-    return new Set(
-      rows
-        .filter((r) => !retryFailed || !failedStatuses.has(String(r.status)))
-        .map((r) => `${r.metric_id}:${r.cutoff}`),
-    );
+    const existing = new Map<string, boolean>();
+    for (const row of rows) {
+      const failed =
+        Boolean(row.ambiguous) || failedStatuses.has(String(row.status));
+      if (!retryFailed || !failed)
+        existing.set(`${row.metric_id}:${row.cutoff}`, !failed);
+    }
+    return existing;
   }
 
   maxJudgeAttemptNumber(runTaskId: string, metricId: string): number {
@@ -1817,6 +1821,24 @@ export class Runs {
           callId,
         );
     });
+  }
+
+  hasAmbiguousProviderCall(
+    runId: string,
+    jobId: string | undefined,
+    scope?: { retrievalTaskId: string } | { corpusPipelineId: string },
+  ): boolean {
+    let sql = `SELECT 1 FROM provider_calls WHERE run_id = ? AND job_id IS ?
+               AND status IN ('ambiguous', 'timeout')`;
+    const params: SQLInputValue[] = [runId, jobId ?? null];
+    if (scope && 'retrievalTaskId' in scope) {
+      sql += " AND run_task_id = ? AND operation IN ('query_embed', 'rerank')";
+      params.push(scope.retrievalTaskId);
+    } else if (scope) {
+      sql += " AND pipeline_id = ? AND operation = 'corpus_embed'";
+      params.push(scope.corpusPipelineId);
+    }
+    return Boolean(this.db.prepare(`${sql} LIMIT 1`).get(...params));
   }
 
   hasPriorProviderCall(
@@ -2334,7 +2356,7 @@ export class Runs {
     };
   }
 
-  getRunTaskOutcomeSummary(runId: string) {
+  getRunTaskOutcomeSummary(runId: string, jobId?: string) {
     const row = this.db
       .prepare(
         `SELECT
@@ -2355,7 +2377,7 @@ export class Runs {
     const ambiguousTask = this.db
       .prepare(
         `SELECT error_message AS errorMessage FROM run_tasks
-         WHERE run_id = ? AND state != 'succeeded' AND error_code = 'ambiguous_outcome'
+         WHERE run_id = ? AND error_code = 'ambiguous_outcome'
          ORDER BY rowid ASC LIMIT 1`,
       )
       .get(runId);
@@ -2365,14 +2387,17 @@ export class Runs {
          FROM metric_observations mo
          JOIN run_tasks rt ON rt.id = mo.run_task_id
          WHERE mo.run_id = ?
-           AND rt.state != 'succeeded'
            AND mo.status != 'scored'
            AND json_extract(mo.metadata, '$.ambiguousOutcome') = 1
          ORDER BY rt.rowid ASC, mo.rowid ASC
          LIMIT 1`,
       )
       .get(runId);
-    const hasOutstandingAmbiguousStage = Boolean(ambiguousTask || ambiguousObs);
+    const hasOutstandingAmbiguousStage = Boolean(
+      ambiguousTask ||
+        ambiguousObs ||
+        this.hasAmbiguousProviderCall(runId, jobId),
+    );
     const ambiguousErrorMessage =
       typeof ambiguousTask?.errorMessage === 'string'
         ? ambiguousTask.errorMessage

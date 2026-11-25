@@ -50,6 +50,13 @@ function mapAnthropicError(err: unknown): ProviderError {
   }
   if (err instanceof APIError) {
     const status = err.status;
+    if (status === 504) {
+      return new ProviderError(
+        'timeout',
+        'Anthropic gateway timed out (HTTP 504).',
+        { status, cause: err },
+      );
+    }
     const retryAfterMs = parseRetryAfterMs(err.headers?.get('retry-after'));
     return new ProviderError(
       'upstream_failure',

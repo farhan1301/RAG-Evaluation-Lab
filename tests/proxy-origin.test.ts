@@ -10,7 +10,7 @@ import { createLogger } from '../backend/src/lib/logger';
 import config, { resolveProxyOrigin } from '../frontend/vite.config';
 import { send } from './inProcess';
 
-function emitProxyOrigin(incomingOrigin?: string) {
+function emitProxyOrigin(incomingOrigin?: string, port = 3000) {
   const options = config.server?.proxy?.['/api'] as ProxyOptions;
   const proxy = new EventEmitter();
   options.configure?.(
@@ -20,10 +20,14 @@ function emitProxyOrigin(incomingOrigin?: string) {
   const headers = new Headers(
     incomingOrigin ? { origin: incomingOrigin } : undefined,
   );
-  proxy.emit('proxyReq', {
-    getHeader: (key: string) => headers.get(key) ?? undefined,
-    setHeader: (key: string, value: string) => headers.set(key, value),
-  });
+  proxy.emit(
+    'proxyReq',
+    {
+      getHeader: (key: string) => headers.get(key) ?? undefined,
+      setHeader: (key: string, value: string) => headers.set(key, value),
+    },
+    { socket: { localPort: port } },
+  );
   return {
     targetOrigin: new URL(String(options.target)).origin,
     forwardedOrigin: headers.get('origin'),
@@ -35,6 +39,14 @@ it('locks the Vite dev server to its trusted port with strictPort enabled', () =
   expect(config.server?.host).toBe('127.0.0.1');
   expect(config.server?.port).toBe(3000);
   expect(config.server?.strictPort).toBe(true);
+});
+
+it('trusts only the listening Vite port when --port overrides the default', () => {
+  const custom = emitProxyOrigin('http://localhost:5173', 5173);
+  expect(custom.forwardedOrigin).toBe(custom.targetOrigin);
+  expect(emitProxyOrigin('http://localhost:3000', 5173).forwardedOrigin).toBe(
+    'http://localhost:3000',
+  );
 });
 
 it('presents the backend Host and Origin together for browser writes through the Vite proxy', () => {

@@ -154,7 +154,25 @@ export class EvaluationRunner {
     pipeline: ExecutionPlanPipeline,
     builtInThisRun: Map<string, string>,
     hooks: RunExecutionHooks,
-  ): Promise<{ generationId: string } | { error: string }> {
+  ): Promise<
+    { generationId: string } | { error: string; ambiguous?: boolean }
+  > {
+    if (
+      this.runs.hasAmbiguousProviderCall(plan.runId, hooks.jobId, {
+        corpusPipelineId: pipeline.pipelineId,
+      })
+    ) {
+      const message =
+        'Previous corpus embedding dispatch has an ambiguous outcome. Explicit retry is required and may incur another provider charge.';
+      this.runs.markPipelineState(
+        plan.runId,
+        pipeline.pipelineId,
+        'failed',
+        message,
+        hooks.guard,
+      );
+      return { error: message, ambiguous: true };
+    }
     if (pipeline.indexGenerationId) {
       const existing = this.indexes.getStored(pipeline.indexGenerationId);
       if (existing.state === 'ready') {
@@ -376,7 +394,9 @@ export class EvaluationRunner {
           await wait(delay, undefined, { signal: hooks.signal });
           continue;
         }
-        const message = safeMessageOf(err, 'Index build failed.');
+        const message = sawAmbiguousTimeout
+          ? `${safeMessageOf(err, 'Corpus embedding timed out.')} Outcome is ambiguous after dispatch; explicit retry is required and may incur another provider charge.`
+          : safeMessageOf(err, 'Index build failed.');
         hooks.guard?.();
         if (this.indexes.markFailed(generationId, message)) {
           await this.indexBuilder.cleanupFailedGeneration(generationId);
@@ -388,7 +408,7 @@ export class EvaluationRunner {
           message,
           hooks.guard,
         );
-        return { error: message };
+        return { error: message, ambiguous: sawAmbiguousTimeout };
       }
     }
 
@@ -426,6 +446,68 @@ export class EvaluationRunner {
         retrievalLatencyMs: task.retrievalLatencyMs ?? 0,
         rerankLatencyMs: task.rerankLatencyMs,
       };
+    }
+
+    const failRetrieval = (
+      message: string,
+      errorCode: string,
+      ambiguous = false,
+    ) => {
+      const observations = evaluateTaskRetrieval({
+        retrievalFailed: true,
+        retrievalError: message,
+        answerable: task.answerable,
+        pool: task.pool,
+        qrels: task.qrels,
+        retrievedChunks: [],
+        evaluatedDepth: pipeline.config.retriever.topK,
+        cutoffs: plan.snapshot.cutoffs,
+      });
+      this.runs.saveTaskRetrieval(
+        {
+          runId: plan.runId,
+          pipelineId: pipeline.pipelineId,
+          taskVersionId: task.taskVersionId,
+          runTaskId: task.runTaskId,
+          retrievalKey,
+          succeeded: false,
+          items: [],
+          retrievedDepth: pipeline.config.retriever.topK,
+          rerankStatus: null,
+          rerankError: null,
+          retrievalLatencyMs: 0,
+          rerankLatencyMs: null,
+          errorCode,
+          errorMessage: message,
+          observations: ambiguous
+            ? observations.map((obs) => ({
+                ...obs,
+                metadata: { ...obs.metadata, ambiguousOutcome: true },
+              }))
+            : observations,
+        },
+        hooks.guard,
+      );
+      return {
+        succeeded: false,
+        retrievalKey,
+        items: [],
+        retrievalLatencyMs: 0,
+        rerankLatencyMs: null,
+        errorMessage: message,
+      };
+    };
+
+    if (
+      this.runs.hasAmbiguousProviderCall(plan.runId, hooks.jobId, {
+        retrievalTaskId: task.runTaskId,
+      })
+    ) {
+      return failRetrieval(
+        'Previous retrieval dispatch has an ambiguous outcome. Explicit retry is required and may incur another provider charge.',
+        'ambiguous_outcome',
+        true,
+      );
     }
 
     const reusable = this.runs.findReusableRetrieval(
@@ -475,46 +557,7 @@ export class EvaluationRunner {
       pipeline.config.reranker.enabled
         ? this.checkBudget(plan)
         : null;
-    if (budgetError) {
-      const observations = evaluateTaskRetrieval({
-        retrievalFailed: true,
-        retrievalError: budgetError,
-        answerable: task.answerable,
-        pool: task.pool,
-        qrels: task.qrels,
-        retrievedChunks: [],
-        evaluatedDepth: pipeline.config.retriever.topK,
-        cutoffs: plan.snapshot.cutoffs,
-      });
-      this.runs.saveTaskRetrieval(
-        {
-          runId: plan.runId,
-          pipelineId: pipeline.pipelineId,
-          taskVersionId: task.taskVersionId,
-          runTaskId: task.runTaskId,
-          retrievalKey,
-          succeeded: false,
-          items: [],
-          retrievedDepth: pipeline.config.retriever.topK,
-          rerankStatus: null,
-          rerankError: null,
-          retrievalLatencyMs: 0,
-          rerankLatencyMs: null,
-          errorCode: 'budget_exceeded',
-          errorMessage: budgetError,
-          observations,
-        },
-        hooks.guard,
-      );
-      return {
-        succeeded: false,
-        retrievalKey,
-        items: [],
-        retrievalLatencyMs: 0,
-        rerankLatencyMs: null,
-        errorMessage: budgetError,
-      };
-    }
+    if (budgetError) return failRetrieval(budgetError, 'budget_exceeded');
 
     for (let attempt = 1; attempt <= 1 + this.maxTransientRetries; attempt++) {
       hooks.signal?.throwIfAborted();
@@ -642,48 +685,18 @@ export class EvaluationRunner {
         const message = sawAmbiguousTimeout
           ? `${safeMessageOf(err, 'Retrieval timed out.')} Outcome is ambiguous after dispatch; explicit retry is required and may incur another provider charge.`
           : safeMessageOf(err, 'Retrieval failed.');
-        const observations = evaluateTaskRetrieval({
-          retrievalFailed: true,
-          retrievalError: message,
-          answerable: task.answerable,
-          pool: task.pool,
-          qrels: task.qrels,
-          retrievedChunks: [],
-          evaluatedDepth: pipeline.config.retriever.topK,
-          cutoffs: plan.snapshot.cutoffs,
-        }).map((obs) =>
-          sawAmbiguousTimeout
-            ? { ...obs, metadata: { ...obs.metadata, ambiguousOutcome: true } }
-            : obs,
+        return failRetrieval(
+          message,
+          sawAmbiguousTimeout ? 'timeout' : errorCodeOf(err),
+          sawAmbiguousTimeout,
         );
-        this.runs.saveTaskRetrieval(
-          {
-            runId: plan.runId,
-            pipelineId: pipeline.pipelineId,
-            taskVersionId: task.taskVersionId,
-            runTaskId: task.runTaskId,
-            retrievalKey,
-            succeeded: false,
-            items: [],
-            retrievedDepth: pipeline.config.retriever.topK,
-            rerankStatus: null,
-            rerankError: null,
-            retrievalLatencyMs: 0,
-            rerankLatencyMs: null,
-            errorCode: sawAmbiguousTimeout ? 'timeout' : errorCodeOf(err),
-            errorMessage: message,
-            observations,
-          },
-          hooks.guard,
+      }
+      if (sawAmbiguousTimeout) {
+        return failRetrieval(
+          'Retrieval provider timed out after dispatch. Explicit retry is required and may incur another provider charge.',
+          'timeout',
+          true,
         );
-        return {
-          succeeded: false,
-          retrievalKey,
-          items: [],
-          retrievalLatencyMs: 0,
-          rerankLatencyMs: null,
-          errorMessage: message,
-        };
       }
 
       const observations = evaluateTaskRetrieval({
@@ -1149,8 +1162,10 @@ export class EvaluationRunner {
     for (const metricId of ALL_JUDGE_METRICS) {
       hooks.signal?.throwIfAborted();
       hooks.guard?.();
-      if (existing.has(`${metricId}:0`)) {
-        completedMetrics += 1;
+      const completed = existing.get(`${metricId}:0`);
+      if (completed !== undefined) {
+        if (completed) completedMetrics += 1;
+        else failedMetrics += 1;
         continue;
       }
 
@@ -1373,6 +1388,9 @@ export class EvaluationRunner {
         generationByPipeline.set(pipeline.pipelineId, indexResult.generationId);
         readyPipelineCount += 1;
       } else {
+        const errorCode = indexResult.ambiguous
+          ? 'ambiguous_outcome'
+          : 'index_failed';
         const tasksForPipeline = plan.tasks.filter(
           (t) => t.pipelineId === pipeline.pipelineId,
         );
@@ -1402,7 +1420,7 @@ export class EvaluationRunner {
               rerankError: null,
               retrievalLatencyMs: 0,
               rerankLatencyMs: null,
-              errorCode: 'index_failed',
+              errorCode,
               errorMessage: indexResult.error,
               observations,
             },
@@ -1419,7 +1437,7 @@ export class EvaluationRunner {
                   : 'skipped',
               servingLatencyMs: null,
               judgeLatencyMs: null,
-              errorCode: 'index_failed',
+              errorCode,
               errorMessage: indexResult.error,
             },
             hooks.guard,
@@ -1432,7 +1450,8 @@ export class EvaluationRunner {
       this.runs.finalizeRun(
         runId,
         'failed',
-        'All pipeline index builds failed.',
+        this.runs.getRunTaskOutcomeSummary(runId, hooks.jobId)
+          .ambiguousErrorMessage ?? 'All pipeline index builds failed.',
         hooks.guard,
       );
       return;
@@ -1633,22 +1652,22 @@ export class EvaluationRunner {
 
     this.runs.updateRunStage(runId, 'aggregating', hooks.guard);
     hooks.checkpoint?.('aggregating');
-    const runOutcome = this.runs.getRunTaskOutcomeSummary(runId);
-    if (runOutcome.total > 0 && runOutcome.failed === runOutcome.total) {
-      this.runs.finalizeRun(
-        runId,
-        'failed',
-        runOutcome.firstErrorMessage ?? 'All evaluation tasks failed.',
-        hooks.guard,
-      );
-      return;
-    }
+    const runOutcome = this.runs.getRunTaskOutcomeSummary(runId, hooks.jobId);
     if (runOutcome.hasOutstandingAmbiguousStage) {
       this.runs.finalizeRun(
         runId,
         'failed',
         runOutcome.ambiguousErrorMessage ??
           'One or more stages have an ambiguous outcome after interruption or timeout. Explicit retry is required.',
+        hooks.guard,
+      );
+      return;
+    }
+    if (runOutcome.total > 0 && runOutcome.failed === runOutcome.total) {
+      this.runs.finalizeRun(
+        runId,
+        'failed',
+        runOutcome.firstErrorMessage ?? 'All evaluation tasks failed.',
         hooks.guard,
       );
       return;

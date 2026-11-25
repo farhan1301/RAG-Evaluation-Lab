@@ -50,11 +50,11 @@ export default defineConfig({
         target: backendTarget,
         changeOrigin: true,
         configure: (proxy) => {
-          proxy.on('proxyReq', (proxyReq) => {
+          proxy.on('proxyReq', (proxyReq, req) => {
             const incoming = proxyReq.getHeader('origin');
             const resolved = resolveProxyOrigin(incoming, {
               host: devHost,
-              port: devPort,
+              port: req.socket.localPort,
               target: backendTarget,
             });
             if (resolved !== undefined && resolved !== incoming) {

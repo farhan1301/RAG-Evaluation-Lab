@@ -14,6 +14,47 @@ const chunkA = '11111111-1111-4111-8111-111111111111';
 const chunkB = '22222222-2222-4222-8222-222222222222';
 const docA = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 
+it('classifies HTTP 504 as a non-retryable timeout for every paid adapter', async () => {
+  const gateway = vi.fn<typeof fetch>(
+    async () => new Response(null, { status: 504 }),
+  );
+  const providers = new ProviderRegistry(
+    readConfig({
+      OPENAI_API_KEY: 'fixture',
+      OPENAI_CHAT_MODEL: 'fixture-chat',
+      OPENAI_EMBED_MODEL: 'fixture-embed',
+      ANTHROPIC_API_KEY: 'fixture',
+      ANTHROPIC_JUDGE_MODEL: 'fixture-judge',
+      RERANK_BASE_URL: 'http://rerank.invalid',
+      RERANK_MODEL: 'fixture-rerank',
+    }),
+    { openai: gateway, anthropic: gateway, rerank: gateway },
+  );
+  const expected = { code: 'timeout', status: 504, retryable: false };
+  for (const role of ['chat', 'judge'] as const) {
+    const { profile, provider } = providers.resolveChat(role);
+    await expect(
+      provider.chat({
+        model: profile.model,
+        messages: [{ role: 'user', content: 'test' }],
+      }),
+    ).rejects.toMatchObject(expected);
+  }
+  await expect(
+    providers
+      .resolveEmbedding()
+      .provider.embed({ model: 'fixture-embed', inputs: ['test'] }),
+  ).rejects.toMatchObject(expected);
+  await expect(
+    providers.resolveReranker().provider.rerank({
+      model: 'fixture-rerank',
+      query: 'q',
+      documents: ['test'],
+    }),
+  ).rejects.toMatchObject(expected);
+  expect(gateway).toHaveBeenCalledTimes(4);
+});
+
 describe('OpenAI provider adapter', () => {
   it('supports bounded batching, index reordering, usage totals, and request IDs', async () => {
     const config = readConfig({

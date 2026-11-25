@@ -79,6 +79,7 @@ describe('server-side experiments, durable runs, checkpointing, and HTTP endpoin
   function setupStack(
     env: NodeJS.ProcessEnv = {},
     transports: ProviderTransports = {},
+    qdrant?: QdrantStore,
   ) {
     const config = readConfig({
       BLOB_DIRECTORY: join(dir, 'blobs'),
@@ -93,6 +94,7 @@ describe('server-side experiments, durable runs, checkpointing, and HTTP endpoin
     const indexBuilder = new IndexBuilder({
       indexes,
       providers,
+      qdrant,
       now: () => clock,
     });
     const retrieval = new RetrievalService({
@@ -135,6 +137,209 @@ describe('server-side experiments, durable runs, checkpointing, and HTTP endpoin
       app,
     };
   }
+
+  function oneTaskRun(
+    stack: ReturnType<typeof setupStack>,
+    pipelineIds: string[],
+    judgeEnabled = false,
+  ) {
+    const sample = stack.datasets.sample().value;
+    const taskId = sample.tasks.find(
+      (task) => task.answerable && task.referenceFacts.length,
+    )?.id;
+    if (!taskId) throw new Error('Missing answerable fixture task');
+    let revision = sample.revision;
+    for (const task of sample.tasks.filter((t) => t.id !== taskId)) {
+      revision = stack.datasets.editTask(
+        sample.id,
+        revision,
+        task.id,
+        undefined,
+      ).revision;
+    }
+    const mode = judgeEnabled ? 'full_rag' : 'retrieval_only';
+    const exp = stack.runs.createExperiment({
+      name: 'Timeout recovery',
+      datasetId: sample.id,
+      baselinePipelineId: pipelineIds[0],
+      pipelineIds,
+      mode,
+    });
+    const { run, job } = stack.runs.createRun(
+      exp.id,
+      { datasetRevision: revision, mode, judgeEnabled },
+      stack.config,
+    );
+    return {
+      run,
+      job,
+      work: (signal?: AbortSignal) =>
+        runOne(stack.jobs, {
+          ...stack,
+          directory: join(dir, 'blobs'),
+          cloud: new CloudParser('', undefined),
+          signal,
+        }),
+    };
+  }
+
+  it('requires explicit retry after reclaiming a recorded rerank timeout', async () => {
+    const rerank = vi.fn<typeof fetch>(
+      async () => new Response(null, { status: 504 }),
+    );
+    const stack = setupStack(
+      { RERANK_BASE_URL: 'http://rerank.invalid', RERANK_MODEL: 'rerank' },
+      { rerank },
+    );
+    const pipeline = stack.pipelines.create({
+      name: 'Reranked',
+      config: {
+        retriever: { mode: 'keyword', topK: 3, deduplicate: false },
+        reranker: { enabled: true, model: 'rerank', failurePolicy: 'fail' },
+      },
+    });
+    const { run, job, work } = oneTaskRun(stack, [pipeline.id]);
+    const crash = new AbortController();
+    vi.spyOn(stack.runs, 'saveTaskRetrieval').mockImplementationOnce(() => {
+      crash.abort();
+      throw Error('Interrupted before retrieval checkpoint');
+    });
+    await work(crash.signal);
+    expect(rerank).toHaveBeenCalledTimes(1);
+    clock += 10_000;
+    await work();
+    expect(rerank).toHaveBeenCalledTimes(1);
+    expect(
+      db
+        .prepare(
+          'SELECT status, error_code FROM provider_calls WHERE job_id = ?',
+        )
+        .all(job.id),
+    ).toEqual([{ status: 'ambiguous', error_code: 'timeout' }]);
+    expect(stack.jobs.get(job.id).state).toBe('failed');
+    expect(stack.runs.getRun(run.id).errorMessage).toMatch(/explicit retry/i);
+    const retry = stack.jobs.retry(job.id);
+    rerank.mockResolvedValueOnce(
+      Response.json({ results: [{ index: 0, score: 1 }] }),
+    );
+    await work();
+    expect(rerank).toHaveBeenCalledTimes(2);
+    expect(stack.jobs.get(retry.id).state).toBe('succeeded');
+  });
+
+  it('keeps checkpointed judge timeouts retryable after reclaim', async () => {
+    const judge = vi.fn(() => new Response(null, { status: 504 }));
+    const stack = setupStack(
+      {
+        OPENAI_API_KEY: 'fixture',
+        OPENAI_CHAT_MODEL: 'chat',
+        OPENAI_JUDGE_MODEL: 'judge',
+      },
+      {
+        openai: async (_url, init) =>
+          JSON.parse(String(init?.body)).model === 'judge'
+            ? judge()
+            : openaiChatResponse(
+                JSON.stringify({
+                  answer: 'An answer.',
+                  citations: [],
+                  abstained: false,
+                }),
+                'chat',
+              ),
+      },
+    );
+    const pipeline = stack.pipelines.create({
+      name: 'Judged',
+      config: {
+        retriever: { mode: 'keyword', topK: 3, deduplicate: false },
+        llm: { model: 'chat', temperature: 0.2, maxTokens: 200 },
+        judge: { model: 'judge' },
+      },
+    });
+    const { run, job, work } = oneTaskRun(stack, [pipeline.id], true);
+    const crash = new AbortController();
+    vi.spyOn(stack.runs, 'finalizeRunTask').mockImplementationOnce(() => {
+      crash.abort();
+      throw Error('Interrupted after metric checkpoints');
+    });
+    await work(crash.signal);
+    expect(judge).toHaveBeenCalledTimes(5);
+    expect(
+      db
+        .prepare(
+          "SELECT count(*) AS n FROM metric_observations WHERE status='judge_timeout'",
+        )
+        .get()?.n,
+    ).toBe(5);
+    clock += 10_000;
+    await work();
+    expect(judge).toHaveBeenCalledTimes(5);
+    expect(stack.runs.listRunTasks(run.id, 10, 0).items[0]).toMatchObject({
+      state: 'partial',
+      judgeState: 'failed',
+    });
+    expect(stack.runs.getRun(run.id).state).toBe('failed');
+    expect(stack.jobs.get(job.id).state).toBe('failed');
+    expect(stack.jobs.retry(job.id).parentId).toBe(job.id);
+    // Even an inconsistent succeeded checkpoint cannot hide the job's receipts.
+    db.prepare(
+      "UPDATE run_tasks SET state='succeeded', error_code=NULL WHERE run_id=?",
+    ).run(run.id);
+    db.prepare('DELETE FROM metric_observations WHERE run_id=?').run(run.id);
+    expect(
+      stack.runs.getRunTaskOutcomeSummary(run.id, job.id)
+        .hasOutstandingAmbiguousStage,
+    ).toBe(true);
+  });
+
+  it('keeps a mixed keyword and dense run retryable after a corpus embedding timeout', async () => {
+    const embed = vi.fn<typeof fetch>(
+      async () => new Response(null, { status: 504 }),
+    );
+    const stack = setupStack(
+      {
+        OPENAI_API_KEY: 'fixture',
+        OPENAI_EMBED_MODEL: 'embed',
+        QDRANT_URL: 'http://qdrant.invalid',
+      },
+      { openai: embed },
+      new QdrantStore({ url: 'http://qdrant.invalid' }),
+    );
+    const pipelines = (['keyword', 'dense'] as const).map((mode) =>
+      stack.pipelines.create({
+        name: mode,
+        config: {
+          retriever: { mode, topK: 3, deduplicate: false },
+          embedding: { model: 'embed' },
+        },
+      }),
+    );
+    const { run, job, work } = oneTaskRun(
+      stack,
+      pipelines.map((p) => p.id),
+    );
+    await work();
+    expect(embed).toHaveBeenCalledTimes(1);
+    expect(
+      db
+        .prepare(
+          'SELECT operation, status, error_code FROM provider_calls WHERE job_id=?',
+        )
+        .all(job.id),
+    ).toEqual([
+      { operation: 'corpus_embed', status: 'ambiguous', error_code: 'timeout' },
+    ]);
+    expect(
+      stack.runs.listRunTasks(run.id, 10, 0, pipelines[0].id).items[0].state,
+    ).toBe('succeeded');
+    expect(
+      stack.runs.listRunTasks(run.id, 10, 0, pipelines[1].id).items[0],
+    ).toMatchObject({ state: 'failed', errorCode: 'ambiguous_outcome' });
+    expect(stack.runs.getRun(run.id).errorMessage).toMatch(/explicit retry/i);
+    expect(stack.jobs.get(job.id).state).toBe('failed');
+    expect(stack.jobs.retry(job.id).parentId).toBe(job.id);
+  });
 
   it('upgrades a Phase 5 (version 3) database cleanly and enforces null-observation and unknown-cost DB invariants', () => {
     const oldPath = join(dir, 'v3.db');
