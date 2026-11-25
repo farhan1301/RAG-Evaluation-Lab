@@ -2,6 +2,9 @@ import { Router, type Request, type Response } from 'express';
 import * as c from '@rag-eval/contracts';
 import type { Datasets } from '../db/datasets.js';
 import type { Pipelines } from '../db/pipelines.js';
+import { parseTaskCsv } from '../ingestion/taskCsv.js';
+import { mediaType } from '../ingestion/blobs.js';
+import { requestKey, checkParser } from './uploads.js';
 import { ApiError } from '../errors.js';
 
 export class InputError extends ApiError {
@@ -20,7 +23,7 @@ export function parse<T>(schema: c.z.ZodType<T>, value: unknown): T {
     );
   return result.data;
 }
-function expected(req: Request) {
+export function expected(req: Request) {
   const header = req.get('If-Match');
   if (!header)
     throw new ApiError(
@@ -178,28 +181,104 @@ export function definitionsRouter(
   );
   router.post('/datasets/:id/task-imports', (req, res) => {
     const revision = expected(req);
-    const { tasks } = parse(c.taskImport, req.body);
+    const input = parse(c.csvRequest, req.body);
+    const head = datasets.head(req.params.id);
+    if (head.archived)
+      throw new ApiError(409, 'archived', 'This resource has been archived.');
+    if (head.revision !== revision)
+      throw new ApiError(
+        409,
+        'stale_revision',
+        'Dataset changed. Preview the CSV again.',
+      );
+    let rows: ReturnType<typeof parseTaskCsv>;
+    try {
+      rows = parseTaskCsv(input.csv);
+    } catch (err) {
+      throw new ApiError(
+        400,
+        'invalid_input',
+        err instanceof Error ? err.message : 'Invalid CSV file.',
+      );
+    }
+    const preview = parse(c.csvPreview, rows);
+    if (input.mode === 'preview') {
+      res.json(preview);
+      return;
+    }
     send(
       res,
       datasets.importTasks(
         req.params.id,
         revision,
-        tasks.map((t) => c.taskInput.parse(t)),
+        preview.tasks.map((t) =>
+          c.taskInput.parse({ ...t, provenance: 'CSV import' }),
+        ),
       ),
       201,
     );
   });
-  router.post('/datasets/:id/documents', (req, res) =>
-    send(
-      res,
-      datasets.addDocument(
-        req.params.id,
-        expected(req),
-        parse(c.documentInput, req.body),
-      ),
-      201,
-    ),
+  router.post('/documents/:id/parses', (req, res) => {
+    const { parser } = parse(c.parseRequest, req.body);
+    const job = datasets.requestParse(
+      req.params.id,
+      expected(req),
+      parser,
+      requestKey(req),
+      (name, mime) =>
+        checkParser(
+          parser,
+          mediaType(name, mime || 'application/octet-stream'),
+          capabilities.cloudParser,
+        ),
+    );
+    res.location(`/api/v1/jobs/${job.id}`).status(202).json(job);
+  });
+  router.post('/document-versions/:id/chunks', (req, res) => {
+    const job = datasets.jobs.requestChunks(
+      req.params.id,
+      parse(c.chunkOptions, req.body),
+      requestKey(req),
+    );
+    res.location(`/api/v1/jobs/${job.id}`).status(202).json(job);
+  });
+  router.get('/jobs/:id/chunks', (req, res) => {
+    const { after } = parse(
+      c.z.strictObject({
+        after: c.z.coerce.number().int().min(-1).default(-1),
+      }),
+      req.query,
+    );
+    res.json(datasets.jobs.chunks(req.params.id, after));
+  });
+  router.get('/jobs/:id', (req, res) =>
+    res.json(datasets.jobs.get(req.params.id)),
   );
+  router.get('/jobs/:id/events', (req, res) => {
+    const { after } = parse(
+      c.z.strictObject({
+        after: c.z.coerce.number().int().nonnegative().default(0),
+      }),
+      req.query,
+    );
+    res.json(datasets.jobs.events(req.params.id, after));
+  });
+  router.post('/jobs/:id/cancel', (req, res) => {
+    parse(c.empty, req.body ?? {});
+    res.json(datasets.jobs.cancel(req.params.id));
+  });
+  router.post('/jobs/:id/retry', (req, res) => {
+    parse(c.empty, req.body ?? {});
+    const previous = datasets.jobs.get(req.params.id);
+    if (previous.parser === 'llama-parse' && !capabilities.cloudParser)
+      throw new ApiError(
+        422,
+        'missing_capability',
+        'Configure LlamaParse to use the cloud parser.',
+      );
+    const job = datasets.jobs.retry(req.params.id);
+    res.location(`/api/v1/jobs/${job.id}`).status(202).json(job);
+  });
   router.delete('/datasets/:id/documents/:docId', (req, res) =>
     send(
       res,
@@ -207,13 +286,15 @@ export function definitionsRouter(
     ),
   );
   router.get('/datasets/:id/documents/:docId', (req, res) => {
-    const { revision } = parse(
+    const { revision,preview } = parse(
       c.z.strictObject({
+        preview:c.z.literal('true').optional(),
         revision: c.z.coerce.number().int().positive().optional(),
       }),
       req.query,
     );
-    res.json(datasets.getDocument(req.params.id, req.params.docId, revision));
+    const doc=datasets.getDocument(req.params.id,req.params.docId,revision);
+    res.json(preview?{...doc,content:doc.content?.slice(0,4000)}:doc);
   });
   router.post('/pipelines', (req, res) => {
     const input = parse(c.pipelineInput, req.body);

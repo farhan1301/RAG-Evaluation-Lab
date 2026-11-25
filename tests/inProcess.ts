@@ -9,7 +9,7 @@ export function send(
   url: string,
   body?: unknown,
   headers: Record<string, string> = {},
-  raw?: string,
+  raw?: string | Buffer,
 ) {
   const socket = new Socket();
   const req = new IncomingMessage(socket);

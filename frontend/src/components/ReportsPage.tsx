@@ -365,7 +365,7 @@ function RunReport({ latestRun }: { latestRun: ExperimentRun }) {
         lines.push('');
         lines.push('Configuration snapshot:');
         lines.push(
-          `- Chunking: ${capitalize(recommendedSnapshot.chunking.strategy)} chunks (${recommendedSnapshot.chunking.chunkSize} tokens, ${recommendedSnapshot.chunking.overlap}% overlap)`
+          `- Chunking: ${capitalize(recommendedSnapshot.chunking.strategy)} chunks (${recommendedSnapshot.chunking.chunkSize} characters, ${recommendedSnapshot.chunking.overlap} character overlap)`
         );
         lines.push(`- Embedding: ${recommendedSnapshot.embedding.model}`);
         lines.push(
@@ -455,7 +455,7 @@ function RunReport({ latestRun }: { latestRun: ExperimentRun }) {
         lines.push('');
         lines.push('Configuration Snapshot');
         lines.push(
-          `Chunking: ${capitalize(recommendedSnapshot.chunking.strategy)} chunks (${recommendedSnapshot.chunking.chunkSize} tokens, ${recommendedSnapshot.chunking.overlap}% overlap)`
+          `Chunking: ${capitalize(recommendedSnapshot.chunking.strategy)} chunks (${recommendedSnapshot.chunking.chunkSize} characters, ${recommendedSnapshot.chunking.overlap} character overlap)`
         );
         lines.push(
           `Embedding: ${recommendedSnapshot.embedding.model}`
@@ -561,8 +561,8 @@ function RunReport({ latestRun }: { latestRun: ExperimentRun }) {
                   <li>
                     • <strong>Chunking:</strong>{' '}
                     {capitalize(recommendedSnapshot.chunking.strategy)} chunks (
-                    {recommendedSnapshot.chunking.chunkSize} tokens,{' '}
-                    {recommendedSnapshot.chunking.overlap}% overlap)
+                    {recommendedSnapshot.chunking.chunkSize} characters,{' '}
+                    {recommendedSnapshot.chunking.overlap} character overlap)
                   </li>
                   <li>
                     • <strong>Embedding:</strong> {recommendedSnapshot.embedding.model}

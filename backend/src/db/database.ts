@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-const migrations = ['001-definitions.sql'];
+const migrations = ['001-definitions.sql', '002-ingestion.sql'];
 
 export function transaction<T>(db: DatabaseSync, work: () => T): T {
   db.exec('BEGIN IMMEDIATE');
@@ -22,7 +22,9 @@ export function ready(db: DatabaseSync) {
   );
 }
 
-export function openDatabase(path: string) {
+export function openDatabase(path: string, targetVersion = migrations.length) {
+  if (!Number.isInteger(targetVersion) || targetVersion<1 || targetVersion>migrations.length)
+    throw new RangeError('Invalid migration target.');
   if (path !== ':memory:')
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const db = new DatabaseSync(path);
@@ -34,9 +36,9 @@ export function openDatabase(path: string) {
       const version = Number(
         db.prepare('PRAGMA user_version').get()?.user_version,
       );
-      if (version > migrations.length)
+      if (version > targetVersion)
         throw new Error('Database requires a newer application.');
-      for (let i = version; i < migrations.length; i++) {
+      for (let i = version; i < targetVersion; i++) {
         db.exec(
           readFileSync(
             new URL(`./migrations/${migrations[i]}`, import.meta.url),

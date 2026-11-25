@@ -76,18 +76,6 @@ interface JudgeEvaluationInput {
 
 type JudgeResponse = Omit<JudgingSummary, 'costUsd'> & { pipelineId: string };
 
-interface ParseDocumentRequest {
-  filename: string;
-  mimeType?: string;
-  contentBase64: string;
-}
-
-interface ParseDocumentResponse {
-  text: string;
-  pageCount?: number;
-  jobId?: string;
-}
-
 async function postJson<T>(path: string, payload: unknown): Promise<T> {
   const response = await fetch(`/api/${path}`, {
     method: 'POST',
@@ -120,13 +108,9 @@ export const judgeAnswers = (payload: {
   evaluations: JudgeEvaluationInput[];
 }) => postJson<JudgeResponse>('judge', payload);
 
-export const parseDocument = (payload: ParseDocumentRequest) =>
-  postJson<ParseDocumentResponse>('parse', payload);
-
 export type {
   SearchMatchesResponse,
   AnswerResponse,
   JudgeResponse,
   JudgeEvaluationInput,
-  ParseDocumentResponse,
 };

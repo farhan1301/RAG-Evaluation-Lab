@@ -2,11 +2,9 @@ import { Router, type RequestHandler } from 'express';
 import type { Config } from '../config/env.js';
 import { OpenAIClient } from '../lib/openaiClient.js';
 import { QdrantClient } from '../lib/qdrantClient.js';
-import { LlamaParseClient } from '../lib/llamaParseClient.js';
 import { createAnswerHandler } from '../routes/answer.js';
 import { createEmbeddingsHandler } from '../routes/embeddings.js';
 import { createSearchHandler } from '../routes/search.js';
-import { createParseHandler } from '../routes/parse.js';
 import { createJudgeHandler } from '../routes/judge.js';
 import { ApiError } from '../errors.js';
 
@@ -41,14 +39,13 @@ export function legacyRouter(config: Config) {
   const openai = new OpenAIClient(config.legacy),
     qdrant = new QdrantClient(config.legacy);
   const handlers: Record<
-    'chunks' | 'search' | 'answer' | 'judge' | 'parse',
+    'chunks' | 'search' | 'answer' | 'judge',
     RequestHandler
   > = {
     chunks: createEmbeddingsHandler(openai, qdrant),
     search: createSearchHandler(openai, qdrant),
     answer: createAnswerHandler(openai, qdrant),
     judge: createJudgeHandler(openai),
-    parse: createParseHandler(new LlamaParseClient(config.legacy)),
   };
   for (const operation of Object.keys(handlers) as (keyof typeof handlers)[]) {
     router.post(
@@ -62,9 +59,6 @@ export function legacyRouter(config: Config) {
             'missing_capability',
             `Configure the required server profile for ${operation}.`,
           );
-        if (operation === 'parse') {
-          if (!config.capabilities.cloudParser) throw unavailable();
-        } else {
           const resolve = (
             role: 'embedding' | 'judge' | 'chat',
             key: string,
@@ -83,7 +77,6 @@ export function legacyRouter(config: Config) {
           }
           if (operation === 'answer') resolve('chat', 'model');
           if (operation === 'judge') resolve('judge', 'model');
-        }
         next();
       },
       handlers[operation],

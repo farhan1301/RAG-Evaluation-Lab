@@ -3,7 +3,8 @@ import { useState } from 'react';
 import { Link } from 'react-router';
 import { useDatasetSelection, request, useWrite } from '../data/workspace';
 import { useDraft } from '../data/draft';
-import { parseTaskCsv } from '../lib/taskCsv';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useCapabilities } from '../data/workspace';
 import { Button } from './ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from './ui/card';
 import { Input } from './ui/input';
@@ -220,15 +221,121 @@ function TaskEditor({ dataset, task }: { dataset: c.Dataset; task?: c.Task }) {
   );
 }
 
+function DocumentProgress({dataset,doc,parser}:{dataset:c.Dataset;doc:c.SavedDocument;parser:c.Parser}) {
+  const cache=useQueryClient(), write=useWrite('datasets');
+  const [open,setOpen]=useState(false);
+  const status=useQuery({
+    queryKey:['jobs',doc.jobId], enabled:!!doc.jobId,
+    queryFn:()=>request(c.job,`jobs/${doc.jobId}`),
+    refetchInterval:q=>q.state.data && ['failed','cancelled','succeeded'].includes(q.state.data.state)?false:1500,
+  });
+  const job=status.data;
+  const preview=useQuery({queryKey:['preview',doc.versionId,doc.jobId],enabled:open && (!doc.jobId || job?.state==='succeeded'),
+    queryFn:()=>request(c.document,`datasets/${dataset.id}/documents/${doc.id}?revision=${dataset.revision}&preview=true`)});
+  function action(path:string,body:unknown) {
+    write.mutate(async()=>{
+      const next=await request(c.job,path,'POST',body,dataset.revision,crypto.randomUUID());
+      cache.setQueryData(['jobs',next.id],next);
+      await cache.invalidateQueries({queryKey:['runner-document',doc.versionId]});
+      return request(c.dataset,`datasets/${dataset.id}`);
+    });
+  }
+  return (
+    <div className="space-y-1">
+      {doc.jobId && status.isPending && (
+        <p role="status">Loading parse status…</p>
+      )}
+      {job && (
+        <p role="status">
+          {job.parser} · {job.state.replaceAll('_', ' ')} · {job.stage} ·
+          attempt {job.attempt}
+          {job.message && ` · ${job.message}`}
+        </p>
+      )}
+      <div className="flex flex-wrap gap-1">
+        {doc.jobId &&
+          (!job || !['failed', 'cancelled', 'succeeded'].includes(job.state)) && (
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={status.isFetching}
+              onClick={() => void status.refetch()}
+            >
+              Refresh status
+            </Button>
+          )}
+        {job && ['queued', 'running'].includes(job.state) && (
+          <Button
+            size="sm"
+            disabled={write.isPending}
+            onClick={() => action(`jobs/${job.id}/cancel`, {})}
+          >
+            Cancel parsing
+          </Button>
+        )}
+        {job && ['failed', 'cancelled'].includes(job.state) && (
+          <Button
+            size="sm"
+            disabled={write.isPending}
+            onClick={() => action(`jobs/${job.id}/retry`, {})}
+          >
+            Retry {job.parser} parse
+          </Button>
+        )}
+        {(!doc.jobId ||
+          (job && ['failed', 'cancelled', 'succeeded'].includes(job.state))) && (
+          <>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={write.isPending}
+              onClick={() => action(`documents/${doc.id}/parses`, { parser })}
+            >
+              Parse with {parser}
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={!!doc.jobId && job?.state !== 'succeeded'}
+              onClick={() => setOpen(!open)}
+            >
+              {open ? 'Hide' : 'Preview'} extracted text
+            </Button>
+          </>
+        )}
+      </div>
+      {open && preview.isPending && <p role="status">Loading preview…</p>}
+      {open && preview.data && (
+        <pre className="whitespace-pre-wrap">
+          {preview.data.content || 'Choose a parser to extract text.'}
+        </pre>
+      )}
+      {(status.error || write.error || preview.error) && (
+        <p role="alert">
+          {(status.error ?? write.error ?? preview.error)?.message}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function Documents({ dataset }: { dataset: c.Dataset }) {
-  const write = useWrite('datasets'),
+  const write = useWrite('datasets'), capabilities=useCapabilities(),
     path = `datasets/${dataset.id}/documents`;
+  const [parser,setParser]=useState<c.Parser>('local');
+  const [uploading,setUploading]=useState('');
   return (
     <Card>
       <CardHeader>
         <CardTitle>Document Upload</CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
+        <label>Parser <select value={parser} disabled={write.isPending} onChange={e=>setParser(c.parser.parse(e.target.value))}>
+          <option value="local">Local TXT, Markdown or text PDF</option>
+          <option value="llama-parse" disabled={!capabilities.data?.cloudParser}>LlamaParse cloud (also supports DOCX)</option>
+        </select></label>
+        {parser==='llama-parse' && <p>Parsing sends the original document to LlamaParse and may incur a provider charge.</p>}
+        {uploading && <p role="status">Uploading {uploading}…</p>}
         <label
           htmlFor={`${dataset.id}-choose-a-document-for-the-runner`}
           className="block"
@@ -237,33 +344,18 @@ function Documents({ dataset }: { dataset: c.Dataset }) {
           <Input
             id={`${dataset.id}-choose-a-document-for-the-runner`}
             type="file"
-            accept=".txt,.md,.pdf,.docx"
+            accept=".txt,.md,.markdown,.pdf,.docx"
             disabled={write.isPending}
             onChange={(e) => {
               const file = e.target.files?.[0];
               e.target.value = '';
               if (!file) return;
+              setUploading(file.name);
               write.mutate(async () => {
-                if (file.size > 8 * 1024 * 1024)
-                  throw new Error('Choose a file of 8 MiB or smaller.');
-                const bytes = new Uint8Array(await file.arrayBuffer());
-                let binary = '';
-                for (let i = 0; i < bytes.length; i += 32768)
-                  binary += String.fromCharCode(
-                    ...bytes.subarray(i, i + 32768),
-                  );
-                return request(
-                  c.dataset,
-                  path,
-                  'POST',
-                  {
-                    name: file.name,
-                    mimeType: file.type || 'application/octet-stream',
-                    fileBase64: btoa(binary),
-                  },
-                  dataset.revision,
-                );
-              });
+                const query=new URLSearchParams({name:file.name,parser});
+                const result=await request(c.uploadResult,`${path}?${query}`,'POST',file,dataset.revision,crypto.randomUUID());
+                return result.dataset;
+              },{onSettled:()=>setUploading('')});
             }}
           />
         </label>
@@ -275,6 +367,7 @@ function Documents({ dataset }: { dataset: c.Dataset }) {
             <span>
               {doc.name} · {doc.size} bytes
             </span>
+            <DocumentProgress dataset={dataset} doc={doc} parser={parser} />
             <Button
               size="sm"
               variant="outline"
@@ -303,8 +396,9 @@ function Documents({ dataset }: { dataset: c.Dataset }) {
 
 function CsvImport({ dataset }: { dataset: c.Dataset }) {
   const [error, setError] = useState('');
+  const [reading,setReading]=useState(false);
   const [preview, setPreview] = useState<
-    (ReturnType<typeof parseTaskCsv> & { revision: number }) | null
+    (c.z.infer<typeof c.csvPreview> & { revision: number; csv:string }) | null
   >(null);
   const write = useWrite('datasets');
   return (
@@ -318,23 +412,27 @@ function CsvImport({ dataset }: { dataset: c.Dataset }) {
           id={`${dataset.id}-import-questions-from-csv`}
           type="file"
           accept=".csv"
-          disabled={write.isPending}
+          disabled={write.isPending || reading}
           onChange={async (e) => {
             const file = e.target.files?.[0];
             e.target.value = '';
             if (!file) return;
             setPreview(null);
             setError('');
+            setReading(true);
             try {
+              if(file.size>16*1024*1024) throw new Error('CSV exceeds the request size limit.');
+              const csv=await file.text();
               setPreview({
-                ...parseTaskCsv(await file.text()),
+                ...await request(c.csvPreview,`datasets/${dataset.id}/task-imports`,'POST',{mode:'preview',csv},dataset.revision),
+                csv,
                 revision: dataset.revision,
               });
             } catch (err) {
               setError(
                 err instanceof Error ? err.message : 'Invalid CSV file.',
               );
-            }
+            } finally {setReading(false);}
           }}
         />
       </label>
@@ -362,7 +460,7 @@ ${row.acceptanceRule}`,
           ))}
           <Button
             variant="outline"
-            disabled={write.isPending}
+            disabled={write.isPending || reading}
             onClick={() =>
               write.mutate(
                 () =>
@@ -370,7 +468,7 @@ ${row.acceptanceRule}`,
                     c.dataset,
                     `datasets/${dataset.id}/task-imports`,
                     'POST',
-                    { tasks: preview.tasks },
+                    {mode:'commit',csv:preview.csv},
                     preview.revision,
                   ),
                 { onSuccess: () => setPreview(null) },
@@ -381,7 +479,7 @@ ${row.acceptanceRule}`,
           </Button>
           <Button
             variant="ghost"
-            disabled={write.isPending}
+            disabled={write.isPending || reading}
             onClick={() => setPreview(null)}
           >
             Cancel import

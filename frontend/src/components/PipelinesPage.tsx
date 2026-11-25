@@ -138,8 +138,7 @@ function PipelineEditor({
             <summary>Parsing and chunking</summary>
             <div className="space-y-2 p-2">
               <p>
-                Uploaded files use LlamaParse. Sample documents already contain
-                text.
+                Choose the document parser on the Datasets page.
               </p>
               <label>
                 Chunking strategy{' '}
@@ -156,10 +155,10 @@ function PipelineEditor({
                     })
                   }
                 >
-                  <option value="recursive">Character window</option>
-                  <option value="semantic">Sentence packed</option>
-                  <option value="layout">Layout aware</option>
-                  <option value="table">Table splitter</option>
+                  <option value="character-window">Character window</option>
+                  <option value="sentence-packed">Sentence packed</option>
+                  <option value="heading-aware">Heading aware</option>
+                  <option value="table-aware">Table aware</option>
                 </select>
               </label>
               <label

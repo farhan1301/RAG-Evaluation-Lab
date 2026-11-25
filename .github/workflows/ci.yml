@@ -24,10 +24,12 @@ jobs:
         shell: bash
         env:
           NODE_ENV: test
-          DATABASE_PATH: ":memory:"
+          DATABASE_PATH: ${{ runner.temp }}/rag-eval.sqlite
           PORT: 17070
         run: |
           node backend/dist/index.js &
           pid=$!
-          trap 'kill "$pid"' EXIT
+          node backend/dist/jobs/worker.js &
+          worker=$!
+          trap 'kill "$pid" "$worker"' EXIT
           curl --fail --retry 10 --retry-connrefused --retry-delay 1 http://127.0.0.1:17070/health/ready | jq -e '.status == "ok"'

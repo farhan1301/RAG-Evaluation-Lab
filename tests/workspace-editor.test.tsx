@@ -181,3 +181,108 @@ it('writes recoverable form edits against their original revision and clears dis
     value: 'saved name',
   });
 });
+
+it('streams raw File uploads without base64 and renders refreshable document parse states in DatasetsPage', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rag-upload-ui-'));
+  const blobs = join(dir, 'blobs');
+  const db = openDatabase(join(dir, 'workspace.db'));
+  try {
+    const datasets = new Datasets(db);
+    const created = datasets.create('Uploads');
+    const api = createApp({
+      config: readConfig({ BLOB_DIRECTORY: blobs }),
+      datasets,
+      pipelines: new Pipelines(db),
+      ready: () => true,
+      logger: createLogger({ write: () => {} }),
+    });
+    const fetchSpy = vi.fn(async (url: string, options: RequestInit = {}) => {
+      const headers = Object.fromEntries(
+        new Headers(options.headers).entries(),
+      );
+      const isBlob = options.body instanceof Blob;
+      const raw = isBlob
+        ? Buffer.from(await (options.body as Blob).arrayBuffer())
+        : undefined;
+      const jsonBody =
+        !isBlob && options.body ? JSON.parse(String(options.body)) : undefined;
+      const result = await send(
+        api,
+        options.method ?? 'GET',
+        url,
+        jsonBody,
+        headers,
+        raw,
+      );
+      return Response.json(result.body, { status: result.status });
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+    const file = new Blob(['Streamed offline text.'], { type: 'text/plain' });
+    const uploaded = await request(
+      c.uploadResult,
+      `datasets/${created.id}/documents?name=notes.txt&parser=local`,
+      'POST',
+      file,
+      1,
+      'upload-key-1',
+    );
+    expect(fetchSpy).toHaveBeenCalledWith(
+      `/api/v1/datasets/${created.id}/documents?name=notes.txt&parser=local`,
+      expect.objectContaining({
+        method: 'POST',
+        body: file,
+        headers: expect.objectContaining({
+          'Content-Type': 'text/plain',
+          'If-Match': '"1"',
+          'Idempotency-Key': 'upload-key-1',
+        }),
+      }),
+    );
+
+    const storage = new Map([['rag-eval.dataset', created.id]]);
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => storage.get(key) ?? null,
+    });
+    const renderWithJob = async () => {
+      const cache = new QueryClient();
+      const rows = await request(c.page(c.summary), 'datasets');
+      cache.setQueryData(listKey('datasets'), rows.items);
+      const latest = await request(c.dataset, `datasets/${created.id}`);
+      cache.setQueryData(['datasets', created.id], latest);
+      cache.setQueryData(
+        ['capabilities'],
+        await request(c.capabilities, 'capabilities'),
+      );
+      cache.setQueryData(
+        ['jobs', uploaded.jobId],
+        await request(c.job, `jobs/${uploaded.jobId}`),
+      );
+      const html = renderToStaticMarkup(
+        <QueryClientProvider client={cache}>
+          <MemoryRouter>
+            <DatasetsPage />
+          </MemoryRouter>
+        </QueryClientProvider>,
+      );
+      cache.clear();
+      return html;
+    };
+
+    const queuedHtml = await renderWithJob();
+    expect(queuedHtml).toContain('local · queued · waiting · attempt 0');
+    expect(queuedHtml).toContain('Refresh status');
+    expect(queuedHtml).toContain('Cancel parsing');
+
+    const lease = datasets.jobs.claim();
+    if (!lease) throw new Error('Expected claimed job.');
+    datasets.jobs.fail(lease, 'Simulated extraction error.');
+    const failedHtml = await renderWithJob();
+    expect(failedHtml).toContain(
+      'local · failed · waiting · attempt 1 · Simulated extraction error.',
+    );
+    expect(failedHtml).toContain('Retry local parse');
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

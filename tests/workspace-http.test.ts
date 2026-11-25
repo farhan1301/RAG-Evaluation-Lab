@@ -1,3 +1,6 @@
+import { mkdtempSync,rmSync } from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import * as c from '@rag-eval/contracts';
 import { readConfig } from '../backend/src/config/env';
@@ -9,12 +12,13 @@ import { createLogger } from '../backend/src/lib/logger';
 import { send } from './inProcess';
 
 let db: ReturnType<typeof openDatabase>,
+  directory:string,
   log: string[],
   clock: number,
   isReady: boolean;
 function app(env: NodeJS.ProcessEnv = {}) {
   return createApp({
-    config: readConfig(env),
+    config: readConfig({BLOB_DIRECTORY:directory,...env}),
     datasets: new Datasets(db),
     pipelines: new Pipelines(db),
     logger: createLogger({ write: (line) => log.push(line) }),
@@ -24,12 +28,13 @@ function app(env: NodeJS.ProcessEnv = {}) {
 }
 const match = (revision: number) => ({ 'if-match': `"${revision}"` });
 beforeEach(() => {
+  directory=mkdtempSync(join(tmpdir(),'http-blobs-'));
   db = openDatabase(':memory:');
   log = [];
   clock = 100;
   isReady = true;
 });
-afterEach(() => db.close());
+afterEach(() => {db.close();rmSync(directory,{recursive:true,force:true});});
 
 it('exposes safe capabilities and process/database health with zero credentials', async () => {
   const api = app();
@@ -47,7 +52,7 @@ it('exposes safe capabilities and process/database health with zero credentials'
   });
 });
 
-it('supports conditional dataset/task/grade CRUD, archive, revision history and JSON import', async () => {
+it('supports conditional dataset/task/grade CRUD, archive, revision history and CSV import', async () => {
   const api = app(),
     base = '/api/v1/datasets';
   const created = await send(api, 'POST', base, { name: 'Research' });
@@ -59,16 +64,11 @@ it('supports conditional dataset/task/grade CRUD, archive, revision history and 
   const added = await send(
     api,
     'POST',
-    `${path}/documents`,
-    { name: 'test.txt', mimeType: 'text/plain', fileBase64: 'dGVzdA==' },
-    match(1),
+    `${path}/documents?name=test.txt`,undefined,{'content-type':'text/plain',...match(1)},'test'
   );
-  const doc = c.dataset.parse(added.body).documents[0];
-  expect(added.status).toBe(201);
-  expect((await send(api, 'GET', `${path}/documents/${doc.id}`)).body).toEqual({
-    ...doc,
-    fileBase64: 'dGVzdA==',
-  });
+  const doc=c.uploadResult.parse(added.body).dataset.documents[0];
+  expect(added.status).toBe(202);
+  expect((await send(api,'GET',`${path}/documents/${doc.id}`)).body).toEqual(doc);
   const createTask = await send(
     api,
     'POST',
@@ -126,7 +126,7 @@ it('supports conditional dataset/task/grade CRUD, archive, revision history and 
         api,
         'POST',
         `${path}/task-imports`,
-        { tasks: [{ question: 'Imported?' }] },
+        {mode:'commit',csv:'question,answer,acceptance rule\nImported?,Answer,Rule'},
         match(6),
       )
     ).status,

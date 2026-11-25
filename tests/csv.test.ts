@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { parseTaskCsv } from '../frontend/src/lib/taskCsv';
+import { parseTaskCsv } from '../backend/src/ingestion/taskCsv';
 
 it('imports BOM-prefixed CSV with aliases, quoted fields, embedded newlines, and row warnings', () => {
   const result = parseTaskCsv(

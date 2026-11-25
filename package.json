@@ -18,7 +18,9 @@
     "lint": "biome lint .",
     "typecheck": "tsc -p packages/contracts/tsconfig.json && tsc -p backend/tsconfig.json --noEmit && tsc -p frontend/tsconfig.json && tsc -p frontend/tsconfig.node.json && tsc -p tests/tsconfig.json",
     "test": "vitest run",
-    "format": "biome format --write ."
+    "format": "biome format --write .",
+    "dev:worker": "npm run dev:worker -w rag-eval-backend",
+    "start:worker": "npm run start:worker -w rag-eval-backend"
   },
   "devDependencies": {
     "typescript": "7.0.2",

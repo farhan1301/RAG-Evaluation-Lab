@@ -73,7 +73,7 @@ it('isolates colliding sanitized names, long IDs, and dimensions', () => {
     [2, pipelineId],
     [2, 'pipeline-a'],
     [2, longId],
-    [2, longId + 'x'],
+    [2, `${longId}x`],
     [3, pipelineId],
   ] as const;
   const names = scopes.map(([dimension, id]) =>

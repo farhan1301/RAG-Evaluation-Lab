@@ -117,15 +117,18 @@ export const parseTaskCsv = (rawContent: string): ParseTaskCsvResult => {
     }
   });
 
-  if (headerPositions.question === undefined) {
+  const questionIndex = headerPositions.question;
+  if (questionIndex === undefined) {
     throw new Error('CSV is missing the "question" column header.');
   }
 
-  if (headerPositions.expectedAnswer === undefined) {
+  const expectedAnswerIndex = headerPositions.expectedAnswer;
+  if (expectedAnswerIndex === undefined) {
     throw new Error('CSV is missing the "expected_answer" column header.');
   }
 
-  if (headerPositions.acceptanceRule === undefined) {
+  const acceptanceRuleIndex = headerPositions.acceptanceRule;
+  if (acceptanceRuleIndex === undefined) {
     throw new Error('CSV is missing the "acceptance_rule" column header.');
   }
 
@@ -134,9 +137,9 @@ export const parseTaskCsv = (rawContent: string): ParseTaskCsvResult => {
 
   dataRows.forEach((row, index) => {
     const rowNumber = index + 2;
-    const question = (row[headerPositions.question!] ?? '').trim();
-    const expectedAnswer = (row[headerPositions.expectedAnswer!] ?? '').trim();
-    const acceptanceRule = (row[headerPositions.acceptanceRule!] ?? '').trim();
+    const question = (row[questionIndex] ?? '').trim();
+    const expectedAnswer = (row[expectedAnswerIndex] ?? '').trim();
+    const acceptanceRule = (row[acceptanceRuleIndex] ?? '').trim();
 
     if (!question && !expectedAnswer && !acceptanceRule) {
       return;

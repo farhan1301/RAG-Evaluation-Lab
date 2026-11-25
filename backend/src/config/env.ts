@@ -40,6 +40,8 @@ const envSchema = z
       .default(
         fileURLToPath(new URL('../../data/workspace.sqlite', import.meta.url)),
       ),
+    BLOB_DIRECTORY: z.string().min(1).optional(),
+    WORKER_LEASE_MS: positive.min(300).max(120000).default(30000),
     CORS_ORIGINS: csv
       .pipe(
         z.array(

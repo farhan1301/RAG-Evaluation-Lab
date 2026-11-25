@@ -1,24 +1,20 @@
-import { expect, it, vi } from 'vitest';
-import { createParseHandler } from '../backend/src/routes/parse';
-import { invoke } from './handler';
+import { expect,it } from 'vitest';
+import {CloudParser} from '../backend/src/ingestion/cloud';
+import {parseLocal} from '../backend/src/ingestion/local';
+import {readFileSync} from 'node:fs';
 
-it('sends the decoded fixture to the configured parser and returns its provenance', async () => {
-  const result = { text: 'Synthetic page', pageCount: 1, jobId: 'job' };
-  const parseDocument = vi.fn().mockResolvedValue(result);
-  const buffer = Buffer.from('Synthetic page');
-  const handler = createParseHandler({
-    isConfigured: () => true,
-    parseDocument,
-  });
-  const response = await invoke(handler, {
-    filename: 'sample.txt',
-    contentBase64: buffer.toString('base64'),
-  });
-  expect(parseDocument).toHaveBeenCalledWith({
-    buffer,
-    filename: 'sample.txt',
-    outputFormat: 'markdown',
-    mimeType: undefined,
-  });
-  expect(response.body).toEqual(result);
+it.each([
+  ['Plain markdown.', 'Plain markdown.'],
+  [{markdown:'## Title\r\ntext'},'## Title\ntext'],
+  [{data:{output:[{text:'a'},{text:'b'}]}},'a\n\nb'],
+  [{pages:[{md:'repeat'},{md:''},{md:'repeat'}]},'repeat\n\n\n\nrepeat'],
+])('normalizes provider text, markdown and ordered pages',async(payload,expected)=>{
+  const cloud=new CloudParser('https://fixture.invalid','key',async()=>typeof payload==='string'?new Response(payload):Response.json(payload));
+  expect((await cloud.download('job',new AbortController().signal)).text).toBe(expected);
+});
+
+it('gives an actionable result for a PDF without extractable text',async()=>{
+  const original=readFileSync(new URL('./fixtures/tiny.pdf',import.meta.url),'latin1');
+  const empty=Buffer.from(original.replace('Offline fixture text.',' '.repeat(21)),'latin1');
+  await expect(parseLocal(empty,'application/pdf')).rejects.toThrow('scanned PDF');
 });

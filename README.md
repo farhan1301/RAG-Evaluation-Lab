@@ -77,7 +77,7 @@ Click the image below to watch a demonstration of the platform:
   - Pipeline comparison with metric deltas
   - Automated recommendations for optimal configurations
   - Export capabilities (Markdown and PDF)
-- **Document Processing**: LlamaParse-powered ingestion for consistent parsing with extensibility for additional techniques
+- **Document Processing**: Local text, Markdown and PDF extraction plus optional LlamaParse
 
 ### Appearance
 
@@ -93,12 +93,12 @@ RAG Evaluation Lab/
 │   ├── src/
 │   │   ├── components/   # Feature pages (Datasets, Pipelines, Experiments, Reports, etc.)
 │   │   ├── state/        # React context providers for global state
-│   │   └── lib/          # Utilities (chunking, CSV parsing, API client)
+│   │   └── lib/          # Worker chunk reader and API client
 │   └── package.json
 ├── backend/              # TypeScript Express API server
 │   ├── src/
-│   │   ├── lib/         # Client libraries (OpenAI, Qdrant, LlamaParse)
-│   │   └── routes/      # API endpoints (chunks, search, answer, judge, parse)
+│   │   ├── lib/         # Client libraries (OpenAI, Qdrant)
+│   │   └── routes/      # Runner endpoints (chunks, search, answer, judge)
 │   ├── scripts/         # Verification and setup utilities
 │   └── sample-data/     # Sample assets for testing
 ├── favicon/             # Application icons
@@ -118,7 +118,7 @@ Before getting started, ensure you have the following:
 | npm | 9+ | Package manager |
 | Qdrant | Optional | Dense retrieval in the current runner |
 | OpenAI API Key | Optional | OpenAI embedding, answer and judge profiles |
-| LlamaParse API Key | Optional | Parsing uploaded documents in the current runner |
+| LlamaParse API Key | Optional | Optional cloud parsing, including DOCX |
 
 ---
 
@@ -135,7 +135,7 @@ cd "RAG Evaluation Lab"
 cp .env.example .env.local
 ```
 
-The dataset and pipeline editors work with the empty provider settings in `.env.example`. To use the existing experiment runner, configure Qdrant and the embedding, chat and judge roles. Uploaded files also require a LlamaParse key.
+The dataset and pipeline editors work with the empty provider settings in `.env.example`. To use the existing experiment runner, configure Qdrant and the embedding, chat and judge roles. TXT, Markdown and text PDFs parse locally. DOCX uses the optional LlamaParse profile.
 
 ### 2. Install Dependencies
 
@@ -154,7 +154,13 @@ npm run dev:backend
 # Server starts at http://127.0.0.1:7070
 ```
 
-**Terminal 2 - Start Frontend:**
+**Terminal 2 - Start the ingestion worker**
+
+```bash
+npm run dev:worker
+```
+
+**Terminal 3 - Start Frontend:**
 ```bash
 npm run dev
 # Open http://127.0.0.1:3000
@@ -168,7 +174,7 @@ npm run dev
 
 ### Environment Variables
 
-Node loads `.env.local` and `.env` from the repository root. Process environment settings take precedence, followed by `.env.local`. The API stores the workspace in `backend/data/workspace.sqlite` by default. Set `DATABASE_PATH` to select another path. Node 22 emits an expected `ExperimentalWarning` when opening `node:sqlite`.
+Node loads `.env.local` and `.env` from the repository root. Process environment settings take precedence, followed by `.env.local`. The API stores the workspace in `backend/data/workspace.sqlite` by default. Set `DATABASE_PATH` to select another path. The API and worker must share that database and the private blob directory (by default, `blobs/` next to the database). Set `BLOB_DIRECTORY` on both processes to override it. Back up the database and blobs together. Readiness includes a recent worker heartbeat. Node 22 emits an expected `ExperimentalWarning` when opening `node:sqlite`.
 
 Set `OPENAI_CHAT_MODEL` to a current model and `OPENAI_API_KEY` to enable generation. The judge uses that model unless `OPENAI_JUDGE_MODEL` selects another. For embeddings, configure `OPENAI_EMBED_MODEL` or set `LOCAL_EMBED_BASE_URL` and `LOCAL_EMBED_MODEL` to an existing OpenAI-compatible service and its installed embedding model. For example, Ollama serves the compatible API at `http://127.0.0.1:11434/v1`. Qdrant uses `QDRANT_URL` and an optional `QDRANT_API_KEY`. Set `QDRANT_REQUIRED=true` to include its readiness probe.
 
@@ -187,6 +193,12 @@ Browser requests use same-origin `/api` paths. Vite proxies them to `http://127.
 | `/api/v1/datasets/:id/tasks` | GET, POST | List or add questions |
 | `/api/v1/datasets/:id/tasks/:taskId` | PATCH, DELETE | Edit or remove a question |
 | `/api/v1/tasks/:id/qrels` | PUT | Replace the labeling pool and graded document labels |
+| `/api/v1/datasets/:id/documents?name=…&parser=local` | POST | Stream raw file bytes with their Content-Type. Returns 202 with document ID, job ID and Location. |
+| `/api/v1/datasets/:id/documents/:docId?preview=true` | GET | Read up to 4,000 characters of extracted text |
+| `/api/v1/documents/:id/parses` | POST | Request another extraction with `{"parser":"local"}` or `{"parser":"llama-parse"}` |
+| `/api/v1/datasets/:id/task-imports` | POST | Supply `csv` and `mode` (`preview` or `commit`). Commit replaces questions at the specified revision. |
+| `/api/v1/jobs/:id`, `/api/v1/jobs/:id/events?after=0` | GET | Read progress or up to 100 ordered events after the supplied sequence number |
+| `/api/v1/jobs/:id/cancel`, `/api/v1/jobs/:id/retry` | POST | Cancel work or create a linked retry |
 | `/api/v1/pipelines/:id/copies` | POST | Create an independent copy |
 
 Send the current quoted revision in `If-Match` when changing an existing resource, including its tasks, grades and documents. A stale revision returns `409`, and a missing precondition returns `428`. Successful edits return the updated definition with an `ETag`. List responses contain `items` and `nextCursor`. Pass the cursor with `?cursor=…&limit=…` for the next page. Error responses carry a safe message, code, and request ID.
@@ -272,21 +284,21 @@ This section provides detailed information about the architecture, components, a
 | `src/lib/logger.ts` | Pino emits structured, redacted records to stdout. |
 | `src/lib/openaiClient.ts` | Embedding + chat helpers that surface latency, token usage, GPT‑5 model quirks, and response-format support. |
 | `src/lib/qdrantClient.ts` | Pipeline-aware collection manager (sanitizes names, ensures payload indexes, retries deletes, and filters searches per `pipelineId`). |
-| `src/lib/llamaParseClient.ts` | Robust LlamaParse integration: resilient uploads, exponential backoff polling, payload normalization (markdown/text), and page-count extraction. |
+| `src/ingestion/cloud.ts` | Resumable LlamaParse upload, poll and download. An uncertain upload requires explicit retry. |
 | `src/routes/embeddings.ts` | `POST /api/chunks` – embeds chunk payloads, replaces only the selected pipeline’s points, and returns vector dimension metadata. |
 | `src/routes/search.ts` | `POST /api/search` – embeds a query, searches the pipeline-specific collection, and exposes the resolved collection + vector size. |
 | `src/routes/answer.ts` | `POST /api/answer` – runs retrieval, composes a grounded answer prompt, returns matches/usage/latency, and mirrors the resolved collection metadata. |
 | `src/routes/judge.ts` | `POST /api/judge` – coaxes structured JSON verdicts, aggregates pass rate + average scores, and keeps raw per-task rationales. |
-| `src/routes/parse.ts` | `POST /api/parse` – forwards files to LlamaParse with detailed logging, returns normalized text + job IDs, and identifies missing parser configuration. |
+| `src/jobs/worker.ts` | Claims durable parse and chunk jobs, renews leases, and checkpoints completed work. |
 | `src/index.ts` | Migrates SQLite, starts the app on loopback, drains requests and closes the database on SIGINT or SIGTERM. |
 | `scripts/*.ts` | Optional scoped index setup: `node --import tsx backend/scripts/setup-qdrant-index.ts <pipeline-id> <vector-dimension>` from the root. |
 
-Start locally with `npm run dev:backend` from the root. Run the compiled backend with `npm start -w rag-eval-backend` after the workspace build.
+Start locally with `npm run dev:backend` from the root. Run the compiled backend with `npm start -w rag-eval-backend` and the compiled worker with `npm run start:worker` after the workspace build.
 
 #### Notable Behaviors
 - Pipeline-aware Qdrant usage keeps embeddings partitioned per experiment configuration while provisioning a collection per pipeline and vector size. Reindexing replaces points for that pipeline. Existing legacy collections stay intact.
 - The API returns safe error codes and request IDs for provider failures.
-- LlamaParse integration includes retry/backoff for uploads/downloads and normalizes heterogeneous payload formats into a consistent `{ text, pageCount }` shape.
+- A confirmed LlamaParse job ID survives worker restarts. Page offsets address normalized text in UTF-16 code units.
 - Judge responses request JSON-formatted output, require valid 0–1 scores, and aggregate latency/tokens for downstream cost analysis.
 - Judge coverage is scored tasks / submitted tasks. Only scored tasks contribute to judge pass rate and mean scores. Unavailable judgments are retained in the task details. The legacy judged context precision score is the judge’s 0–1 assessment of how well retrieved text supports the answer.
 
@@ -305,11 +317,10 @@ Start locally with `npm run dev:backend` from the root. Run the compiled backend
 | `src/data/legacyRunner.ts` | Projects the selected saved documents, tasks, baseline and pipeline settings into the transitional runner. |
 | `src/state/experimentResults.tsx` | Keeps progress, per-pipeline answers, and the latest completed run available across routes in the current tab. |
 | `src/lib/chunking.ts` | Chunking strategies (recursive/semantic/layout/table), sentence-aware splitting, and chunk statistics helpers. |
-| `src/lib/taskCsv.ts` | CSV parser that accepts header aliases, surfaces warnings, and hydrates task lists. |
-| `src/lib/backend.ts` | Strongly-typed fetch utilities for `/api/parse`, `/api/chunks`, `/api/search`, `/api/answer`, and `/api/judge`, including error parsing. |
+| `src/lib/backend.ts` | Strongly-typed fetch utilities for `/api/chunks`, `/api/search`, `/api/answer`, and `/api/judge`, including error parsing. |
 | `src/components/DatasetsPage.tsx` | File ingestion with progress UI, removal, sample dataset loader, and CSV task import feedback. |
 | `src/components/PipelinesPage.tsx` | Configure parsing, chunking, embedding, retrieval, reranker (placeholder), LLM, and judge stages per pipeline with expand/collapse controls. |
-| `src/components/ExperimentsPage.tsx` | Orchestrates runs across multiple pipelines, auto-parses documents when needed, tracks status logs/progress, and rolls up cost + latency estimates. |
+| `src/components/ExperimentsPage.tsx` | Orchestrates runs across multiple pipelines, reads worker-generated chunks, tracks status logs/progress, and rolls up cost + latency estimates. |
 | `src/components/ReportsPage.tsx` | Compares pipelines, recommends top configs, highlights metric deltas, and exports Markdown/PDF summaries. |
 | `src/components/HistoryPage.tsx` | Links to the latest completed report by run ID. Refreshing the tab clears run data. |
 | `src/components/DocumentationPage.tsx` | Rich in-app documentation with copy-to-clipboard snippets, tabbed guides, and workflow walkthroughs. |
@@ -317,9 +328,9 @@ Start locally with `npm run dev:backend` from the root. Run the compiled backend
 | `src/main.tsx` | Mounts the browser router, query client, and in-memory workspace providers. |
 
 #### Experiment Pipeline Logic
-1. **Prerequisites:** The UI blocks experiment runs until at least one uploaded document (raw content or ready-to-parse file) and one task exist.
-2. **Parsing on Demand:** When a pipeline runs, any uploaded-but-unparsed documents are sent to `/api/parse` using the baseline pipeline’s parsing strategy, with parse progress held locally for that execution.
-3. **Chunking:** `chunkDocumentsWithConfig` slices content according to the active pipeline strategy; `summarizeChunkGroups` produces quick stats for the report.
+1. **Prerequisites:** The UI blocks experiment runs until the dataset has parsed documents and at least one task.
+2. **Parsing:** Uploading a document queues extraction. Open Datasets to inspect progress or retry a failed job.
+3. **Chunking:** The worker generates chunks using the active pipeline strategy. `summarizeChunkGroups` produces quick stats for the report.
 4. **Upsert:** `/api/chunks` embeds every chunk and writes them to the pipeline’s target Qdrant collection. Existing vectors for that pipeline are cleared, and collection metadata (dimension, source collection) is tracked.
 5. **Answering:** For each task + pipeline, `/api/answer` performs retrieval, records retrieved chunks, latency, and token usage, and normalizes snippets for downstream rendering.
 6. **Judging:** Answers feed `/api/judge`, which yields per-task verdicts (pass/review/unavailable), dimension-specific scores, rationales, latency, and token counts.
@@ -330,7 +341,6 @@ Start locally with `npm run dev:backend` from the root. Run the compiled backend
 ### Remaining / Optional Work
 - **Authentication & Authorization (critical):** No auth guard or rate limiting exists today; add API keys/session middleware before exposing beyond localhost.
 - **Persistent Storage (critical):** Dataset and pipeline revisions are durable. Run history remains in tab memory.
-- **Parsing Flexibility (critical):** Parsing uploaded files requires a configured LlamaParse key; introduce alternative connectors so LlamaParse is optional.
 - **Provider Coverage (critical):** Backend only supports OpenAI even though the UI advertises other providers; wire up reranker + additional integrations (Anthropic/Cohere).
 - **Real-time Feedback:** Consider SSE/websocket progress updates instead of polling to show real-time pipeline stages.
 - **Testing & Observability:** Add unit/integration coverage for backend clients/routes, plus telemetry dashboards for token/cost monitoring.

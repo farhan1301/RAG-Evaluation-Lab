@@ -62,10 +62,25 @@ export class OpenAIClient {
       throw new Error(`OpenAI embeddings failed (${response.status}): ${detail}`);
     }
 
-    const payload: any = await response.json();
-    const vectors = Array.isArray(payload?.data)
-      ? payload.data.map((item: any) => item?.embedding).filter(Array.isArray)
-      : [];
+    const payload: unknown = await response.json();
+    const data =
+      typeof payload === 'object' &&
+      payload !== null &&
+      'data' in payload &&
+      Array.isArray(payload.data)
+        ? payload.data
+        : [];
+    const vectors = data
+      .map((item: unknown) =>
+        typeof item === 'object' &&
+        item !== null &&
+        'embedding' in item &&
+        Array.isArray(item.embedding) &&
+        item.embedding.every((value): value is number => typeof value === 'number')
+          ? item.embedding
+          : null,
+      )
+      .filter((embedding): embedding is number[] => embedding !== null);
 
     if (!vectors.length) {
       throw new Error('OpenAI embedding response did not include vectors.');
@@ -110,24 +125,60 @@ export class OpenAIClient {
       throw new Error(`OpenAI chat completion failed (${response.status}): ${detail}`);
     }
 
-    const payload: any = await response.json();
-    const content = payload?.choices?.[0]?.message?.content;
+    const payload: unknown = await response.json();
+    const choices =
+      typeof payload === 'object' &&
+      payload !== null &&
+      'choices' in payload &&
+      Array.isArray(payload.choices)
+        ? payload.choices
+        : [];
+    const firstChoice: unknown = choices[0];
+    const message =
+      typeof firstChoice === 'object' &&
+      firstChoice !== null &&
+      'message' in firstChoice
+        ? firstChoice.message
+        : undefined;
+    const content =
+      typeof message === 'object' &&
+      message !== null &&
+      'content' in message
+        ? message.content
+        : undefined;
 
     if (typeof content !== 'string' || !content.trim()) {
       throw new Error('OpenAI chat completion returned empty content.');
     }
 
-    const usage = payload?.usage;
+    const rawUsage =
+      typeof payload === 'object' && payload !== null && 'usage' in payload
+        ? payload.usage
+        : undefined;
+    const usage =
+      typeof rawUsage === 'object' && rawUsage !== null
+        ? {
+            promptTokens:
+              'prompt_tokens' in rawUsage &&
+              typeof rawUsage.prompt_tokens === 'number'
+                ? rawUsage.prompt_tokens
+                : 0,
+            completionTokens:
+              'completion_tokens' in rawUsage &&
+              typeof rawUsage.completion_tokens === 'number'
+                ? rawUsage.completion_tokens
+                : 0,
+            totalTokens:
+              'total_tokens' in rawUsage &&
+              typeof rawUsage.total_tokens === 'number'
+                ? rawUsage.total_tokens
+                : 0,
+          }
+        : undefined;
 
     return {
       content,
-      usage: usage
-        ? {
-            promptTokens: usage.prompt_tokens ?? 0,
-            completionTokens: usage.completion_tokens ?? 0,
-            totalTokens: usage.total_tokens ?? 0,
-          }
-        : undefined,
+      usage,
     };
   }
 }

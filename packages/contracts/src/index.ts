@@ -37,6 +37,7 @@ export const errorCode = z.enum([
   'precondition_required',
   'archived',
   'not_found',
+  'conflict',
   'throttled',
   'origin_denied',
   'upstream_failure',
@@ -93,15 +94,19 @@ export const task = taskInput.extend({ id, versionId: id });
 export type TaskInput = z.infer<typeof taskInput>;
 export type Task = z.infer<typeof task>;
 
-// Bounded interim transport for the existing runner. Phase 4 owns streamed blobs.
-export const documentInput = z.strictObject({
-  name,
-  mimeType: z.string().max(150),
-  fileBase64: z
-    .base64()
-    .min(4)
-    .max(12 * 1024 * 1024),
+export const parser = z.enum(['local', 'llama-parse']);
+export type Parser = z.infer<typeof parser>;
+export const jobState = z.enum(['queued', 'running', 'cancellation_requested', 'cancelled', 'succeeded', 'failed']);
+export const job = z.strictObject({
+  id, versionId: id, parser, state: jobState, stage: z.string(),
+  attempt: z.int().nonnegative(), message: z.string().nullable(),
+  parentId: id.nullable(), artifactId: z.string().nullable(),
 });
+export type Job = z.infer<typeof job>;
+export const jobEvent = job.pick({state:true,stage:true,message:true}).extend({seq:z.int().positive(), time:z.int()});
+export const pageSpan = z.strictObject({page:z.int().positive(),start:z.int().nonnegative(),end:z.int().nonnegative()});
+export const parseRequest = z.strictObject({parser});
+export const uploadQuery = parseRequest.extend({name: name.refine(n => !/[/\\]/.test(n) && !Array.from(n).some(c => c.charCodeAt(0)<32)), parser:parser.default('local')});
 export const document = z.strictObject({
   id,
   versionId: id,
@@ -110,7 +115,8 @@ export const document = z.strictObject({
   size: z.int().nonnegative(),
   hash: z.string().length(64),
   content: z.string().optional(),
-  fileBase64: z.string().optional(),
+  jobId: id.optional(),
+  pages: z.array(pageSpan).optional(),
 });
 export type SavedDocument = z.infer<typeof document>;
 export const dataset = summary.extend({
@@ -118,10 +124,9 @@ export const dataset = summary.extend({
   tasks: z.array(task),
 });
 export type Dataset = z.infer<typeof dataset>;
-export const taskImport = z.strictObject({
-  tasks: z.array(taskFields).min(1).max(1000),
-});
-
+export const uploadResult = z.strictObject({dataset, documentId:id, jobId:id});
+export const csvRequest = z.strictObject({mode:z.enum(['preview','commit']),csv:z.string().min(1)});
+export const csvPreview = z.strictObject({tasks:z.array(taskFields.pick({question:true,expectedAnswer:true,acceptanceRule:true})).min(1).max(1000), warnings:z.array(z.string())});
 export const role = z.enum(['embedding', 'chat', 'judge', 'rerank']);
 export type Role = z.infer<typeof role>;
 export const profile = z.strictObject({
@@ -140,18 +145,19 @@ export type Capabilities = z.infer<typeof capabilities>;
 const profileRef = z.strictObject({
   model: name.or(z.literal('')).default(''),
 });
+export const legacyStrategies = {recursive:'character-window',semantic:'sentence-packed',layout:'heading-aware',table:'table-aware'} as const;
+export const strategy=z.enum(['character-window','sentence-packed','heading-aware','table-aware']);
+export const chunkOptions=z.strictObject({
+  strategy:z.union([strategy,z.enum(['recursive','semantic','layout','table']).transform(s=>legacyStrategies[s])]),
+  chunkSize:z.int().min(100).max(1000),overlap:z.int().min(0).max(50)
+});
+export const chunkRow=z.strictObject({id,ordinal:z.int(),start:z.int(),end:z.int(),page:z.int(),content:z.string()});
 export const pipelineConfig = z.strictObject({
   schemaVersion: z.literal(1).default(1),
   parsing: z
     .strictObject({ strategy: z.literal('llama-parse') })
     .default({ strategy: 'llama-parse' }),
-  chunking: z
-    .strictObject({
-      strategy: z.enum(['recursive', 'semantic', 'layout', 'table']),
-      chunkSize: z.int().min(100).max(1000),
-      overlap: z.int().min(0).max(50),
-    })
-    .default({ strategy: 'recursive', chunkSize: 300, overlap: 20 }),
+  chunking:chunkOptions.default({strategy:'character-window',chunkSize:300,overlap:20}),
   embedding: profileRef.default({ model: '' }),
   retriever: z
     .strictObject({

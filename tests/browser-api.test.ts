@@ -2,7 +2,6 @@ import { afterEach, expect, it, vi } from 'vitest';
 import {
   answerQuestion,
   judgeAnswers,
-  parseDocument,
   searchMatches,
   upsertChunks,
 } from '../frontend/src/lib/backend';
@@ -14,10 +13,6 @@ it('posts runner requests relative to the current origin', async () => {
   vi.stubGlobal('fetch', transport);
   const question = { pipelineId: 'baseline', question: 'Why?' };
   const calls = [
-    [
-      parseDocument({ filename: 'fixture.txt', contentBase64: 'dGVzdA==' }),
-      'parse',
-    ],
     [upsertChunks({ pipelineId: 'baseline', chunks: [] }), 'chunks'],
     [searchMatches(question), 'search'],
     [answerQuestion(question), 'answer'],

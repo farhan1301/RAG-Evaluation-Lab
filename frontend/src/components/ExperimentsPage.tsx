@@ -26,12 +26,10 @@ import { type TaskResult, useExperimentResults } from '../state/experimentResult
 import {
   chunkDocumentsWithConfig,
   summarizeChunkGroups,
-  type ParsedDocument,
   type DocumentChunkGroup,
   type DocumentChunk,
 } from '../lib/chunking';
-import { upsertChunks, answerQuestion, judgeAnswers, parseDocument } from '../lib/backend';
-import type { DatasetDocument } from '../types/dataset';
+import { upsertChunks, answerQuestion, judgeAnswers } from '../lib/backend';
 import type {
   AnswerDetail,
   ExperimentPipelineResult,
@@ -115,8 +113,6 @@ export function ExperimentsPage() {
   const experimentPipelines = pipelines;
   const baselinePipelineId =
     pipelines.find((pipeline) => pipeline.isBaseline)?.id ?? experimentPipelines[0]?.id ?? '';
-  const baselinePipeline =
-    pipelines.find((pipeline) => pipeline.id === baselinePipelineId) ?? experimentPipelines[0];
 
   const [selectedPipelineId, setSelectedPipelineId] = useState(baselinePipelineId);
 
@@ -135,10 +131,7 @@ export function ExperimentsPage() {
         if (doc.status !== 'complete') {
           return false;
         }
-        const hasContent = typeof doc.content === 'string' && doc.content.trim().length > 0;
-        const hasFile =
-          typeof doc.fileBase64 === 'string' && doc.fileBase64.trim().length > 0;
-        return hasContent || hasFile;
+        return !!doc.content?.trim();
       }),
     [documents]
   );
@@ -228,14 +221,6 @@ export function ExperimentsPage() {
   const canViewReport =
     !isRunning && latestRun && latestRun.pipelines.length > 0;
 
-  const buildSnippet = (text: string) => {
-    const normalized = text.replace(/\s+/g, ' ').trim();
-    if (!normalized) {
-      return 'Parsed document is empty.';
-    }
-    return normalized.length > 200 ? `${normalized.slice(0, 200)}…` : normalized;
-  };
-
   const resetState = () => {
     setStatusLog([]);
     setTaskResultsByPipeline({});
@@ -279,11 +264,6 @@ export function ExperimentsPage() {
 
     const pipelineNames = pipelineOverview.map((entry) => entry.name);
 
-    let latestDocuments: DatasetDocument[] = documents;
-    const applyDocuments = (updater: (prev: DatasetDocument[]) => DatasetDocument[]) => {
-      latestDocuments = updater(latestDocuments);
-    };
-
     appendLog(`Experiment started at ${formatTimestamp()}.`);
     if (pipelineNames.length === 1) {
       appendLog(`Running pipeline: ${pipelineNames[0]}.`);
@@ -296,146 +276,6 @@ export function ExperimentsPage() {
 
     try {
       const taskById = new Map(readyTasks.map((task) => [task.id, task]));
-
-      const documentsNeedingParse = latestDocuments.filter(
-        (doc) =>
-          doc.status === 'complete' &&
-          !doc.content?.trim() &&
-          typeof doc.fileBase64 === 'string' &&
-          doc.fileBase64.trim()
-      );
-
-      if (documentsNeedingParse.length > 0) {
-        setStage('parsing');
-        appendLog(
-          `Parsing ${documentsNeedingParse.length} document${documentsNeedingParse.length === 1 ? '' : 's'} using ${baselinePipeline.parsing.strategy}…`
-        );
-
-        let parsedCount = 0;
-        for (const doc of documentsNeedingParse) {
-          appendLog(`→ Parsing "${doc.name}"`);
-          applyDocuments((prev) =>
-            prev.map((item) =>
-              item.id === doc.id
-                ? {
-                    ...item,
-                    status: 'processing',
-                    statusMessage: 'Parsing document…',
-                    error: undefined,
-                  }
-                : item
-            )
-          );
-
-          try {
-            const response = await parseDocument({
-              filename: doc.name ?? 'Document',
-              mimeType: doc.mimeType,
-              contentBase64: doc.fileBase64 ?? '',
-            });
-
-            const trimmedText = (response.text ?? '').trim();
-            if (!trimmedText) {
-              const message = 'Parsing completed, but no text could be extracted.';
-              applyDocuments((prev) =>
-                prev.map((item) =>
-                  item.id === doc.id
-                    ? {
-                        ...item,
-                        status: 'error',
-                        statusMessage: message,
-                        snippet: 'No text available from this document.',
-                        error: message,
-                      }
-                    : item
-                )
-              );
-              appendLog(`✗ Failed to extract text from "${doc.name}".`);
-            } else {
-              const snippet = buildSnippet(trimmedText);
-              applyDocuments((prev) =>
-                prev.map((item) =>
-                  item.id === doc.id
-                    ? {
-                        ...item,
-                        status: 'complete',
-                        statusMessage: 'Parsed for experiment run.',
-                        content: trimmedText,
-                        snippet,
-                        pageCount: response.pageCount,
-                        parserJobId: response.jobId,
-                      }
-                    : item
-                )
-              );
-              appendLog(
-                `✓ Parsed "${doc.name}"${
-                  response.pageCount
-                    ? ` (${response.pageCount} page${response.pageCount === 1 ? '' : 's'})`
-                    : ''
-                }`
-              );
-            }
-          } catch (error) {
-            let message =
-              error instanceof Error ? error.message : 'Unknown error while parsing document.';
-            if (
-              typeof message === 'string' &&
-              (message.includes('LlamaParse API key is not configured') ||
-                message.includes('Document parsing is not configured'))
-            ) {
-              message =
-                'LlamaParse requires an API key. Set LLAMA_CLOUD_API_KEY in your backend environment before running experiments.';
-            }
-            applyDocuments((prev) =>
-              prev.map((item) =>
-                item.id === doc.id
-                  ? {
-                      ...item,
-                      status: 'error',
-                      statusMessage: message,
-                      error: message,
-                    }
-                  : item
-              )
-            );
-            appendLog(`✗ Failed to parse "${doc.name}": ${message}`);
-            setError(`Failed to parse document "${doc.name}". ${message}`);
-            setIsRunning(false);
-            setStage('idle');
-            return;
-          }
-
-          parsedCount += 1;
-          const parseProgress =
-            10 + Math.round((parsedCount / documentsNeedingParse.length) * 20);
-          setProgress(Math.min(30, parseProgress));
-        }
-      }
-
-      const readyDocs = latestDocuments.filter(
-        (doc) =>
-          doc.status === 'complete' &&
-          typeof doc.content === 'string' &&
-          doc.content.trim().length > 0
-      );
-
-      if (!readyDocs.length) {
-        const message =
-          'Document parsing produced no usable text. Try re-uploading the file or selecting a different parser.';
-        appendLog(`✗ ${message}`);
-        setError(message);
-        setIsRunning(false);
-        setStage('idle');
-        return;
-      }
-
-      const parsedDocuments: ParsedDocument[] = readyDocs.map((doc) => ({
-        id: doc.id,
-        name: doc.name,
-        source: doc.source,
-        content: doc.content ?? '',
-      }));
 
       const pipelineCount = pipelineOverview.length || 1;
       const computePipelineProgress = (index: number, fraction: number) => {
@@ -469,7 +309,7 @@ export function ExperimentsPage() {
           `[${pipelineName}] Chunking documents with strategy "${chunkConfig.strategy}".`
         );
 
-        const chunkGroups: DocumentChunkGroup[] = chunkDocumentsWithConfig(parsedDocuments, chunkConfig);
+        const chunkGroups: DocumentChunkGroup[] = await chunkDocumentsWithConfig(readyDocuments, chunkConfig);
         const chunkSummary = summarizeChunkGroups(chunkGroups);
         const chunks: DocumentChunk[] = chunkGroups.flatMap((group) => group.chunks);
         const chunkCount = chunks.length;

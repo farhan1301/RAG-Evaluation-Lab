@@ -7,6 +7,7 @@ import type { Datasets } from '../db/datasets.js';
 import type { Pipelines } from '../db/pipelines.js';
 import { ApiError } from '../errors.js';
 import { definitionsRouter, InputError } from './routes.js';
+import { uploadsRouter } from './uploads.js';
 import { legacyRouter } from './legacy.js';
 
 interface Dependencies {
@@ -70,8 +71,8 @@ export function createApp({
       res.set({
         'Access-Control-Allow-Origin': origin,
         'Access-Control-Allow-Methods': 'GET,POST,PATCH,PUT,DELETE,OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, If-Match',
-        'Access-Control-Expose-Headers': 'ETag, X-Request-ID, Retry-After',
+        'Access-Control-Allow-Headers': 'Content-Type, If-Match, Idempotency-Key',
+        'Access-Control-Expose-Headers': 'ETag, Location, X-Request-ID, Retry-After',
       });
     }
     if (req.method === 'OPTIONS') {
@@ -107,6 +108,7 @@ export function createApp({
     res.json({ status: 'ok' });
   });
   app.get('/api/v1/capabilities', (_req, res) => res.json(config.capabilities));
+  app.use('/api/v1', uploadsRouter(datasets,config));
   const regular = express.json({ limit: env.JSON_LIMIT_BYTES });
   const documents = express.json({ limit: env.DOCUMENT_LIMIT_BYTES });
   app.use((req, res, next) => {
@@ -122,8 +124,7 @@ export function createApp({
       );
     const large =
       req.method === 'POST' &&
-      (/^\/api\/v1\/datasets\/[^/]+\/documents\/?$/.test(req.path) ||
-        ['/api/parse', '/api/chunks', '/api/judge'].includes(req.path));
+      ['/api/chunks', '/api/judge'].includes(req.path);
     (large ? documents : regular)(req, res, next);
   });
   app.use(

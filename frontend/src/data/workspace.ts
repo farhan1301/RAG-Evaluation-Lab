@@ -16,14 +16,16 @@ export async function request<T>(
   method = 'GET',
   body?: unknown,
   revision?: number,
+  key?: string,
 ): Promise<T> {
   const response = await fetch(`/api/v1/${path}`, {
     method,
     headers: {
-      ...(body !== undefined && { 'Content-Type': 'application/json' }),
+      ...(body !== undefined && { 'Content-Type': body instanceof Blob ? body.type || 'application/octet-stream' : 'application/json' }),
+      ...(key && {'Idempotency-Key':key}),
       ...(revision !== undefined && { 'If-Match': `"${revision}"` }),
     },
-    body: body === undefined ? undefined : JSON.stringify(body),
+    body: body instanceof Blob ? body : body === undefined ? undefined : JSON.stringify(body),
   });
   if (!response.ok) {
     const result = c.errorEnvelope.safeParse(
