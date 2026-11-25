@@ -1,7 +1,13 @@
 import { Link, useParams } from 'react-router';
 import { Download, FileText } from 'lucide-react';
 import { Button } from './ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from './ui/card';
 import { Badge } from './ui/badge';
 import {
   Table,
@@ -30,7 +36,7 @@ const PIPELINE_COLORS: Record<string, string> = {
 const FALLBACK_COLORS = ['#a855f7', '#ec4899', '#14b8a6'];
 
 const METRIC_LOOKUP = Object.fromEntries(
-  METRIC_DEFINITIONS.map((definition) => [definition.key, definition])
+  METRIC_DEFINITIONS.map((definition) => [definition.key, definition]),
 ) as Record<MetricKey, (typeof METRIC_DEFINITIONS)[number]>;
 
 const NEXT_STEPS = [
@@ -39,7 +45,11 @@ const NEXT_STEPS = [
   'Capture qualitative feedback from subject-matter experts to complement the quantitative metrics shown here.',
 ];
 
-const triggerDownload = (content: BlobPart, filename: string, mimeType: string) => {
+const triggerDownload = (
+  content: BlobPart,
+  filename: string,
+  mimeType: string,
+) => {
   if (typeof window === 'undefined') {
     return;
   }
@@ -75,10 +85,13 @@ const wrapText = (line: string, maxLength = 90) => {
   return segments.length ? segments : [''];
 };
 
-const sanitizePdfText = (line: string) => line.replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)');
+const sanitizePdfText = (line: string) =>
+  line.replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)');
 
 const buildPdfDocument = (lines: string[]) => {
-  const sanitizedLines = lines.flatMap((line) => wrapText(line)).map(sanitizePdfText);
+  const sanitizedLines = lines
+    .flatMap((line) => wrapText(line))
+    .map(sanitizePdfText);
   const textLines = sanitizedLines.length ? sanitizedLines : [''];
 
   const textContent = [
@@ -96,15 +109,23 @@ const buildPdfDocument = (lines: string[]) => {
   let body = '';
 
   const appendObject = (object: string) => {
-    offsets.push(`${String(header.length + body.length).padStart(10, '0')} 00000 n \n`);
+    offsets.push(
+      `${String(header.length + body.length).padStart(10, '0')} 00000 n \n`,
+    );
     body += object;
   };
 
   appendObject('1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n');
   appendObject('2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n');
-  appendObject('3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>\nendobj\n');
-  appendObject(`4 0 obj\n<< /Length ${textContent.length} >>\nstream\n${textContent}\nendstream\nendobj\n`);
-  appendObject('5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n');
+  appendObject(
+    '3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>\nendobj\n',
+  );
+  appendObject(
+    `4 0 obj\n<< /Length ${textContent.length} >>\nstream\n${textContent}\nendstream\nendobj\n`,
+  );
+  appendObject(
+    '5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n',
+  );
 
   const xrefOffset = header.length + body.length;
   const xref = `xref\n0 ${offsets.length}\n${offsets.join('')}`;
@@ -113,11 +134,11 @@ const buildPdfDocument = (lines: string[]) => {
   return header + body + xref + trailer;
 };
 
-
 const formatMetricValue = (key: MetricKey, value: number) =>
   METRIC_LOOKUP[key].format(value);
 
-const capitalize = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
+const capitalize = (text: string) =>
+  text.charAt(0).toUpperCase() + text.slice(1);
 
 const boolLabel = (value: boolean) => (value ? 'Enabled' : 'Disabled');
 const dedupeLabel = (value: boolean) => (value ? 'On' : 'Off');
@@ -132,7 +153,10 @@ const roundValue = (value: number | undefined, decimals: number) => {
 
 const VALUE_EPSILON = 1e-6;
 
-const deriveMetricValue = (pipeline: ExperimentPipelineResult, key: MetricKey): number | null => {
+const deriveMetricValue = (
+  pipeline: ExperimentPipelineResult,
+  key: MetricKey,
+): number | null => {
   const baseValue = pipeline.metrics?.[key];
   if (baseValue === null) return null;
   if (typeof baseValue === 'number' && Number.isFinite(baseValue)) {
@@ -143,18 +167,24 @@ const deriveMetricValue = (pipeline: ExperimentPipelineResult, key: MetricKey): 
     case 'judgePassRate':
       return pipeline.judgingSummary?.judgePassRate ?? null;
     case 'judgedContextPrecision':
-      return pipeline.judgingSummary?.averageScores.judgedContextPrecision ?? null;
+      return (
+        pipeline.judgingSummary?.averageScores.judgedContextPrecision ?? null
+      );
     case 'groundedness':
       return pipeline.judgingSummary?.averageScores.groundedness ?? null;
     case 'latencyP95': {
       const answerLatencyMs = pipeline.answeringSummary?.latencyMs;
-      if (typeof answerLatencyMs === 'number' && Number.isFinite(answerLatencyMs)) {
+      if (
+        typeof answerLatencyMs === 'number' &&
+        Number.isFinite(answerLatencyMs)
+      ) {
         return roundValue(answerLatencyMs / 1000, 2);
       }
       const averageJudgeLatencyMs =
         typeof pipeline.judgingSummary?.latencyMs === 'number' &&
         pipeline.judgingSummary?.details.length
-          ? pipeline.judgingSummary.latencyMs / pipeline.judgingSummary.details.length
+          ? pipeline.judgingSummary.latencyMs /
+            pipeline.judgingSummary.details.length
           : 0;
       return roundValue(averageJudgeLatencyMs / 1000, 2);
     }
@@ -180,14 +210,22 @@ const deriveMetricValue = (pipeline: ExperimentPipelineResult, key: MetricKey): 
   }
 };
 
-const buildPipelineMetrics = (pipeline: ExperimentPipelineResult): PipelineMetrics =>
-  (['judgePassRate', 'judgedContextPrecision', 'latencyP95', 'groundedness', 'costPerQuery', 'tokensUsed'] as MetricKey[]).reduce(
-    (acc, key) => {
-      acc[key] = deriveMetricValue(pipeline, key);
-      return acc;
-    },
-    {} as PipelineMetrics,
-  );
+const buildPipelineMetrics = (
+  pipeline: ExperimentPipelineResult,
+): PipelineMetrics =>
+  (
+    [
+      'judgePassRate',
+      'judgedContextPrecision',
+      'latencyP95',
+      'groundedness',
+      'costPerQuery',
+      'tokensUsed',
+    ] as MetricKey[]
+  ).reduce((acc, key) => {
+    acc[key] = deriveMetricValue(pipeline, key);
+    return acc;
+  }, {} as PipelineMetrics);
 
 export function ReportsPage() {
   const { latestRun } = useExperimentResults();
@@ -198,9 +236,14 @@ export function ReportsPage() {
       <section className="page max-w-4xl">
         <h1>{runId ? 'Report unavailable' : 'No experiment results yet'}</h1>
         <p className="my-3 text-muted-foreground">
-          {runId ? 'This run is no longer available in this tab.' : 'Complete an experiment to compare metrics and export its report.'}
+          {runId
+            ? 'This run is no longer available in this tab.'
+            : 'Complete an experiment to compare metrics and export its report.'}
         </p>
-        <Link className="text-primary underline" to={runId ? '/history' : '/experiments'}>
+        <Link
+          className="text-primary underline"
+          to={runId ? '/history' : '/experiments'}
+        >
           {runId ? 'Open experiment history' : 'Open experiments'}
         </Link>
       </section>
@@ -210,8 +253,12 @@ export function ReportsPage() {
 }
 
 function RunReport({ latestRun }: { latestRun: ExperimentRun }) {
-  const pipelineMap = Object.fromEntries(latestRun.pipelines.map((pipeline) => [pipeline.pipelineId, pipeline]));
-  const pipelineOrder = latestRun.pipelines.map((pipeline) => pipeline.pipelineId);
+  const pipelineMap = Object.fromEntries(
+    latestRun.pipelines.map((pipeline) => [pipeline.pipelineId, pipeline]),
+  );
+  const pipelineOrder = latestRun.pipelines.map(
+    (pipeline) => pipeline.pipelineId,
+  );
   const baselineId =
     (latestRun?.baselinePipelineId && pipelineMap[latestRun.baselinePipelineId]
       ? latestRun.baselinePipelineId
@@ -220,15 +267,18 @@ function RunReport({ latestRun }: { latestRun: ExperimentRun }) {
   const baselinePipeline = baselineId ? pipelineMap[baselineId] : undefined;
 
   const recommendedId =
-    (latestRun?.bestByMetric.judgePassRate &&
+    latestRun?.bestByMetric.judgePassRate &&
     pipelineMap[latestRun.bestByMetric.judgePassRate]
       ? latestRun.bestByMetric.judgePassRate
-      : undefined);
+      : undefined;
 
-  const recommendedPipeline = recommendedId ? pipelineMap[recommendedId] : undefined;
+  const recommendedPipeline = recommendedId
+    ? pipelineMap[recommendedId]
+    : undefined;
   const recommendedSnapshot = recommendedPipeline?.pipelineSnapshot;
 
-  const generatedAt = latestRun?.completedAt ?? latestRun?.startedAt ?? new Date().toISOString();
+  const generatedAt =
+    latestRun?.completedAt ?? latestRun?.startedAt ?? new Date().toISOString();
   const formattedTimestamp = new Intl.DateTimeFormat(undefined, {
     dateStyle: 'full',
     timeStyle: 'short',
@@ -238,7 +288,8 @@ function RunReport({ latestRun }: { latestRun: ExperimentRun }) {
     .map((id, index) => ({
       id,
       pipeline: pipelineMap[id],
-      color: PIPELINE_COLORS[id] ?? FALLBACK_COLORS[index % FALLBACK_COLORS.length],
+      color:
+        PIPELINE_COLORS[id] ?? FALLBACK_COLORS[index % FALLBACK_COLORS.length],
     }))
     .filter((entry) => entry.pipeline);
 
@@ -262,10 +313,12 @@ function RunReport({ latestRun }: { latestRun: ExperimentRun }) {
         name: string;
         metrics: PipelineMetrics;
       }
-    >
+    >,
   );
 
-  const baselineMetrics = baselineId ? pipelineMetrics[baselineId]?.metrics : undefined;
+  const baselineMetrics = baselineId
+    ? pipelineMetrics[baselineId]?.metrics
+    : undefined;
   const recommendedMetrics = recommendedPipeline
     ? pipelineMetrics[recommendedPipeline.pipelineId]?.metrics
     : undefined;
@@ -275,7 +328,10 @@ function RunReport({ latestRun }: { latestRun: ExperimentRun }) {
       ? METRIC_DEFINITIONS.filter((definition) => {
           const recommendedValue = recommendedMetrics[definition.key];
           const baselineValue = baselineMetrics[definition.key];
-          if (typeof recommendedValue !== 'number' || typeof baselineValue !== 'number') {
+          if (
+            typeof recommendedValue !== 'number' ||
+            typeof baselineValue !== 'number'
+          ) {
             return false;
           }
           if (definition.better === 'higher') {
@@ -285,7 +341,10 @@ function RunReport({ latestRun }: { latestRun: ExperimentRun }) {
         })
       : [];
 
-  const highlightSummary = highlightMetrics.slice(0, 3).map((metric) => metric.label).join(', ');
+  const highlightSummary = highlightMetrics
+    .slice(0, 3)
+    .map((metric) => metric.label)
+    .join(', ');
   const recommendationSummary =
     highlightMetrics.length > 0 && baselinePipeline
       ? `It outperforms your baseline (${baselinePipeline.pipelineName}) on ${highlightSummary}${
@@ -302,38 +361,51 @@ function RunReport({ latestRun }: { latestRun: ExperimentRun }) {
     'tokensUsed',
   ];
 
-  const pipelineComparisonRows = pipelineEntries.map(({ id, pipeline, color }) => {
-    const metrics = pipelineMetrics[id]?.metrics;
-    const coverage = pipeline?.judgingSummary?.coverage;
-    return {
-      id,
-      name: pipeline?.pipelineName ?? `Pipeline ${id}`,
-      color,
-      metrics,
-      coverage: coverage ? `${coverage.completed}/${coverage.total}` : 'Unavailable',
-      isBaseline: id === baselineId,
-      isRecommended: id === recommendedId,
-    };
-  });
+  const pipelineComparisonRows = pipelineEntries.map(
+    ({ id, pipeline, color }) => {
+      const metrics = pipelineMetrics[id]?.metrics;
+      const coverage = pipeline?.judgingSummary?.coverage;
+      return {
+        id,
+        name: pipeline?.pipelineName ?? `Pipeline ${id}`,
+        color,
+        metrics,
+        coverage: coverage
+          ? `${coverage.completed}/${coverage.total}`
+          : 'Unavailable',
+        isBaseline: id === baselineId,
+        isRecommended: id === recommendedId,
+      };
+    },
+  );
 
   const metricExtremes = COMPARISON_METRICS.reduce(
     (acc, metric) => {
       const values = pipelineComparisonRows
         .map((row) => row.metrics?.[metric])
-        .filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
+        .filter(
+          (value): value is number =>
+            typeof value === 'number' && Number.isFinite(value),
+        );
 
       if (!values.length) {
         return acc;
       }
 
       const betterDirection = METRIC_LOOKUP[metric]?.better ?? 'higher';
-      const best = betterDirection === 'higher' ? Math.max(...values) : Math.min(...values);
-      const worst = betterDirection === 'higher' ? Math.min(...values) : Math.max(...values);
+      const best =
+        betterDirection === 'higher'
+          ? Math.max(...values)
+          : Math.min(...values);
+      const worst =
+        betterDirection === 'higher'
+          ? Math.min(...values)
+          : Math.max(...values);
 
       acc[metric] = { best, worst };
       return acc;
     },
-    {} as Record<MetricKey, { best: number; worst: number }>
+    {} as Record<MetricKey, { best: number; worst: number }>,
   );
 
   const buildMarkdownReport = () => {
@@ -351,7 +423,7 @@ function RunReport({ latestRun }: { latestRun: ExperimentRun }) {
     if (recommendedPipeline) {
       lines.push('## Recommendation');
       lines.push(
-        `**${recommendedPipeline.pipelineName}** is recommended as the leading configuration. ${recommendationSummary}`.trim()
+        `**${recommendedPipeline.pipelineName}** is recommended as the leading configuration. ${recommendationSummary}`.trim(),
       );
       if (highlightMetrics.length) {
         lines.push('');
@@ -365,31 +437,36 @@ function RunReport({ latestRun }: { latestRun: ExperimentRun }) {
         lines.push('');
         lines.push('Configuration snapshot:');
         lines.push(
-          `- Chunking: ${capitalize(recommendedSnapshot.chunking.strategy)} chunks (${recommendedSnapshot.chunking.chunkSize} characters, ${recommendedSnapshot.chunking.overlap} character overlap)`
+          `- Chunking: ${capitalize(recommendedSnapshot.chunking.strategy)} chunks (${recommendedSnapshot.chunking.chunkSize} characters, ${recommendedSnapshot.chunking.overlap} character overlap)`,
         );
         lines.push(`- Embedding: ${recommendedSnapshot.embedding.model}`);
         lines.push(
-          `- Retrieval: Top-K ${recommendedSnapshot.retriever.topK}, deduplication ${dedupeLabel(recommendedSnapshot.retriever.deduplicate)}`
+          `- Retrieval: Top-K ${recommendedSnapshot.retriever.topK}, deduplication ${dedupeLabel(recommendedSnapshot.retriever.deduplicate)}`,
         );
         lines.push(
-          `- Reranker: ${boolLabel(recommendedSnapshot.reranker.enabled)} (${recommendedSnapshot.reranker.model})`
+          `- Reranker: ${boolLabel(recommendedSnapshot.reranker.enabled)} (${recommendedSnapshot.reranker.model})`,
         );
         lines.push(
-          `- LLM: ${recommendedSnapshot.llm.model} (temperature ${recommendedSnapshot.llm.temperature.toFixed(1)}, max ${recommendedSnapshot.llm.maxTokens} tokens)`
+          `- LLM: ${recommendedSnapshot.llm.model} (temperature ${recommendedSnapshot.llm.temperature.toFixed(1)}, max ${recommendedSnapshot.llm.maxTokens} tokens)`,
         );
         lines.push(`- Judge: ${recommendedSnapshot.judge.model}`);
       }
     } else {
       lines.push('## Recommendation');
-      lines.push('No clear leading configuration was identified for this experiment.');
+      lines.push(
+        'No clear leading configuration was identified for this experiment.',
+      );
     }
 
     lines.push('');
     lines.push('## Pipeline Metrics');
 
     const tableHeader = [
-      'Pipeline', 'Judge coverage (scored/total)',
-      ...COMPARISON_METRICS.map((metric) => METRIC_LOOKUP[metric]?.label ?? metric),
+      'Pipeline',
+      'Judge coverage (scored/total)',
+      ...COMPARISON_METRICS.map(
+        (metric) => METRIC_LOOKUP[metric]?.label ?? metric,
+      ),
     ];
     const headerRow = `| ${tableHeader.join(' | ')} |`;
     const separatorRow = `| ${tableHeader.map(() => '---').join(' | ')} |`;
@@ -413,8 +490,12 @@ function RunReport({ latestRun }: { latestRun: ExperimentRun }) {
         labels.push('Recommended');
       }
 
-      const pipelineLabel = labels.length ? `${row.name} (${labels.join(', ')})` : row.name;
-      lines.push(`| ${[pipelineLabel, row.coverage, ...valueCells].join(' | ')} |`);
+      const pipelineLabel = labels.length
+        ? `${row.name} (${labels.join(', ')})`
+        : row.name;
+      lines.push(
+        `| ${[pipelineLabel, row.coverage, ...valueCells].join(' | ')} |`,
+      );
     });
 
     lines.push('');
@@ -448,26 +529,24 @@ function RunReport({ latestRun }: { latestRun: ExperimentRun }) {
     if (recommendedPipeline) {
       lines.push('Recommendation:');
       lines.push(
-        `${recommendedPipeline.pipelineName} – ${recommendationSummary.replace(/\s+/g, ' ').trim()}`
+        `${recommendedPipeline.pipelineName} – ${recommendationSummary.replace(/\s+/g, ' ').trim()}`,
       );
 
       if (recommendedSnapshot) {
         lines.push('');
         lines.push('Configuration Snapshot');
         lines.push(
-          `Chunking: ${capitalize(recommendedSnapshot.chunking.strategy)} chunks (${recommendedSnapshot.chunking.chunkSize} characters, ${recommendedSnapshot.chunking.overlap} character overlap)`
+          `Chunking: ${capitalize(recommendedSnapshot.chunking.strategy)} chunks (${recommendedSnapshot.chunking.chunkSize} characters, ${recommendedSnapshot.chunking.overlap} character overlap)`,
+        );
+        lines.push(`Embedding: ${recommendedSnapshot.embedding.model}`);
+        lines.push(
+          `Retrieval: Top-K ${recommendedSnapshot.retriever.topK}, deduplication ${dedupeLabel(recommendedSnapshot.retriever.deduplicate)}`,
         );
         lines.push(
-          `Embedding: ${recommendedSnapshot.embedding.model}`
+          `Reranker: ${boolLabel(recommendedSnapshot.reranker.enabled)} (${recommendedSnapshot.reranker.model})`,
         );
         lines.push(
-          `Retrieval: Top-K ${recommendedSnapshot.retriever.topK}, deduplication ${dedupeLabel(recommendedSnapshot.retriever.deduplicate)}`
-        );
-        lines.push(
-          `Reranker: ${boolLabel(recommendedSnapshot.reranker.enabled)} (${recommendedSnapshot.reranker.model})`
-        );
-        lines.push(
-          `LLM: ${recommendedSnapshot.llm.model} (temperature ${recommendedSnapshot.llm.temperature.toFixed(1)}, max ${recommendedSnapshot.llm.maxTokens} tokens)`
+          `LLM: ${recommendedSnapshot.llm.model} (temperature ${recommendedSnapshot.llm.temperature.toFixed(1)}, max ${recommendedSnapshot.llm.maxTokens} tokens)`,
         );
         lines.push(`Judge: ${recommendedSnapshot.judge.model}`);
       }
@@ -487,7 +566,9 @@ function RunReport({ latestRun }: { latestRun: ExperimentRun }) {
         badges.push('Recommended');
       }
 
-      const rowTitle = badges.length ? `${row.name} (${badges.join(', ')})` : row.name;
+      const rowTitle = badges.length
+        ? `${row.name} (${badges.join(', ')})`
+        : row.name;
       lines.push(rowTitle);
       lines.push(`  - Judge coverage (scored/total): ${row.coverage}`);
 
@@ -495,7 +576,9 @@ function RunReport({ latestRun }: { latestRun: ExperimentRun }) {
         const label = METRIC_LOOKUP[metric]?.label ?? metric;
         const value = row.metrics?.[metric];
         const formattedValue =
-          typeof value !== 'number' || Number.isNaN(value) ? 'Unavailable' : formatMetricValue(metric, value);
+          typeof value !== 'number' || Number.isNaN(value)
+            ? 'Unavailable'
+            : formatMetricValue(metric, value);
         lines.push(`  - ${label}: ${formattedValue}`);
       });
 
@@ -518,17 +601,25 @@ function RunReport({ latestRun }: { latestRun: ExperimentRun }) {
         {/* Header */}
         <div className="flex items-center justify-between gap-4 flex-wrap">
           <div>
-            <h1>
-              {latestRun.name ?? 'Experiment Report'}
-            </h1>
-            <p className="text-muted-foreground">Generated on {formattedTimestamp}</p>
+            <h1>{latestRun.name ?? 'Experiment Report'}</h1>
+            <p className="text-muted-foreground">
+              Generated on {formattedTimestamp}
+            </p>
           </div>
           <div className="flex gap-2 flex-wrap">
-            <Button variant="outline" className="gap-2" onClick={handleExportPdf}>
+            <Button
+              variant="outline"
+              className="gap-2"
+              onClick={handleExportPdf}
+            >
               <FileText size={16} />
               Export PDF
             </Button>
-            <Button variant="outline" className="gap-2" onClick={handleExportMarkdown}>
+            <Button
+              variant="outline"
+              className="gap-2"
+              onClick={handleExportMarkdown}
+            >
               <Download size={16} />
               Export Markdown
             </Button>
@@ -545,7 +636,8 @@ function RunReport({ latestRun }: { latestRun: ExperimentRun }) {
               {recommendedPipeline ? (
                 <>
                   Based on the most recent experiment,{' '}
-                  <strong>{recommendedPipeline.pipelineName}</strong> has the highest observed judge pass rate. {recommendationSummary}
+                  <strong>{recommendedPipeline.pipelineName}</strong> has the
+                  highest observed judge pass rate. {recommendationSummary}
                 </>
               ) : (
                 'Run details were recorded, but we could not identify a leading configuration.'
@@ -565,18 +657,22 @@ function RunReport({ latestRun }: { latestRun: ExperimentRun }) {
                     {recommendedSnapshot.chunking.overlap} character overlap)
                   </li>
                   <li>
-                    • <strong>Embedding:</strong> {recommendedSnapshot.embedding.model}
+                    • <strong>Embedding:</strong>{' '}
+                    {recommendedSnapshot.embedding.model}
                   </li>
                   <li>
-                    • <strong>Retrieval:</strong> Top-K {recommendedSnapshot.retriever.topK},{' '}
-                    deduplication {dedupeLabel(recommendedSnapshot.retriever.deduplicate)}
+                    • <strong>Retrieval:</strong> Top-K{' '}
+                    {recommendedSnapshot.retriever.topK}, deduplication{' '}
+                    {dedupeLabel(recommendedSnapshot.retriever.deduplicate)}
                   </li>
                   <li>
-                    • <strong>Reranker:</strong> {boolLabel(recommendedSnapshot.reranker.enabled)} (
+                    • <strong>Reranker:</strong>{' '}
+                    {boolLabel(recommendedSnapshot.reranker.enabled)} (
                     {recommendedSnapshot.reranker.model})
                   </li>
                   <li>
-                    • <strong>LLM:</strong> {recommendedSnapshot.llm.model} (temperature{' '}
+                    • <strong>LLM:</strong> {recommendedSnapshot.llm.model}{' '}
+                    (temperature{' '}
                     {recommendedSnapshot.llm.temperature.toFixed(1)}, max{' '}
                     {recommendedSnapshot.llm.maxTokens} tokens)
                   </li>
@@ -588,8 +684,9 @@ function RunReport({ latestRun }: { latestRun: ExperimentRun }) {
             )}
 
             <p className="text-sm text-muted-foreground">
-              Keep iterating on the recommended pipeline to validate that these improvements hold up
-              across new evaluation datasets before promoting the configuration to production.
+              Keep iterating on the recommended pipeline to validate that these
+              improvements hold up across new evaluation datasets before
+              promoting the configuration to production.
             </p>
           </CardContent>
         </Card>
@@ -599,7 +696,8 @@ function RunReport({ latestRun }: { latestRun: ExperimentRun }) {
           <CardHeader>
             <CardTitle>Pipeline Comparison Overview</CardTitle>
             <CardDescription className="text-muted-foreground">
-              All metrics compared against {baselinePipeline?.pipelineName ?? 'the first pipeline'}
+              All metrics compared against{' '}
+              {baselinePipeline?.pipelineName ?? 'the first pipeline'}
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -622,153 +720,194 @@ function RunReport({ latestRun }: { latestRun: ExperimentRun }) {
                       <TableRow key={row.id}>
                         <TableCell className="font-medium">
                           <div className="flex items-center gap-2 flex-wrap">
-                            <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: row.color }} />
+                            <span
+                              className="h-2.5 w-2.5 rounded-full"
+                              style={{ backgroundColor: row.color }}
+                            />
                             <span>{row.name}</span>
-                            {row.isBaseline && <Badge variant="outline">Baseline</Badge>}
+                            {row.isBaseline && (
+                              <Badge variant="outline">Baseline</Badge>
+                            )}
                             {row.isRecommended && !row.isBaseline && (
                               <Badge variant="outline">Recommended</Badge>
                             )}
-                      </div>
-                    </TableCell>
-                    <TableCell>{row.coverage}</TableCell>
-                    {COMPARISON_METRICS.map((metric) => (
-                      <TableCell key={metric} className="text-right">
-                        {row.metrics && typeof row.metrics[metric] === 'number' ? (
-                          <div className="flex flex-col items-end gap-1">
-                            {(() => {
-                              const value = row.metrics?.[metric];
-                              if (typeof value !== 'number') {
-                                return null;
-                              }
-                              const extremes = metricExtremes[metric];
-                              const baselineValue = baselineMetrics?.[metric];
-                              const betterDirection = METRIC_LOOKUP[metric]?.better ?? 'higher';
-
-                              const difference =
-                                typeof baselineValue === 'number' ? value - baselineValue : undefined;
-
-                              const percentChange =
-                                typeof difference === 'number' &&
-                                typeof baselineValue === 'number' &&
-                                Math.abs(baselineValue) > VALUE_EPSILON
-                                  ? (difference / baselineValue) * 100
-                                  : undefined;
-
-                              const isBest =
-                                extremes &&
-                                Math.abs(value - extremes.best) < VALUE_EPSILON &&
-                                !(extremes && Math.abs(extremes.best - extremes.worst) < VALUE_EPSILON);
-
-                              const isWorst =
-                                extremes &&
-                                Math.abs(value - extremes.worst) < VALUE_EPSILON &&
-                                !(extremes && Math.abs(extremes.best - extremes.worst) < VALUE_EPSILON);
-
-                              const highlightState: 'best' | 'worst' | 'neutral' = (() => {
-                                if (isBest && isWorst) {
-                                  return 'neutral';
-                                }
-                                if (isBest) {
-                                  return 'best';
-                                }
-                                if (isWorst) {
-                                  return 'worst';
-                                }
-                                return 'neutral';
-                              })();
-
-                              const valueClasses = cn('font-semibold', {
-                                'text-green-700 dark:text-green-300': highlightState === 'best',
-                                'text-red-700 dark:text-red-300': highlightState === 'worst',
-                              });
-
-                              const arrowSymbol =
-                                typeof percentChange === 'number'
-                                  ? percentChange > 0
-                                    ? '↑'
-                                    : percentChange < 0
-                                    ? '↓'
-                                    : '→'
-                                  : typeof difference === 'number'
-                                  ? difference > 0
-                                    ? '↑'
-                                    : difference < 0
-                                    ? '↓'
-                                    : '→'
-                                  : null;
-
-                              const percentMagnitude =
-                                typeof percentChange === 'number'
-                                  ? Math.abs(percentChange) >= 10
-                                    ? Math.abs(percentChange).toFixed(0)
-                                    : Math.abs(percentChange).toFixed(1)
-                                  : null;
-
-                              const improvement =
-                                typeof difference === 'number'
-                                  ? betterDirection === 'higher'
-                                    ? difference > 0
-                                    : difference < 0
-                                  : false;
-
-                              const regression =
-                                typeof difference === 'number'
-                                  ? betterDirection === 'higher'
-                                    ? difference < 0
-                                    : difference > 0
-                                  : false;
-
-                              let deltaText: string | null = null;
-                              let deltaClass = 'text-xs font-medium text-muted-foreground';
-
-                              if (row.isBaseline) {
-                                deltaText = 'Baseline';
-                              } else if (typeof percentChange === 'number') {
-                                deltaText = `${arrowSymbol} ${percentMagnitude ?? '0'}%`;
-                                if (percentChange === 0) {
-                                  deltaClass = 'text-xs font-medium text-muted-foreground';
-                                } else if (improvement) {
-                                  deltaClass = 'text-xs font-medium text-green-600 dark:text-green-300';
-                                } else if (regression) {
-                                  deltaClass = 'text-xs font-medium text-red-600 dark:text-red-300';
-                                }
-                              } else if (
-                                typeof difference === 'number' &&
-                                typeof baselineValue === 'number'
-                              ) {
-                                const formattedDiff = formatMetricValue(metric, Math.abs(difference));
-                                deltaText =
-                                  arrowSymbol && formattedDiff
-                                    ? `${arrowSymbol} ${formattedDiff}`
-                                    : null;
-                                if (difference === 0) {
-                                  deltaClass = 'text-xs font-medium text-muted-foreground';
-                                } else if (improvement) {
-                                  deltaClass = 'text-xs font-medium text-green-600 dark:text-green-300';
-                                } else if (regression) {
-                                  deltaClass = 'text-xs font-medium text-red-600 dark:text-red-300';
-                                }
-                              }
-
-                              return (
-                                <>
-                                  <span className={valueClasses}>
-                                    {formatMetricValue(metric, value)}
-                                  </span>
-                                  {deltaText ? <span className={deltaClass}>{deltaText}</span> : null}
-                                </>
-                              );
-                            })()}
                           </div>
-                        ) : (
-                          'Unavailable'
-                        )}
-                      </TableCell>
+                        </TableCell>
+                        <TableCell>{row.coverage}</TableCell>
+                        {COMPARISON_METRICS.map((metric) => (
+                          <TableCell key={metric} className="text-right">
+                            {row.metrics &&
+                            typeof row.metrics[metric] === 'number' ? (
+                              <div className="flex flex-col items-end gap-1">
+                                {(() => {
+                                  const value = row.metrics?.[metric];
+                                  if (typeof value !== 'number') {
+                                    return null;
+                                  }
+                                  const extremes = metricExtremes[metric];
+                                  const baselineValue =
+                                    baselineMetrics?.[metric];
+                                  const betterDirection =
+                                    METRIC_LOOKUP[metric]?.better ?? 'higher';
+
+                                  const difference =
+                                    typeof baselineValue === 'number'
+                                      ? value - baselineValue
+                                      : undefined;
+
+                                  const percentChange =
+                                    typeof difference === 'number' &&
+                                    typeof baselineValue === 'number' &&
+                                    Math.abs(baselineValue) > VALUE_EPSILON
+                                      ? (difference / baselineValue) * 100
+                                      : undefined;
+
+                                  const isBest =
+                                    extremes &&
+                                    Math.abs(value - extremes.best) <
+                                      VALUE_EPSILON &&
+                                    !(
+                                      extremes &&
+                                      Math.abs(extremes.best - extremes.worst) <
+                                        VALUE_EPSILON
+                                    );
+
+                                  const isWorst =
+                                    extremes &&
+                                    Math.abs(value - extremes.worst) <
+                                      VALUE_EPSILON &&
+                                    !(
+                                      extremes &&
+                                      Math.abs(extremes.best - extremes.worst) <
+                                        VALUE_EPSILON
+                                    );
+
+                                  const highlightState:
+                                    | 'best'
+                                    | 'worst'
+                                    | 'neutral' = (() => {
+                                    if (isBest && isWorst) {
+                                      return 'neutral';
+                                    }
+                                    if (isBest) {
+                                      return 'best';
+                                    }
+                                    if (isWorst) {
+                                      return 'worst';
+                                    }
+                                    return 'neutral';
+                                  })();
+
+                                  const valueClasses = cn('font-semibold', {
+                                    'text-green-700 dark:text-green-300':
+                                      highlightState === 'best',
+                                    'text-red-700 dark:text-red-300':
+                                      highlightState === 'worst',
+                                  });
+
+                                  const arrowSymbol =
+                                    typeof percentChange === 'number'
+                                      ? percentChange > 0
+                                        ? '↑'
+                                        : percentChange < 0
+                                          ? '↓'
+                                          : '→'
+                                      : typeof difference === 'number'
+                                        ? difference > 0
+                                          ? '↑'
+                                          : difference < 0
+                                            ? '↓'
+                                            : '→'
+                                        : null;
+
+                                  const percentMagnitude =
+                                    typeof percentChange === 'number'
+                                      ? Math.abs(percentChange) >= 10
+                                        ? Math.abs(percentChange).toFixed(0)
+                                        : Math.abs(percentChange).toFixed(1)
+                                      : null;
+
+                                  const improvement =
+                                    typeof difference === 'number'
+                                      ? betterDirection === 'higher'
+                                        ? difference > 0
+                                        : difference < 0
+                                      : false;
+
+                                  const regression =
+                                    typeof difference === 'number'
+                                      ? betterDirection === 'higher'
+                                        ? difference < 0
+                                        : difference > 0
+                                      : false;
+
+                                  let deltaText: string | null = null;
+                                  let deltaClass =
+                                    'text-xs font-medium text-muted-foreground';
+
+                                  if (row.isBaseline) {
+                                    deltaText = 'Baseline';
+                                  } else if (
+                                    typeof percentChange === 'number'
+                                  ) {
+                                    deltaText = `${arrowSymbol} ${percentMagnitude ?? '0'}%`;
+                                    if (percentChange === 0) {
+                                      deltaClass =
+                                        'text-xs font-medium text-muted-foreground';
+                                    } else if (improvement) {
+                                      deltaClass =
+                                        'text-xs font-medium text-green-600 dark:text-green-300';
+                                    } else if (regression) {
+                                      deltaClass =
+                                        'text-xs font-medium text-red-600 dark:text-red-300';
+                                    }
+                                  } else if (
+                                    typeof difference === 'number' &&
+                                    typeof baselineValue === 'number'
+                                  ) {
+                                    const formattedDiff = formatMetricValue(
+                                      metric,
+                                      Math.abs(difference),
+                                    );
+                                    deltaText =
+                                      arrowSymbol && formattedDiff
+                                        ? `${arrowSymbol} ${formattedDiff}`
+                                        : null;
+                                    if (difference === 0) {
+                                      deltaClass =
+                                        'text-xs font-medium text-muted-foreground';
+                                    } else if (improvement) {
+                                      deltaClass =
+                                        'text-xs font-medium text-green-600 dark:text-green-300';
+                                    } else if (regression) {
+                                      deltaClass =
+                                        'text-xs font-medium text-red-600 dark:text-red-300';
+                                    }
+                                  }
+
+                                  return (
+                                    <>
+                                      <span className={valueClasses}>
+                                        {formatMetricValue(metric, value)}
+                                      </span>
+                                      {deltaText ? (
+                                        <span className={deltaClass}>
+                                          {deltaText}
+                                        </span>
+                                      ) : null}
+                                    </>
+                                  );
+                                })()}
+                              </div>
+                            ) : (
+                              'Unavailable'
+                            )}
+                          </TableCell>
+                        ))}
+                      </TableRow>
                     ))}
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+                  </TableBody>
+                </Table>
               </div>
             ) : (
               <p className="text-muted-foreground">
@@ -783,7 +922,8 @@ function RunReport({ latestRun }: { latestRun: ExperimentRun }) {
           <CardHeader>
             <CardTitle>Suggested Next Steps</CardTitle>
             <CardDescription className="text-muted-foreground">
-              Iterate on your strongest pipeline and validate improvements with fresh data.
+              Iterate on your strongest pipeline and validate improvements with
+              fresh data.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-3 text-sm text-foreground">

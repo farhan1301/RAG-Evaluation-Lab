@@ -37,9 +37,13 @@ export class QdrantClient {
   }
 
   collectionNameForPipeline(vectorSize: number, pipelineId: string) {
-    const base = this.config.qdrantCollections[vectorSize] || this.config.qdrantCollection;
+    const base =
+      this.config.qdrantCollections[vectorSize] || this.config.qdrantCollection;
     // Keep disjoint namespaces even when long or punctuation-heavy IDs sanitize alike.
-    const scope = createHash('sha256').update(JSON.stringify([base, vectorSize, pipelineId])).digest('hex').slice(0, 32);
+    const scope = createHash('sha256')
+      .update(JSON.stringify([base, vectorSize, pipelineId]))
+      .digest('hex')
+      .slice(0, 32);
     return `${sanitizeCollection(base).slice(0, 31)}-${scope}`;
   }
 
@@ -47,51 +51,73 @@ export class QdrantClient {
     return `${this.config.qdrantUrl}${path}`;
   }
 
-  async ensureCollection(vectorSize: number, collectionName: string, signal?: AbortSignal) {
+  async ensureCollection(
+    vectorSize: number,
+    collectionName: string,
+    signal?: AbortSignal,
+  ) {
     const collection = sanitizeCollection(collectionName);
-    const response = await fetch(this.url(`/collections/${collection}?wait=true`), {
-      method: 'PUT',
-      headers: this.headers,
-      body: JSON.stringify({
-        vectors: {
-          size: vectorSize,
-          distance: 'Cosine',
-        },
-      }),
-      signal,
-    });
+    const response = await fetch(
+      this.url(`/collections/${collection}?wait=true`),
+      {
+        method: 'PUT',
+        headers: this.headers,
+        body: JSON.stringify({
+          vectors: {
+            size: vectorSize,
+            distance: 'Cosine',
+          },
+        }),
+        signal,
+      },
+    );
 
     if (!response.ok && response.status !== 409) {
       const detail = await response.text();
-      throw new Error(`Failed to ensure Qdrant collection (${response.status}): ${detail}`);
+      throw new Error(
+        `Failed to ensure Qdrant collection (${response.status}): ${detail}`,
+      );
     }
 
     await this.ensurePipelineIndex(collection, signal);
   }
 
-  async upsertPoints(points: QdrantPoint[], collectionName: string, signal?: AbortSignal) {
+  async upsertPoints(
+    points: QdrantPoint[],
+    collectionName: string,
+    signal?: AbortSignal,
+  ) {
     if (!points.length) {
       return;
     }
 
     const collection = sanitizeCollection(collectionName);
-    const response = await fetch(this.url(`/collections/${collection}/points?wait=true`), {
-      method: 'PUT',
-      headers: this.headers,
-      body: JSON.stringify({
-        points,
-      }),
-      signal,
-    });
+    const response = await fetch(
+      this.url(`/collections/${collection}/points?wait=true`),
+      {
+        method: 'PUT',
+        headers: this.headers,
+        body: JSON.stringify({
+          points,
+        }),
+        signal,
+      },
+    );
 
     if (!response.ok) {
       const detail = await response.text();
-      throw new Error(`Failed to upsert Qdrant points (${response.status}): ${detail}`);
+      throw new Error(
+        `Failed to upsert Qdrant points (${response.status}): ${detail}`,
+      );
     }
   }
 
   private async ensurePipelineIndex(collection: string, signal?: AbortSignal) {
-    const endpoints: Array<{ method: 'PUT' | 'POST'; path: string; body: Record<string, unknown> }> = [
+    const endpoints: Array<{
+      method: 'PUT' | 'POST';
+      path: string;
+      body: Record<string, unknown>;
+    }> = [
       {
         method: 'PUT',
         path: `/collections/${collection}/index?wait=true`,
@@ -151,18 +177,25 @@ export class QdrantClient {
 
         lastStatus = response.status;
         await response.text();
-
       }
 
       if (attempt < attempts - 1) {
-        await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+        await new Promise((resolve) =>
+          setTimeout(resolve, 250 * (attempt + 1)),
+        );
       }
     }
 
-    throw new Error(`Failed to create Qdrant pipelineId index (${lastStatus}).`);
+    throw new Error(
+      `Failed to create Qdrant pipelineId index (${lastStatus}).`,
+    );
   }
 
-  async deletePipelinePoints(pipelineId: string, collectionName: string, signal?: AbortSignal) {
+  async deletePipelinePoints(
+    pipelineId: string,
+    collectionName: string,
+    signal?: AbortSignal,
+  ) {
     const trimmedId = pipelineId?.trim();
     if (!trimmedId) {
       return;
@@ -172,21 +205,24 @@ export class QdrantClient {
     let attemptedIndexCreation = false;
 
     while (true) {
-      const response = await fetch(this.url(`/collections/${collection}/points/delete?wait=true`), {
-        method: 'POST',
-        headers: this.headers,
-        body: JSON.stringify({
-          filter: {
-            must: [
-              {
-                key: 'pipelineId',
-                match: { value: trimmedId },
-              },
-            ],
-          },
-        }),
-        signal,
-      });
+      const response = await fetch(
+        this.url(`/collections/${collection}/points/delete?wait=true`),
+        {
+          method: 'POST',
+          headers: this.headers,
+          body: JSON.stringify({
+            filter: {
+              must: [
+                {
+                  key: 'pipelineId',
+                  match: { value: trimmedId },
+                },
+              ],
+            },
+          }),
+          signal,
+        },
+      );
 
       if (response.ok) {
         return;
@@ -202,7 +238,9 @@ export class QdrantClient {
         continue;
       }
 
-      throw new Error(`Failed to delete Qdrant points (${response.status}): ${detail}`);
+      throw new Error(
+        `Failed to delete Qdrant points (${response.status}): ${detail}`,
+      );
     }
   }
 
@@ -211,7 +249,7 @@ export class QdrantClient {
     limit: number,
     filter: { pipelineId: string } & Record<string, unknown>,
     collectionName: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
   ): Promise<QdrantSearchResult[]> {
     if (!filter?.pipelineId?.trim()) {
       throw new Error('A pipelineId filter is required.');
@@ -221,17 +259,27 @@ export class QdrantClient {
       key,
       match: Array.isArray(value) ? { any: value } : { value },
     }));
-    const response = await fetch(this.url(`/collections/${collection}/points/search`), {
-      method: 'POST',
-      headers: this.headers,
-      body: JSON.stringify({ vector, limit, with_payload: true, filter: { must } }),
-      signal,
-    });
+    const response = await fetch(
+      this.url(`/collections/${collection}/points/search`),
+      {
+        method: 'POST',
+        headers: this.headers,
+        body: JSON.stringify({
+          vector,
+          limit,
+          with_payload: true,
+          filter: { must },
+        }),
+        signal,
+      },
+    );
     if (!response.ok) {
-      throw new Error(`Scoped Qdrant search failed (${response.status}): ${await response.text()}`);
+      throw new Error(
+        `Scoped Qdrant search failed (${response.status}): ${await response.text()}`,
+      );
     }
-    const payload = await response.json() as { result: QdrantSearchResult[] };
-    return payload.result.map(item => ({
+    const payload = (await response.json()) as { result: QdrantSearchResult[] };
+    return payload.result.map((item) => ({
       id: String(item.id),
       score: item.score,
       payload: item.payload ?? {},

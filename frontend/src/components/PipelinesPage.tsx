@@ -137,9 +137,7 @@ function PipelineEditor({
           <details open>
             <summary>Parsing and chunking</summary>
             <div className="space-y-2 p-2">
-              <p>
-                Choose the document parser on the Datasets page.
-              </p>
+              <p>Choose the document parser on the Datasets page.</p>
               <label>
                 Chunking strategy{' '}
                 <select

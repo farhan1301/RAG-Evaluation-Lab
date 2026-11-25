@@ -46,16 +46,15 @@ async function extract(
     source.mime || 'application/octet-stream',
   );
   const version =
-    lease.parser === 'local'
-      ? 'local-unpdf1.9.1-v1'
-      : 'llamaparse-markdown-v1';
+    lease.parser === 'local' ? 'local-unpdf1.9.1-v1' : 'llamaparse-markdown-v1';
   const id =
     jobs.step(lease.id, 'extraction') ??
     sha256(JSON.stringify([source.hash, mime, version]));
   const cached = jobs.artifact(id);
   if (cached) return { id, result: cached };
   async function readSource() {
-    if (source.blobKey) return readFile(join(options.directory, source.blobKey));
+    if (source.blobKey)
+      return readFile(join(options.directory, source.blobKey));
     const inline = Buffer.from(source.inline);
     validateContent(inline, mime);
     return inline;
@@ -110,9 +109,12 @@ export async function runOne(jobs: Jobs, options: WorkerOptions) {
   const signal = options.signal
     ? AbortSignal.any([controller.signal, options.signal])
     : controller.signal;
-  const timer = setInterval(() => {
-    if (options.signal?.aborted || !jobs.heartbeat(lease)) controller.abort();
-  }, Math.floor(jobs.leaseMs / 3));
+  const timer = setInterval(
+    () => {
+      if (options.signal?.aborted || !jobs.heartbeat(lease)) controller.abort();
+    },
+    Math.floor(jobs.leaseMs / 3),
+  );
   try {
     const { id, result } = await extract(jobs, lease, options, signal);
     let batch: ArtifactChunk[] = [];

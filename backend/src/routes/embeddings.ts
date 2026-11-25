@@ -58,11 +58,9 @@ export const createEmbeddingsHandler =
             typeof chunk.documentId !== 'string'),
       )
     ) {
-      return res
-        .status(400)
-        .json({
-          error: 'Chunks require an id, text, and valid document identifiers.',
-        });
+      return res.status(400).json({
+        error: 'Chunks require an id, text, and valid document identifiers.',
+      });
     }
     if (
       chunks.some(

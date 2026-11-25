@@ -71,8 +71,10 @@ export function createApp({
       res.set({
         'Access-Control-Allow-Origin': origin,
         'Access-Control-Allow-Methods': 'GET,POST,PATCH,PUT,DELETE,OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, If-Match, Idempotency-Key',
-        'Access-Control-Expose-Headers': 'ETag, Location, X-Request-ID, Retry-After',
+        'Access-Control-Allow-Headers':
+          'Content-Type, If-Match, Idempotency-Key',
+        'Access-Control-Expose-Headers':
+          'ETag, Location, X-Request-ID, Retry-After',
       });
     }
     if (req.method === 'OPTIONS') {
@@ -108,7 +110,7 @@ export function createApp({
     res.json({ status: 'ok' });
   });
   app.get('/api/v1/capabilities', (_req, res) => res.json(config.capabilities));
-  app.use('/api/v1', uploadsRouter(datasets,config));
+  app.use('/api/v1', uploadsRouter(datasets, config));
   const regular = express.json({ limit: env.JSON_LIMIT_BYTES });
   const documents = express.json({ limit: env.DOCUMENT_LIMIT_BYTES });
   app.use((req, res, next) => {
@@ -123,8 +125,7 @@ export function createApp({
         'Expected application/json.',
       );
     const large =
-      req.method === 'POST' &&
-      ['/api/chunks', '/api/judge'].includes(req.path);
+      req.method === 'POST' && ['/api/chunks', '/api/judge'].includes(req.path);
     (large ? documents : regular)(req, res, next);
   });
   app.use(
@@ -154,16 +155,14 @@ export function createApp({
     else if (err.status === 400)
       problem = new ApiError(400, 'invalid_input', 'Malformed request.');
     res.locals.code = problem.code;
-    res
-      .status(problem.status)
-      .json({
-        error: {
-          code: problem.code,
-          message: problem.message,
-          requestId: res.locals.requestId,
-          ...(problem instanceof InputError && { fields: problem.fields }),
-        },
-      });
+    res.status(problem.status).json({
+      error: {
+        code: problem.code,
+        message: problem.message,
+        requestId: res.locals.requestId,
+        ...(problem instanceof InputError && { fields: problem.fields }),
+      },
+    });
   };
   app.use(handleError);
   return app;

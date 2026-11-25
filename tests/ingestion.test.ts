@@ -1,15 +1,21 @@
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtempSync,readFileSync,readdirSync,rmSync,statSync } from 'node:fs';
+import {
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { setTimeout as wait } from 'node:timers/promises';
-import { afterEach,beforeEach,expect,it,vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import * as c from '@rag-eval/contracts';
 import { readConfig } from '../backend/src/config/env';
 import { openDatabase } from '../backend/src/db/database';
-import { Jobs,LostLease } from '../backend/src/db/jobs';
+import { Jobs, LostLease } from '../backend/src/db/jobs';
 import { Datasets } from '../backend/src/db/datasets';
 import { Pipelines } from '../backend/src/db/pipelines';
 import { createApp } from '../backend/src/http/app';
@@ -18,13 +24,19 @@ import { CloudParser } from '../backend/src/ingestion/cloud';
 import { runOne } from '../backend/src/jobs/run';
 import { send } from './inProcess';
 
-let dir:string, blobs:string, db:ReturnType<typeof openDatabase>, repo:Datasets, base:string;
-let api:ReturnType<typeof createApp>;
-const same='http://localhost',allowed='https://editor.test';
-const headers=(origin=same)=>({origin,'if-match':'"1"'});
-const pdf=readFileSync(new URL('./fixtures/tiny.pdf',import.meta.url));
-const docx=readFileSync(new URL('./fixtures/tiny.docx',import.meta.url));
-const docMime='application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+let dir: string,
+  blobs: string,
+  db: ReturnType<typeof openDatabase>,
+  repo: Datasets,
+  base: string;
+let api: ReturnType<typeof createApp>;
+const same = 'http://localhost',
+  allowed = 'https://editor.test';
+const headers = (origin = same) => ({ origin, 'if-match': '"1"' });
+const pdf = readFileSync(new URL('./fixtures/tiny.pdf', import.meta.url));
+const docx = readFileSync(new URL('./fixtures/tiny.docx', import.meta.url));
+const docMime =
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 function upload(
   name: string,
   raw: Buffer | string,
@@ -150,15 +162,22 @@ it('rejects extension/type/content mismatches, invalid containers, interrupted a
     ['text.txt', Buffer.from([255]), 'text/plain'],
   ] as const)
     expect(
-      (await upload(name, bytes, mime, name.endsWith('.docx') ? 'llama-parse' : 'local')).status,
+      (
+        await upload(
+          name,
+          bytes,
+          mime,
+          name.endsWith('.docx') ? 'llama-parse' : 'local',
+        )
+      ).status,
     ).toBe(415);
   expect((await upload('../escape.txt', 'words', 'text/plain')).status).toBe(
     400,
   );
   expect((await upload('a.docx', docx, docMime)).status).toBe(415);
-  expect((await upload('large.txt', 'x'.repeat(4100), 'text/plain')).status).toBe(
-    413,
-  );
+  expect(
+    (await upload('large.txt', 'x'.repeat(4100), 'text/plain')).status,
+  ).toBe(413);
   expect(
     (
       await upload('large.txt', 'x'.repeat(4100), 'text/plain', 'local', {
@@ -211,10 +230,25 @@ it.each([same, allowed])(
           );
       }
       expect(
-        (await send(api, method, path, body, { ...extra, origin: foreign }, raw))
-          .status,
+        (
+          await send(
+            api,
+            method,
+            path,
+            body,
+            { ...extra, origin: foreign },
+            raw,
+          )
+        ).status,
       ).toBe(403);
-      const res = await send(api, method, path, body, { ...extra, origin }, raw);
+      const res = await send(
+        api,
+        method,
+        path,
+        body,
+        { ...extra, origin },
+        raw,
+      );
       expect(res.headers['access-control-allow-origin']).toBe(origin);
       expect(res.status).toBeGreaterThanOrEqual(200);
       expect(res.status).toBeLessThan(300);
@@ -245,8 +279,7 @@ it.each([same, allowed])(
     ).toEqual(journal.slice(1));
     await worker();
     const rev = { 'if-match': '"2"' },
-      csv =
-        'Prompt,Ground Truth,Pass Criteria\nGood?,Answer,Yes\nMissing,,';
+      csv = 'Prompt,Ground Truth,Pass Criteria\nGood?,Answer,Yes\nMissing,,';
     expect(
       c.csvPreview.parse(
         await checked(
@@ -277,17 +310,22 @@ it.each([same, allowed])(
       ),
     );
     const chunkJob = c.job.parse(
-      await checked('POST', `/api/v1/document-versions/${doc.versionId}/chunks`, {
-        strategy: 'layout',
-        chunkSize: 120,
-        overlap: 5,
-      }),
+      await checked(
+        'POST',
+        `/api/v1/document-versions/${doc.versionId}/chunks`,
+        {
+          strategy: 'layout',
+          chunkSize: 120,
+          overlap: 5,
+        },
+      ),
     );
     await worker();
     expect(
-      c.page(c.chunkRow).parse(
-        await checked('GET', `/api/v1/jobs/${chunkJob.id}/chunks`),
-      ).items[0].content,
+      c
+        .page(c.chunkRow)
+        .parse(await checked('GET', `/api/v1/jobs/${chunkJob.id}/chunks`))
+        .items[0].content,
     ).toBe('note');
     expect(
       c.dataset.parse(
@@ -341,18 +379,30 @@ it('rejects mismatched dev port origins and accepts rewritten same-origin reques
   const { jobId } = c.uploadResult.parse(proxied.body);
   expect(
     (
-      await send(api, 'POST', `/api/v1/jobs/${jobId}/cancel`, {}, {
-        host: '127.0.0.1:7070',
-        origin: 'http://127.0.0.1:3000',
-      })
+      await send(
+        api,
+        'POST',
+        `/api/v1/jobs/${jobId}/cancel`,
+        {},
+        {
+          host: '127.0.0.1:7070',
+          origin: 'http://127.0.0.1:3000',
+        },
+      )
     ).status,
   ).toBe(403);
   expect(
     (
-      await send(api, 'POST', `/api/v1/jobs/${jobId}/cancel`, {}, {
-        host: '127.0.0.1:7070',
-        origin: 'http://127.0.0.1:7070',
-      })
+      await send(
+        api,
+        'POST',
+        `/api/v1/jobs/${jobId}/cancel`,
+        {},
+        {
+          host: '127.0.0.1:7070',
+          origin: 'http://127.0.0.1:7070',
+        },
+      )
     ).status,
   ).toBe(200);
 });
@@ -595,9 +645,9 @@ it('recovers a SIGKILL during remote parsing and publishes exactly one artifact 
     await until(() => repo.jobs.get(jobId).state === 'succeeded');
     expect(repo.jobs.get(jobId).attempt).toBe(2);
     expect(readFileSync(calls, 'utf8').match(/\/upload\n/g)).toHaveLength(1);
-    expect(
-      repo.getDocument(repo.list(1).items[0].id, documentId).content,
-    ).toBe('Repeated page.\n\nRepeated page.');
+    expect(repo.getDocument(repo.list(1).items[0].id, documentId).content).toBe(
+      'Repeated page.\n\nRepeated page.',
+    );
     expect(
       repo.jobs.chunks(jobId, -1).items.map((row) => [row.page, row.start]),
     ).toEqual([
@@ -620,12 +670,17 @@ it('aborts an in-flight poll on cancellation and resumes that remote job on expl
   );
   const jobs = new Jobs(db, Date.now, 300);
   const transport = vi.fn<typeof fetch>(async (url, init) => {
-    if (String(url).endsWith('/upload')) return Response.json({ id: 'running' });
+    if (String(url).endsWith('/upload'))
+      return Response.json({ id: 'running' });
     jobs.cancel(jobId);
     return new Promise<Response>((_resolve, reject) =>
-      init?.signal?.addEventListener('abort', () => reject(new Error('aborted')), {
-        once: true,
-      }),
+      init?.signal?.addEventListener(
+        'abort',
+        () => reject(new Error('aborted')),
+        {
+          once: true,
+        },
+      ),
     );
   });
   await worker(transport, jobs);

@@ -286,15 +286,15 @@ export function definitionsRouter(
     ),
   );
   router.get('/datasets/:id/documents/:docId', (req, res) => {
-    const { revision,preview } = parse(
+    const { revision, preview } = parse(
       c.z.strictObject({
-        preview:c.z.literal('true').optional(),
+        preview: c.z.literal('true').optional(),
         revision: c.z.coerce.number().int().positive().optional(),
       }),
       req.query,
     );
-    const doc=datasets.getDocument(req.params.id,req.params.docId,revision);
-    res.json(preview?{...doc,content:doc.content?.slice(0,4000)}:doc);
+    const doc = datasets.getDocument(req.params.id, req.params.docId, revision);
+    res.json(preview ? { ...doc, content: doc.content?.slice(0, 4000) } : doc);
   });
   router.post('/pipelines', (req, res) => {
     const input = parse(c.pipelineInput, req.body);

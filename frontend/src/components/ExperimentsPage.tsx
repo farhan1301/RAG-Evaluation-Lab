@@ -22,7 +22,10 @@ import {
   TableRow,
 } from './ui/table';
 import { useRunnerInputs } from '../data/legacyRunner';
-import { type TaskResult, useExperimentResults } from '../state/experimentResults';
+import {
+  type TaskResult,
+  useExperimentResults,
+} from '../state/experimentResults';
 import {
   chunkDocumentsWithConfig,
   summarizeChunkGroups,
@@ -40,32 +43,35 @@ import type {
 } from '../types/experiment';
 import { METRIC_DEFINITIONS } from '../types/experiment';
 
-const CHAT_COST_PER_1K_TOKENS: Record<string, { input: number; output: number }> = {
+const CHAT_COST_PER_1K_TOKENS: Record<
+  string,
+  { input: number; output: number }
+> = {
   // Rates reflect the Standard tier prices (per 1M tokens) normalized to a 1K token basis.
-  'gpt-5': { input: 0.00125, output: 0.0100 },
-  'gpt-5-chat-latest': { input: 0.00125, output: 0.0100 },
-  'gpt-5-codex': { input: 0.00125, output: 0.0100 },
-  'gpt-5-mini': { input: 0.00025, output: 0.0020 },
+  'gpt-5': { input: 0.00125, output: 0.01 },
+  'gpt-5-chat-latest': { input: 0.00125, output: 0.01 },
+  'gpt-5-codex': { input: 0.00125, output: 0.01 },
+  'gpt-5-mini': { input: 0.00025, output: 0.002 },
   'gpt-5-nano': { input: 0.00005, output: 0.0004 },
-  'gpt-5-pro': { input: 0.0150, output: 0.1200 },
-  'gpt-4.1': { input: 0.0020, output: 0.0080 },
+  'gpt-5-pro': { input: 0.015, output: 0.12 },
+  'gpt-4.1': { input: 0.002, output: 0.008 },
   'gpt-4.1-mini': { input: 0.0004, output: 0.0016 },
   'gpt-4.1-nano': { input: 0.0001, output: 0.0004 },
-  'gpt-4o': { input: 0.0025, output: 0.0100 },
-  'gpt-4o-2024-05-13': { input: 0.0050, output: 0.0150 },
-  'gpt-4o-mini': { input: 0.00015, output: 0.00060 },
-  'gpt-4o-mini-2024-07-18': { input: 0.00015, output: 0.00060 },
-  'gpt-4-turbo': { input: 0.0100, output: 0.0300 },
+  'gpt-4o': { input: 0.0025, output: 0.01 },
+  'gpt-4o-2024-05-13': { input: 0.005, output: 0.015 },
+  'gpt-4o-mini': { input: 0.00015, output: 0.0006 },
+  'gpt-4o-mini-2024-07-18': { input: 0.00015, output: 0.0006 },
+  'gpt-4-turbo': { input: 0.01, output: 0.03 },
   'gpt-3.5-turbo': { input: 0.0005, output: 0.0015 },
 };
 
-const DEFAULT_CHAT_PRICING = { input: 0.0025, output: 0.0100 };
+const DEFAULT_CHAT_PRICING = { input: 0.0025, output: 0.01 };
 
 const normalizeModelKey = (model?: string) => model?.toLowerCase().trim() ?? '';
 
 const estimateChatCost = (
   model: string,
-  usage: { promptTokens: number; completionTokens: number }
+  usage: { promptTokens: number; completionTokens: number },
 ) => {
   const pricing =
     CHAT_COST_PER_1K_TOKENS[normalizeModelKey(model)] ?? DEFAULT_CHAT_PRICING;
@@ -105,16 +111,30 @@ const getEmbeddingVectorDim = (model: string) => {
 export function ExperimentsPage() {
   const { documents, tasks, pipelines, unavailable } = useRunnerInputs();
   const {
-    latestRun, setLatestRun, stage, setStage, statusLog, setStatusLog,
-    taskResultsByPipeline, setTaskResultsByPipeline, progress, setProgress,
-    error, setError, isRunning, setIsRunning,
+    latestRun,
+    setLatestRun,
+    stage,
+    setStage,
+    statusLog,
+    setStatusLog,
+    taskResultsByPipeline,
+    setTaskResultsByPipeline,
+    progress,
+    setProgress,
+    error,
+    setError,
+    isRunning,
+    setIsRunning,
   } = useExperimentResults();
 
   const experimentPipelines = pipelines;
   const baselinePipelineId =
-    pipelines.find((pipeline) => pipeline.isBaseline)?.id ?? experimentPipelines[0]?.id ?? '';
+    pipelines.find((pipeline) => pipeline.isBaseline)?.id ??
+    experimentPipelines[0]?.id ??
+    '';
 
-  const [selectedPipelineId, setSelectedPipelineId] = useState(baselinePipelineId);
+  const [selectedPipelineId, setSelectedPipelineId] =
+    useState(baselinePipelineId);
 
   useEffect(() => {
     setSelectedPipelineId((prev) => {
@@ -133,12 +153,12 @@ export function ExperimentsPage() {
         }
         return !!doc.content?.trim();
       }),
-    [documents]
+    [documents],
   );
 
   const readyTasks = useMemo(
     () => tasks.filter((task) => task.question.trim()),
-    [tasks]
+    [tasks],
   );
 
   const pipelineOptions = useMemo(
@@ -147,7 +167,7 @@ export function ExperimentsPage() {
         id: pipeline.id ?? `pipeline-${index}`,
         name: pipeline.name ?? `Pipeline ${index + 1}`,
       })),
-    [experimentPipelines]
+    [experimentPipelines],
   );
 
   const pipelineNameLookup = useMemo(
@@ -156,7 +176,7 @@ export function ExperimentsPage() {
         acc[option.id] = option.name;
         return acc;
       }, {}),
-    [pipelineOptions]
+    [pipelineOptions],
   );
 
   const previousRunTaskResults = useMemo(() => {
@@ -164,59 +184,64 @@ export function ExperimentsPage() {
       return {};
     }
 
-    return latestRun.pipelines.reduce<Record<string, TaskResult[]>>((acc, pipeline) => {
-      const answeringSummary = pipeline.answeringSummary;
-      if (!answeringSummary) {
-        return acc;
-      }
+    return latestRun.pipelines.reduce<Record<string, TaskResult[]>>(
+      (acc, pipeline) => {
+        const answeringSummary = pipeline.answeringSummary;
+        if (!answeringSummary) {
+          return acc;
+        }
 
-      const chunkLookup = new Map(
-        (answeringSummary.sources ?? []).map((chunk) => [chunk.id, chunk])
-      );
+        const chunkLookup = new Map(
+          (answeringSummary.sources ?? []).map((chunk) => [chunk.id, chunk]),
+        );
 
-      const convertedResults = (answeringSummary.details ?? []).map((detail) => {
-        const matches = detail.retrievedChunkIds
-          .map((chunkId) => {
-            const chunk = chunkLookup.get(chunkId);
-            if (!chunk) {
-              return null;
-            }
+        const convertedResults = (answeringSummary.details ?? []).map(
+          (detail) => {
+            const matches = detail.retrievedChunkIds
+              .map((chunkId) => {
+                const chunk = chunkLookup.get(chunkId);
+                if (!chunk) {
+                  return null;
+                }
+                return {
+                  id: chunk.id,
+                  score: chunk.score,
+                  text: chunk.content,
+                  documentName: chunk.documentName,
+                };
+              })
+              .filter((match) => match !== null);
+
             return {
-              id: chunk.id,
-              score: chunk.score,
-              text: chunk.content,
-              documentName: chunk.documentName,
+              taskId: detail.taskId,
+              question: detail.question,
+              expectedAnswer: detail.expectedAnswer ?? '',
+              answer: detail.response,
+              matches,
+              latencyMs: detail.latencyMs,
+              usage: detail.usage,
             };
-          })
-          .filter((match) => match !== null);
+          },
+        );
 
-        return {
-          taskId: detail.taskId,
-          question: detail.question,
-          expectedAnswer: detail.expectedAnswer ?? '',
-          answer: detail.response,
-          matches,
-          latencyMs: detail.latencyMs,
-          usage: detail.usage,
-        };
-      });
-
-      acc[pipeline.pipelineId] = convertedResults;
-      return acc;
-    }, {});
+        acc[pipeline.pipelineId] = convertedResults;
+        return acc;
+      },
+      {},
+    );
   }, [latestRun]);
 
   const activePipelineId =
     selectedPipelineId && pipelineNameLookup[selectedPipelineId]
       ? selectedPipelineId
-      : pipelineOptions[0]?.id ?? '';
+      : (pipelineOptions[0]?.id ?? '');
 
   const localTaskResults = taskResultsByPipeline[activePipelineId];
 
   const displayedTaskResults =
     localTaskResults && localTaskResults.length > 0
       ? localTaskResults
-      : previousRunTaskResults[activePipelineId] ?? [];
+      : (previousRunTaskResults[activePipelineId] ?? []);
 
   const canViewReport =
     !isRunning && latestRun && latestRun.pipelines.length > 0;
@@ -235,12 +260,16 @@ export function ExperimentsPage() {
     }
 
     if (!readyDocuments.length) {
-      setError('Upload at least one document with parsed content before running an experiment.');
+      setError(
+        'Upload at least one document with parsed content before running an experiment.',
+      );
       return;
     }
 
     if (!readyTasks.length) {
-      setError('Add at least one evaluation question before running an experiment.');
+      setError(
+        'Add at least one evaluation question before running an experiment.',
+      );
       return;
     }
 
@@ -268,10 +297,12 @@ export function ExperimentsPage() {
     if (pipelineNames.length === 1) {
       appendLog(`Running pipeline: ${pipelineNames[0]}.`);
     } else {
-      appendLog(`Running ${pipelineNames.length} pipelines: ${pipelineNames.join(', ')}.`);
+      appendLog(
+        `Running ${pipelineNames.length} pipelines: ${pipelineNames.join(', ')}.`,
+      );
     }
     appendLog(
-      `Preparing ${readyDocuments.length} document${readyDocuments.length === 1 ? '' : 's'} for chunking.`
+      `Preparing ${readyDocuments.length} document${readyDocuments.length === 1 ? '' : 's'} for chunking.`,
     );
 
     try {
@@ -287,10 +318,11 @@ export function ExperimentsPage() {
         index: number,
         startFraction: number,
         endFraction: number,
-        portion: number
+        portion: number,
       ) => {
         const clampedPortion = Math.min(1, Math.max(0, portion));
-        const fraction = startFraction + (endFraction - startFraction) * clampedPortion;
+        const fraction =
+          startFraction + (endFraction - startFraction) * clampedPortion;
         computePipelineProgress(index, fraction);
       };
 
@@ -298,7 +330,11 @@ export function ExperimentsPage() {
       let completedAt: string | undefined;
 
       for (const [index, entry] of pipelineOverview.entries()) {
-        const { pipeline: currentPipeline, id: pipelineId, name: pipelineName } = entry;
+        const {
+          pipeline: currentPipeline,
+          id: pipelineId,
+          name: pipelineName,
+        } = entry;
         const chunkConfig = currentPipeline.chunking;
         const retrieverK = currentPipeline.retriever?.topK;
         const pipelineEmbeddingModel = currentPipeline.embedding?.model;
@@ -306,20 +342,25 @@ export function ExperimentsPage() {
         setStage('chunking');
         computePipelineProgress(index, 0);
         appendLog(
-          `[${pipelineName}] Chunking documents with strategy "${chunkConfig.strategy}".`
+          `[${pipelineName}] Chunking documents with strategy "${chunkConfig.strategy}".`,
         );
 
-        const chunkGroups: DocumentChunkGroup[] = await chunkDocumentsWithConfig(readyDocuments, chunkConfig);
+        const chunkGroups: DocumentChunkGroup[] =
+          await chunkDocumentsWithConfig(readyDocuments, chunkConfig);
         const chunkSummary = summarizeChunkGroups(chunkGroups);
-        const chunks: DocumentChunk[] = chunkGroups.flatMap((group) => group.chunks);
+        const chunks: DocumentChunk[] = chunkGroups.flatMap(
+          (group) => group.chunks,
+        );
         const chunkCount = chunks.length;
 
         if (!chunkCount) {
-          throw new Error(`No chunks were generated for pipeline "${pipelineName}".`);
+          throw new Error(
+            `No chunks were generated for pipeline "${pipelineName}".`,
+          );
         }
 
         appendLog(
-          `[${pipelineName}] Generated ${chunkSummary.totalChunks} chunk${chunkSummary.totalChunks === 1 ? '' : 's'} (avg ${chunkSummary.averageChars} chars). Uploading to Qdrant…`
+          `[${pipelineName}] Generated ${chunkSummary.totalChunks} chunk${chunkSummary.totalChunks === 1 ? '' : 's'} (avg ${chunkSummary.averageChars} chars). Uploading to Qdrant…`,
         );
 
         const chunkLookup = new Map<string, DocumentChunk>();
@@ -352,15 +393,13 @@ export function ExperimentsPage() {
         appendLog(
           `[${pipelineName}] Chunks embedded and stored in Qdrant${
             targetCollectionName ? ` collection "${targetCollectionName}"` : ''
-          }${
-            vectorSize ? ` (vector size ${vectorSize})` : ''
-          } successfully.`
+          }${vectorSize ? ` (vector size ${vectorSize})` : ''} successfully.`,
         );
         computePipelineProgress(index, 0.25);
 
         setStage('answering');
         appendLog(
-          `[${pipelineName}] Retrieving answers for ${readyTasks.length} task${readyTasks.length === 1 ? '' : 's'}…`
+          `[${pipelineName}] Retrieving answers for ${readyTasks.length} task${readyTasks.length === 1 ? '' : 's'}…`,
         );
 
         const results: TaskResult[] = [];
@@ -374,7 +413,9 @@ export function ExperimentsPage() {
         let completed = 0;
 
         for (const task of readyTasks) {
-          appendLog(`[${pipelineName}] → Retrieving context for: "${task.question}"`);
+          appendLog(
+            `[${pipelineName}] → Retrieving context for: "${task.question}"`,
+          );
 
           const response = await answerQuestion({
             pipelineId,
@@ -389,9 +430,12 @@ export function ExperimentsPage() {
           const matches = (response.matches ?? []).map((match) => {
             const chunk = chunkLookup.get(match.id);
             const payload = match.payload ?? {};
-            const payloadText = typeof payload.text === 'string' ? payload.text : '';
+            const payloadText =
+              typeof payload.text === 'string' ? payload.text : '';
             const payloadDocumentName =
-              typeof payload.documentName === 'string' ? payload.documentName : undefined;
+              typeof payload.documentName === 'string'
+                ? payload.documentName
+                : undefined;
             const payloadDocumentId = payload.documentId;
             const text = chunk?.content ?? payloadText;
             const documentName = chunk?.documentName ?? payloadDocumentName;
@@ -402,14 +446,17 @@ export function ExperimentsPage() {
                 chunk?.documentId ??
                 (typeof payloadDocumentId === 'string'
                   ? payloadDocumentId
-                  : payloadDocumentId !== undefined && payloadDocumentId !== null
-                  ? String(payloadDocumentId)
-                  : ''),
+                  : payloadDocumentId !== undefined &&
+                      payloadDocumentId !== null
+                    ? String(payloadDocumentId)
+                    : ''),
               documentName,
               documentSource: chunk?.documentSource,
               content: text,
               charCount: chunk?.charCount ?? text.length,
-              tokenEstimate: chunk?.tokenEstimate ?? Math.max(1, Math.round(text.length / 4)),
+              tokenEstimate:
+                chunk?.tokenEstimate ??
+                Math.max(1, Math.round(text.length / 4)),
               score: typeof match.score === 'number' ? match.score : 0,
             };
 
@@ -453,8 +500,15 @@ export function ExperimentsPage() {
 
           answerLatencyByTask.set(task.id, response.latencyMs ?? 0);
           completed += 1;
-          updatePipelineProgress(index, 0.25, 0.85, completed / readyTasks.length);
-          appendLog(`[${pipelineName}] ✓ Answer drafted for task "${task.question}"`);
+          updatePipelineProgress(
+            index,
+            0.25,
+            0.85,
+            completed / readyTasks.length,
+          );
+          appendLog(
+            `[${pipelineName}] ✓ Answer drafted for task "${task.question}"`,
+          );
         }
 
         setTaskResultsByPipeline((prev) => ({
@@ -464,7 +518,7 @@ export function ExperimentsPage() {
 
         setStage('judging');
         appendLog(
-          `[${pipelineName}] Scoring answers with judge model for quality and groundedness…`
+          `[${pipelineName}] Scoring answers with judge model for quality and groundedness…`,
         );
         computePipelineProgress(index, 0.9);
 
@@ -485,16 +539,22 @@ export function ExperimentsPage() {
         }).catch(() => ({
           verdict: 'unavailable' as const,
           judgePassRate: null,
-          averageScores: { relevance: null, judgedContextPrecision: null, groundedness: null },
+          averageScores: {
+            relevance: null,
+            judgedContextPrecision: null,
+            groundedness: null,
+          },
           coverage: { completed: 0, total: results.length },
-          details: results.map(({ taskId }): JudgingSummary['details'][number] => ({
-            taskId,
-            verdict: 'unavailable',
-            scores: null,
-            missingCriteria: [],
-            rationale: 'Judge request failed.',
-            latencyMs: 0,
-          })),
+          details: results.map(
+            ({ taskId }): JudgingSummary['details'][number] => ({
+              taskId,
+              verdict: 'unavailable',
+              scores: null,
+              missingCriteria: [],
+              rationale: 'Judge request failed.',
+              latencyMs: 0,
+            }),
+          ),
           latencyMs: 0,
           tokensUsed: 0,
         }));
@@ -502,22 +562,28 @@ export function ExperimentsPage() {
         const totalQuestions = readyTasks.length;
         const embeddingModelName = pipelineEmbeddingModel ?? '';
         const vectorDim = getEmbeddingVectorDim(embeddingModelName);
-        const totalEmbeddingTokens = chunks.reduce((sum, chunk) => sum + chunk.tokenEstimate, 0);
+        const totalEmbeddingTokens = chunks.reduce(
+          (sum, chunk) => sum + chunk.tokenEstimate,
+          0,
+        );
 
         const judgePromptTokens = judgeResponse.details.reduce(
           (sum, detail) => sum + (detail.usage?.promptTokens ?? 0),
-          0
+          0,
         );
         const judgeCompletionTokens = judgeResponse.details.reduce(
           (sum, detail) => sum + (detail.usage?.completionTokens ?? 0),
-          0
+          0,
         );
         const judgeTotalTokens = judgeResponse.details.reduce(
           (sum, detail) => sum + (detail.usage?.totalTokens ?? 0),
-          0
+          0,
         );
 
-        const answerLatencyP95Ms = computePercentile(Array.from(answerLatencyByTask.values()), 0.95);
+        const answerLatencyP95Ms = computePercentile(
+          Array.from(answerLatencyByTask.values()),
+          0.95,
+        );
         const perTaskTotalLatencies = judgeResponse.details.map((detail) => {
           const answerLatency = answerLatencyByTask.get(detail.taskId) ?? 0;
           return answerLatency + detail.latencyMs;
@@ -545,7 +611,8 @@ export function ExperimentsPage() {
 
         const pipelineMetrics: PipelineMetrics = {
           judgePassRate: judgeResponse.judgePassRate,
-          judgedContextPrecision: judgeResponse.averageScores.judgedContextPrecision,
+          judgedContextPrecision:
+            judgeResponse.averageScores.judgedContextPrecision,
           latencyP95: Number(latencyP95Seconds.toFixed(2)),
           groundedness: judgeResponse.averageScores.groundedness,
           costPerQuery: Number(costPerQuery.toFixed(4)),
@@ -583,7 +650,10 @@ export function ExperimentsPage() {
           },
           answeringSummary: {
             answer: results
-              .map((result, answerIndex) => `Q${answerIndex + 1}: ${result.answer}`)
+              .map(
+                (result, answerIndex) =>
+                  `Q${answerIndex + 1}: ${result.answer}`,
+              )
               .join('\n\n'),
             sources: Array.from(aggregatedSources.values()),
             tokensUsed: Math.round(totalAnswerTokens),
@@ -598,11 +668,12 @@ export function ExperimentsPage() {
         completedAt = new Date().toISOString();
 
         const { completed: scored, total } = judgeResponse.coverage;
-        const passRateLabel = judgeResponse.judgePassRate === null
-          ? 'unavailable'
-          : `${(judgeResponse.judgePassRate * 100).toFixed(0)}%`;
+        const passRateLabel =
+          judgeResponse.judgePassRate === null
+            ? 'unavailable'
+            : `${(judgeResponse.judgePassRate * 100).toFixed(0)}%`;
         appendLog(
-          `[${pipelineName}] Evaluation complete. Judge coverage ${scored}/${total}. Judge pass rate ${passRateLabel}.`
+          `[${pipelineName}] Evaluation complete. Judge coverage ${scored}/${total}. Judge pass rate ${passRateLabel}.`,
         );
         computePipelineProgress(index, 1);
       }
@@ -616,7 +687,11 @@ export function ExperimentsPage() {
         let best: number | null = null;
         for (const result of pipelineResults) {
           const value = result.metrics[metric.key];
-          if (value !== null && (best === null || (metric.better === 'higher' ? value > best : value < best))) {
+          if (
+            value !== null &&
+            (best === null ||
+              (metric.better === 'higher' ? value > best : value < best))
+          ) {
             best = value;
             bestByMetric[metric.key] = result.pipelineId;
           }
@@ -624,8 +699,9 @@ export function ExperimentsPage() {
       }
 
       const baselinePipelineIdForRun =
-        pipelineResults.find((result) => result.pipelineId === baselinePipelineId)?.pipelineId ??
-        pipelineResults[0]?.pipelineId;
+        pipelineResults.find(
+          (result) => result.pipelineId === baselinePipelineId,
+        )?.pipelineId ?? pipelineResults[0]?.pipelineId;
 
       const runSummary: ExperimentRun = {
         id: `run-${Date.now()}`,
@@ -641,7 +717,10 @@ export function ExperimentsPage() {
 
       setLatestRun(runSummary);
     } catch (runError) {
-      const message = runError instanceof Error ? runError.message : 'Unexpected error during experiment.';
+      const message =
+        runError instanceof Error
+          ? runError.message
+          : 'Unexpected error during experiment.';
       setError(message);
       setStage('idle');
       appendLog(`Error: ${message}`);
@@ -657,10 +736,16 @@ export function ExperimentsPage() {
           <div>
             <h1>Experiment Runner</h1>
             <p className="text-muted-foreground">
-              Upload documents, embed them with Qdrant, and evaluate answers with the LLM.
+              Upload documents, embed them with Qdrant, and evaluate answers
+              with the LLM.
             </p>
           </div>
-          <Button onClick={runExperiment} size="lg" className="gap-2" disabled={isRunning || !!unavailable}>
+          <Button
+            onClick={runExperiment}
+            size="lg"
+            className="gap-2"
+            disabled={isRunning || !!unavailable}
+          >
             <Play size={20} />
             {isRunning ? 'Running…' : 'Start Experiment'}
           </Button>
@@ -668,7 +753,10 @@ export function ExperimentsPage() {
 
         {unavailable && <p role="status">{unavailable}</p>}
         {error && (
-          <Card role="alert" className="border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950 text-red-700 dark:text-red-300">
+          <Card
+            role="alert"
+            className="border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950 text-red-700 dark:text-red-300"
+          >
             <CardContent className="py-4 text-sm">{error}</CardContent>
           </Card>
         )}
@@ -677,8 +765,20 @@ export function ExperimentsPage() {
           <CardHeader>
             <div className="flex flex-wrap items-center justify-between gap-2">
               <CardTitle>Experiment Progress</CardTitle>
-              <Badge variant={stage === 'complete' ? 'default' : stage === 'idle' ? 'outline' : 'secondary'}>
-                {stage === 'idle' ? 'Not Started' : stage === 'complete' ? 'Complete' : 'In Progress'}
+              <Badge
+                variant={
+                  stage === 'complete'
+                    ? 'default'
+                    : stage === 'idle'
+                      ? 'outline'
+                      : 'secondary'
+                }
+              >
+                {stage === 'idle'
+                  ? 'Not Started'
+                  : stage === 'complete'
+                    ? 'Complete'
+                    : 'In Progress'}
               </Badge>
             </div>
           </CardHeader>
@@ -688,7 +788,10 @@ export function ExperimentsPage() {
                 <span>Overall Progress</span>
                 <span className="text-sm opacity-60">{progress}%</span>
               </div>
-              <Progress aria-label="Overall experiment progress" value={progress} />
+              <Progress
+                aria-label="Overall experiment progress"
+                value={progress}
+              />
             </div>
 
             <div className="flex items-center gap-2 text-sm">
@@ -698,12 +801,16 @@ export function ExperimentsPage() {
 
             <div className="max-h-48 overflow-y-auto overflow-x-hidden text-sm pr-2 text-foreground">
               {statusLog.length === 0 ? (
-                <p className="opacity-60">Status updates will appear here once the experiment starts.</p>
+                <p className="opacity-60">
+                  Status updates will appear here once the experiment starts.
+                </p>
               ) : (
                 statusLog.map((entry) => (
                   <div key={entry.id} className="flex items-start gap-2 py-1">
                     <span className="opacity-40 flex-none">•</span>
-                    <span className="flex-1 min-w-0 break-words">{entry.message}</span>
+                    <span className="flex-1 min-w-0 break-words">
+                      {entry.message}
+                    </span>
                   </div>
                 ))
               )}
@@ -724,9 +831,13 @@ export function ExperimentsPage() {
                       setSelectedPipelineId(value);
                     }}
                   >
-                    <SelectTrigger aria-label="Review pipeline" className="max-w-full sm:w-48">
+                    <SelectTrigger
+                      aria-label="Review pipeline"
+                      className="max-w-full sm:w-48"
+                    >
                       <SelectValue placeholder="Choose pipeline">
-                        {pipelineNameLookup[activePipelineId] ?? 'Choose pipeline'}
+                        {pipelineNameLookup[activePipelineId] ??
+                          'Choose pipeline'}
                       </SelectValue>
                     </SelectTrigger>
                     <SelectContent>
@@ -772,7 +883,9 @@ export function ExperimentsPage() {
                       </TableCell>
                       <TableCell className="align-top w-[25%]">
                         {result.matches.length === 0 ? (
-                          <span className="opacity-60">No context retrieved.</span>
+                          <span className="opacity-60">
+                            No context retrieved.
+                          </span>
                         ) : (
                           <div className="space-y-2">
                             {result.matches.slice(0, 2).map((match) => (
@@ -782,7 +895,9 @@ export function ExperimentsPage() {
                               >
                                 <div className="flex items-center gap-2 text-xs uppercase tracking-wide opacity-60 mb-1">
                                   <FileText size={12} />
-                                  <span>{match.documentName ?? 'Document'}</span>
+                                  <span>
+                                    {match.documentName ?? 'Document'}
+                                  </span>
                                   <span>Score: {match.score.toFixed(3)}</span>
                                 </div>
                                 <div className="text-xs whitespace-pre-wrap">
@@ -804,7 +919,9 @@ export function ExperimentsPage() {
 
         {canViewReport && (
           <div className="flex justify-end">
-            <Button asChild><Link to={reportPath(latestRun.id)}>View report</Link></Button>
+            <Button asChild>
+              <Link to={reportPath(latestRun.id)}>View report</Link>
+            </Button>
           </div>
         )}
       </div>

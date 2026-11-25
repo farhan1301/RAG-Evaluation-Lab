@@ -62,12 +62,23 @@ export function useRunnerInputs() {
               `datasets/${dataset.id}/documents/${doc.id}?revision=${dataset.revision}`,
             ),
           staleTime: doc.jobId ? 0 : Infinity,
-          refetchInterval: (q:{state:{data?:import('@rag-eval/contracts').SavedDocument}}) => doc.jobId && !q.state.data?.content ? 3000 : false as const,
+          refetchInterval: (q: {
+            state: { data?: import('@rag-eval/contracts').SavedDocument };
+          }) => (doc.jobId && !q.state.data?.content ? 3000 : (false as const)),
         }))
       : [],
   });
   const documents: DatasetDocument[] = files.flatMap(({ data }) =>
-    data ? [{ ...data, status: data.content ? 'complete' : 'processing', progress: data.content ? 100 : 0, snippet: '' }] : [],
+    data
+      ? [
+          {
+            ...data,
+            status: data.content ? 'complete' : 'processing',
+            progress: data.content ? 100 : 0,
+            snippet: '',
+          },
+        ]
+      : [],
   );
   let unavailable = '';
   if (
@@ -96,7 +107,8 @@ export function useRunnerInputs() {
   )
     unavailable =
       'Configure Qdrant and embedding, answer, and judge profiles to use the current runner.';
-  else if (documents.some(d=>!d.content))
-    unavailable='Finish parsing all documents on the Datasets page before running an experiment.';
+  else if (documents.some((d) => !d.content))
+    unavailable =
+      'Finish parsing all documents on the Datasets page before running an experiment.';
   return { documents, tasks: detail.data?.tasks ?? [], pipelines, unavailable };
 }

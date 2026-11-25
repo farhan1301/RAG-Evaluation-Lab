@@ -21,11 +21,21 @@ export async function request<T>(
   const response = await fetch(`/api/v1/${path}`, {
     method,
     headers: {
-      ...(body !== undefined && { 'Content-Type': body instanceof Blob ? body.type || 'application/octet-stream' : 'application/json' }),
-      ...(key && {'Idempotency-Key':key}),
+      ...(body !== undefined && {
+        'Content-Type':
+          body instanceof Blob
+            ? body.type || 'application/octet-stream'
+            : 'application/json',
+      }),
+      ...(key && { 'Idempotency-Key': key }),
       ...(revision !== undefined && { 'If-Match': `"${revision}"` }),
     },
-    body: body instanceof Blob ? body : body === undefined ? undefined : JSON.stringify(body),
+    body:
+      body instanceof Blob
+        ? body
+        : body === undefined
+          ? undefined
+          : JSON.stringify(body),
   });
   if (!response.ok) {
     const result = c.errorEnvelope.safeParse(

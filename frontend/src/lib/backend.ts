@@ -85,9 +85,11 @@ async function postJson<T>(path: string, payload: unknown): Promise<T> {
   if (!response.ok) {
     const detail = await response.json().catch(() => null);
     throw new Error(
-      typeof detail?.error?.message === 'string' ? detail.error.message : typeof detail?.error === 'string'
-        ? detail.error
-        : `Request to /api/${path} failed (${response.status})`,
+      typeof detail?.error?.message === 'string'
+        ? detail.error.message
+        : typeof detail?.error === 'string'
+          ? detail.error
+          : `Request to /api/${path} failed (${response.status})`,
     );
   }
   return response.json();

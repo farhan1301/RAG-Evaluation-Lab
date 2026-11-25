@@ -7,16 +7,18 @@ import { CloudParser } from '../ingestion/cloud.js';
 import { createLogger } from '../lib/logger.js';
 import { runOne } from './run.js';
 
-if (process.env.NODE_ENV!=='test') loadEnvironment();
-const config=readConfig(), logger=createLogger();
-const db=openDatabase(config.env.DATABASE_PATH), jobs=new Jobs(db,Date.now,config.env.WORKER_LEASE_MS);
-const controller=new AbortController();
+if (process.env.NODE_ENV !== 'test') loadEnvironment();
+const config = readConfig(),
+  logger = createLogger();
+const db = openDatabase(config.env.DATABASE_PATH),
+  jobs = new Jobs(db, Date.now, config.env.WORKER_LEASE_MS);
+const controller = new AbortController();
 function stop() {
   controller.abort();
-  setTimeout(()=>process.exit(1),config.env.SHUTDOWN_TIMEOUT_MS).unref();
+  setTimeout(() => process.exit(1), config.env.SHUTDOWN_TIMEOUT_MS).unref();
 }
-process.once('SIGTERM',stop);
-process.once('SIGINT',stop);
+process.once('SIGTERM', stop);
+process.once('SIGINT', stop);
 const options = {
   directory: blobDirectory(config),
   cloud: new CloudParser(
@@ -27,9 +29,12 @@ const options = {
   logger,
 };
 jobs.presence();
-const heartbeat = setInterval(() => {
-  if (!controller.signal.aborted) jobs.presence();
-}, Math.floor(jobs.leaseMs / 3));
+const heartbeat = setInterval(
+  () => {
+    if (!controller.signal.aborted) jobs.presence();
+  },
+  Math.floor(jobs.leaseMs / 3),
+);
 logger.info('worker ready');
 try {
   while (!controller.signal.aborted) {

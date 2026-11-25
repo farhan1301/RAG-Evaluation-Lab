@@ -14,7 +14,9 @@ interface AnswerRequestBody {
 
 const buildAnswerPrompt = (question: string, contextSnippets: string[]) => {
   const context = contextSnippets.length
-    ? contextSnippets.map((snippet, index) => `Context ${index + 1}:\n${snippet}`).join('\n\n')
+    ? contextSnippets
+        .map((snippet, index) => `Context ${index + 1}:\n${snippet}`)
+        .join('\n\n')
     : 'No relevant context was retrieved. Reason from prior knowledge if possible.';
 
   return [
@@ -26,26 +28,48 @@ const buildAnswerPrompt = (question: string, contextSnippets: string[]) => {
     },
     {
       role: 'user' as const,
-      content: ['Context:', context, '', `Question: ${question}`, '', 'Answer:'].join('\n'),
+      content: [
+        'Context:',
+        context,
+        '',
+        `Question: ${question}`,
+        '',
+        'Answer:',
+      ].join('\n'),
     },
   ];
 };
 
-export const createAnswerHandler = (
-  openai: Pick<OpenAIClient, 'createEmbeddings' | 'chatCompletion'>,
-  qdrant: QdrantClient
-) =>
+export const createAnswerHandler =
+  (
+    openai: Pick<OpenAIClient, 'createEmbeddings' | 'chatCompletion'>,
+    qdrant: QdrantClient,
+  ) =>
   async (req: Request<unknown, unknown, AnswerRequestBody>, res: Response) => {
-    if (!req.body || typeof req.body !== 'object' || 'collectionName' in req.body || 'resetCollection' in req.body) {
-      return res.status(400).json({ error: 'Collection selection and reset are server-managed.' });
+    if (
+      !req.body ||
+      typeof req.body !== 'object' ||
+      'collectionName' in req.body ||
+      'resetCollection' in req.body
+    ) {
+      return res
+        .status(400)
+        .json({ error: 'Collection selection and reset are server-managed.' });
     }
     const { pipelineId, question, topK = 5, model, embeddingModel } = req.body;
-    const normalizedPipelineId = typeof pipelineId === 'string' ? pipelineId.trim() : '';
+    const normalizedPipelineId =
+      typeof pipelineId === 'string' ? pipelineId.trim() : '';
     const normalizedEmbeddingModel =
       typeof embeddingModel === 'string' ? embeddingModel.trim() : undefined;
 
-    if (!normalizedPipelineId || typeof question !== 'string' || !question.trim()) {
-      return res.status(400).json({ error: 'pipelineId and question are required.' });
+    if (
+      !normalizedPipelineId ||
+      typeof question !== 'string' ||
+      !question.trim()
+    ) {
+      return res
+        .status(400)
+        .json({ error: 'pipelineId and question are required.' });
     }
 
     try {
@@ -60,14 +84,14 @@ export const createAnswerHandler = (
       const vectorSize = vectors[0].length;
       const targetCollection = qdrant.collectionNameForPipeline(
         vectorSize,
-        normalizedPipelineId
+        normalizedPipelineId,
       );
 
       const matches = await qdrant.search(
         vectors[0],
         Math.max(1, Math.min(20, topK)),
         { pipelineId: normalizedPipelineId },
-        targetCollection
+        targetCollection,
       );
 
       const contextSnippets = matches
@@ -92,7 +116,8 @@ export const createAnswerHandler = (
         vectorSize,
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unexpected error';
+      const message =
+        error instanceof Error ? error.message : 'Unexpected error';
       res.status(500).json({ error: message });
     }
   };

@@ -221,23 +221,53 @@ function TaskEditor({ dataset, task }: { dataset: c.Dataset; task?: c.Task }) {
   );
 }
 
-function DocumentProgress({dataset,doc,parser}:{dataset:c.Dataset;doc:c.SavedDocument;parser:c.Parser}) {
-  const cache=useQueryClient(), write=useWrite('datasets');
-  const [open,setOpen]=useState(false);
-  const status=useQuery({
-    queryKey:['jobs',doc.jobId], enabled:!!doc.jobId,
-    queryFn:()=>request(c.job,`jobs/${doc.jobId}`),
-    refetchInterval:q=>q.state.data && ['failed','cancelled','succeeded'].includes(q.state.data.state)?false:1500,
+function DocumentProgress({
+  dataset,
+  doc,
+  parser,
+}: {
+  dataset: c.Dataset;
+  doc: c.SavedDocument;
+  parser: c.Parser;
+}) {
+  const cache = useQueryClient(),
+    write = useWrite('datasets');
+  const [open, setOpen] = useState(false);
+  const status = useQuery({
+    queryKey: ['jobs', doc.jobId],
+    enabled: !!doc.jobId,
+    queryFn: () => request(c.job, `jobs/${doc.jobId}`),
+    refetchInterval: (q) =>
+      q.state.data &&
+      ['failed', 'cancelled', 'succeeded'].includes(q.state.data.state)
+        ? false
+        : 1500,
   });
-  const job=status.data;
-  const preview=useQuery({queryKey:['preview',doc.versionId,doc.jobId],enabled:open && (!doc.jobId || job?.state==='succeeded'),
-    queryFn:()=>request(c.document,`datasets/${dataset.id}/documents/${doc.id}?revision=${dataset.revision}&preview=true`)});
-  function action(path:string,body:unknown) {
-    write.mutate(async()=>{
-      const next=await request(c.job,path,'POST',body,dataset.revision,crypto.randomUUID());
-      cache.setQueryData(['jobs',next.id],next);
-      await cache.invalidateQueries({queryKey:['runner-document',doc.versionId]});
-      return request(c.dataset,`datasets/${dataset.id}`);
+  const job = status.data;
+  const preview = useQuery({
+    queryKey: ['preview', doc.versionId, doc.jobId],
+    enabled: open && (!doc.jobId || job?.state === 'succeeded'),
+    queryFn: () =>
+      request(
+        c.document,
+        `datasets/${dataset.id}/documents/${doc.id}?revision=${dataset.revision}&preview=true`,
+      ),
+  });
+  function action(path: string, body: unknown) {
+    write.mutate(async () => {
+      const next = await request(
+        c.job,
+        path,
+        'POST',
+        body,
+        dataset.revision,
+        crypto.randomUUID(),
+      );
+      cache.setQueryData(['jobs', next.id], next);
+      await cache.invalidateQueries({
+        queryKey: ['runner-document', doc.versionId],
+      });
+      return request(c.dataset, `datasets/${dataset.id}`);
     });
   }
   return (
@@ -254,7 +284,8 @@ function DocumentProgress({dataset,doc,parser}:{dataset:c.Dataset;doc:c.SavedDoc
       )}
       <div className="flex flex-wrap gap-1">
         {doc.jobId &&
-          (!job || !['failed', 'cancelled', 'succeeded'].includes(job.state)) && (
+          (!job ||
+            !['failed', 'cancelled', 'succeeded'].includes(job.state)) && (
             <Button
               size="sm"
               variant="ghost"
@@ -283,7 +314,8 @@ function DocumentProgress({dataset,doc,parser}:{dataset:c.Dataset;doc:c.SavedDoc
           </Button>
         )}
         {(!doc.jobId ||
-          (job && ['failed', 'cancelled', 'succeeded'].includes(job.state))) && (
+          (job &&
+            ['failed', 'cancelled', 'succeeded'].includes(job.state))) && (
           <>
             <Button
               size="sm"
@@ -320,21 +352,39 @@ function DocumentProgress({dataset,doc,parser}:{dataset:c.Dataset;doc:c.SavedDoc
 }
 
 function Documents({ dataset }: { dataset: c.Dataset }) {
-  const write = useWrite('datasets'), capabilities=useCapabilities(),
+  const write = useWrite('datasets'),
+    capabilities = useCapabilities(),
     path = `datasets/${dataset.id}/documents`;
-  const [parser,setParser]=useState<c.Parser>('local');
-  const [uploading,setUploading]=useState('');
+  const [parser, setParser] = useState<c.Parser>('local');
+  const [uploading, setUploading] = useState('');
   return (
     <Card>
       <CardHeader>
         <CardTitle>Document Upload</CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
-        <label>Parser <select value={parser} disabled={write.isPending} onChange={e=>setParser(c.parser.parse(e.target.value))}>
-          <option value="local">Local TXT, Markdown or text PDF</option>
-          <option value="llama-parse" disabled={!capabilities.data?.cloudParser}>LlamaParse cloud (also supports DOCX)</option>
-        </select></label>
-        {parser==='llama-parse' && <p>Parsing sends the original document to LlamaParse and may incur a provider charge.</p>}
+        <label>
+          Parser{' '}
+          <select
+            value={parser}
+            disabled={write.isPending}
+            onChange={(e) => setParser(c.parser.parse(e.target.value))}
+          >
+            <option value="local">Local TXT, Markdown or text PDF</option>
+            <option
+              value="llama-parse"
+              disabled={!capabilities.data?.cloudParser}
+            >
+              LlamaParse cloud (also supports DOCX)
+            </option>
+          </select>
+        </label>
+        {parser === 'llama-parse' && (
+          <p>
+            Parsing sends the original document to LlamaParse and may incur a
+            provider charge.
+          </p>
+        )}
         {uploading && <p role="status">Uploading {uploading}…</p>}
         <label
           htmlFor={`${dataset.id}-choose-a-document-for-the-runner`}
@@ -351,11 +401,24 @@ function Documents({ dataset }: { dataset: c.Dataset }) {
               e.target.value = '';
               if (!file) return;
               setUploading(file.name);
-              write.mutate(async () => {
-                const query=new URLSearchParams({name:file.name,parser});
-                const result=await request(c.uploadResult,`${path}?${query}`,'POST',file,dataset.revision,crypto.randomUUID());
-                return result.dataset;
-              },{onSettled:()=>setUploading('')});
+              write.mutate(
+                async () => {
+                  const query = new URLSearchParams({
+                    name: file.name,
+                    parser,
+                  });
+                  const result = await request(
+                    c.uploadResult,
+                    `${path}?${query}`,
+                    'POST',
+                    file,
+                    dataset.revision,
+                    crypto.randomUUID(),
+                  );
+                  return result.dataset;
+                },
+                { onSettled: () => setUploading('') },
+              );
             }}
           />
         </label>
@@ -396,9 +459,9 @@ function Documents({ dataset }: { dataset: c.Dataset }) {
 
 function CsvImport({ dataset }: { dataset: c.Dataset }) {
   const [error, setError] = useState('');
-  const [reading,setReading]=useState(false);
+  const [reading, setReading] = useState(false);
   const [preview, setPreview] = useState<
-    (c.z.infer<typeof c.csvPreview> & { revision: number; csv:string }) | null
+    (c.z.infer<typeof c.csvPreview> & { revision: number; csv: string }) | null
   >(null);
   const write = useWrite('datasets');
   return (
@@ -421,10 +484,17 @@ function CsvImport({ dataset }: { dataset: c.Dataset }) {
             setError('');
             setReading(true);
             try {
-              if(file.size>16*1024*1024) throw new Error('CSV exceeds the request size limit.');
-              const csv=await file.text();
+              if (file.size > 16 * 1024 * 1024)
+                throw new Error('CSV exceeds the request size limit.');
+              const csv = await file.text();
               setPreview({
-                ...await request(c.csvPreview,`datasets/${dataset.id}/task-imports`,'POST',{mode:'preview',csv},dataset.revision),
+                ...(await request(
+                  c.csvPreview,
+                  `datasets/${dataset.id}/task-imports`,
+                  'POST',
+                  { mode: 'preview', csv },
+                  dataset.revision,
+                )),
                 csv,
                 revision: dataset.revision,
               });
@@ -432,7 +502,9 @@ function CsvImport({ dataset }: { dataset: c.Dataset }) {
               setError(
                 err instanceof Error ? err.message : 'Invalid CSV file.',
               );
-            } finally {setReading(false);}
+            } finally {
+              setReading(false);
+            }
           }}
         />
       </label>
@@ -468,7 +540,7 @@ ${row.acceptanceRule}`,
                     c.dataset,
                     `datasets/${dataset.id}/task-imports`,
                     'POST',
-                    {mode:'commit',csv:preview.csv},
+                    { mode: 'commit', csv: preview.csv },
                     preview.revision,
                   ),
                 { onSuccess: () => setPreview(null) },

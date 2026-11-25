@@ -59,24 +59,20 @@ export function legacyRouter(config: Config) {
             'missing_capability',
             `Configure the required server profile for ${operation}.`,
           );
-          const resolve = (
-            role: 'embedding' | 'judge' | 'chat',
-            key: string,
-          ) => {
-            const selected = config.capabilities.profiles.find(
-              (p) =>
-                p.role === role &&
-                (!req.body[key] || p.model === req.body[key]),
-            );
-            if (!selected) throw unavailable();
-            req.body[key] = selected.model;
-          };
-          if (operation !== 'judge') {
-            if (!config.capabilities.denseStore) throw unavailable();
-            resolve('embedding', 'embeddingModel');
-          }
-          if (operation === 'answer') resolve('chat', 'model');
-          if (operation === 'judge') resolve('judge', 'model');
+        const resolve = (role: 'embedding' | 'judge' | 'chat', key: string) => {
+          const selected = config.capabilities.profiles.find(
+            (p) =>
+              p.role === role && (!req.body[key] || p.model === req.body[key]),
+          );
+          if (!selected) throw unavailable();
+          req.body[key] = selected.model;
+        };
+        if (operation !== 'judge') {
+          if (!config.capabilities.denseStore) throw unavailable();
+          resolve('embedding', 'embeddingModel');
+        }
+        if (operation === 'answer') resolve('chat', 'model');
+        if (operation === 'judge') resolve('judge', 'model');
         next();
       },
       handlers[operation],

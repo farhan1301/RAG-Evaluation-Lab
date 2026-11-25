@@ -26,7 +26,10 @@ const HEADER_ALIASES: Record<string, TaskCsvField> = {
 };
 
 const normalizeHeader = (value: string) =>
-  value.trim().toLowerCase().replace(/[_\s]+/g, ' ');
+  value
+    .trim()
+    .toLowerCase()
+    .replace(/[_\s]+/g, ' ');
 
 const hasMeaningfulContent = (cells: string[]) =>
   cells.some((cell) => cell.trim().length > 0);
@@ -112,7 +115,10 @@ export const parseTaskCsv = (rawContent: string): ParseTaskCsvResult => {
     const normalized = normalizeHeader(header);
     const mappedField = HEADER_ALIASES[normalized];
 
-    if (mappedField !== undefined && headerPositions[mappedField] === undefined) {
+    if (
+      mappedField !== undefined &&
+      headerPositions[mappedField] === undefined
+    ) {
       headerPositions[mappedField] = index;
     }
   });
@@ -153,7 +159,7 @@ export const parseTaskCsv = (rawContent: string): ParseTaskCsvResult => {
           !acceptanceRule ? 'acceptance rule' : null,
         ]
           .filter(Boolean)
-          .join(', ')}.`
+          .join(', ')}.`,
       );
       return;
     }

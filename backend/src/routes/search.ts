@@ -9,21 +9,33 @@ interface SearchRequestBody {
   embeddingModel?: string;
 }
 
-export const createSearchHandler = (
-  openai: Pick<OpenAIClient, 'createEmbeddings'>,
-  qdrant: QdrantClient
-) =>
+export const createSearchHandler =
+  (openai: Pick<OpenAIClient, 'createEmbeddings'>, qdrant: QdrantClient) =>
   async (req: Request<unknown, unknown, SearchRequestBody>, res: Response) => {
-    if (!req.body || typeof req.body !== 'object' || 'collectionName' in req.body || 'resetCollection' in req.body) {
-      return res.status(400).json({ error: 'Collection selection and reset are server-managed.' });
+    if (
+      !req.body ||
+      typeof req.body !== 'object' ||
+      'collectionName' in req.body ||
+      'resetCollection' in req.body
+    ) {
+      return res
+        .status(400)
+        .json({ error: 'Collection selection and reset are server-managed.' });
     }
     const { pipelineId, question, topK = 5, embeddingModel } = req.body;
-    const normalizedPipelineId = typeof pipelineId === 'string' ? pipelineId.trim() : '';
+    const normalizedPipelineId =
+      typeof pipelineId === 'string' ? pipelineId.trim() : '';
     const normalizedEmbeddingModel =
       typeof embeddingModel === 'string' ? embeddingModel.trim() : undefined;
 
-    if (!normalizedPipelineId || typeof question !== 'string' || !question.trim()) {
-      return res.status(400).json({ error: 'pipelineId and question are required.' });
+    if (
+      !normalizedPipelineId ||
+      typeof question !== 'string' ||
+      !question.trim()
+    ) {
+      return res
+        .status(400)
+        .json({ error: 'pipelineId and question are required.' });
     }
 
     try {
@@ -37,19 +49,20 @@ export const createSearchHandler = (
       const vectorSize = vectors[0].length;
       const targetCollection = qdrant.collectionNameForPipeline(
         vectorSize,
-        normalizedPipelineId
+        normalizedPipelineId,
       );
 
       const results = await qdrant.search(
         vectors[0],
         Math.max(1, Math.min(50, topK)),
         { pipelineId: normalizedPipelineId },
-        targetCollection
+        targetCollection,
       );
 
       res.json({ matches: results, collection: targetCollection, vectorSize });
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unexpected error';
+      const message =
+        error instanceof Error ? error.message : 'Unexpected error';
       res.status(500).json({ error: message });
     }
   };

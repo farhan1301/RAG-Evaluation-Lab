@@ -9,7 +9,7 @@ import { createLogger } from './lib/logger.js';
 if (process.env.NODE_ENV !== 'test') loadEnvironment();
 const config = readConfig();
 const db = openDatabase(config.env.DATABASE_PATH);
-const jobs=new Jobs(db, Date.now, config.env.WORKER_LEASE_MS);
+const jobs = new Jobs(db, Date.now, config.env.WORKER_LEASE_MS);
 const logger = createLogger();
 let stopping = false;
 const app = createApp({

@@ -149,30 +149,60 @@ it('archives referenced pipeline definitions while preserving independent copies
   expect(pipelines.list(10).items.map((p) => p.id)).toEqual([copy.id]);
 });
 
-it('upgrades Phase 3 inline uploads and parses them without changing frozen revisions',async()=>{
+it('upgrades Phase 3 inline uploads and parses them without changing frozen revisions', async () => {
   // Construct an actual schema-1 database on a separate connection.
-  const {randomUUID}=await import('node:crypto');
-  const {hash}=await import('../backend/src/db/definitions');
-  const {runOne}=await import('../backend/src/jobs/run');
-  const {CloudParser}=await import('../backend/src/ingestion/cloud');
-  const file=join(dir,'old.db'),old=openDatabase(file,1);
-  const datasetId=randomUUID(),docId=randomUUID(),version=randomUUID(),bytes=Buffer.from('Phase three');
+  const { randomUUID } = await import('node:crypto');
+  const { hash } = await import('../backend/src/db/definitions');
+  const { runOne } = await import('../backend/src/jobs/run');
+  const { CloudParser } = await import('../backend/src/ingestion/cloud');
+  const file = join(dir, 'old.db'),
+    old = openDatabase(file, 1);
+  const datasetId = randomUUID(),
+    docId = randomUUID(),
+    version = randomUUID(),
+    bytes = Buffer.from('Phase three');
   try {
     old.exec('BEGIN');
-    old.prepare('INSERT INTO datasets(id,revision) VALUES (?,1)').run(datasetId);
-    old.prepare('INSERT INTO dataset_revisions VALUES (?,1,?,?)').run(datasetId,'Original',new Date().toISOString());
-    old.prepare('INSERT INTO documents VALUES (?,?)').run(docId,datasetId);
-    old.prepare('INSERT INTO document_versions VALUES (?,?,?,?,?,?,0)').run(version,docId,'notes.md','application/octet-stream',hash(bytes),bytes);
-    old.prepare('INSERT INTO revision_documents VALUES (?,1,?)').run(datasetId,version);
+    old
+      .prepare('INSERT INTO datasets(id,revision) VALUES (?,1)')
+      .run(datasetId);
+    old
+      .prepare('INSERT INTO dataset_revisions VALUES (?,1,?,?)')
+      .run(datasetId, 'Original', new Date().toISOString());
+    old.prepare('INSERT INTO documents VALUES (?,?)').run(docId, datasetId);
+    old
+      .prepare('INSERT INTO document_versions VALUES (?,?,?,?,?,?,0)')
+      .run(
+        version,
+        docId,
+        'notes.md',
+        'application/octet-stream',
+        hash(bytes),
+        bytes,
+      );
+    old
+      .prepare('INSERT INTO revision_documents VALUES (?,1,?)')
+      .run(datasetId, version);
     old.exec('COMMIT');
-  } finally {old.close();}
-  const migrated=openDatabase(file);
+  } finally {
+    old.close();
+  }
+  const migrated = openDatabase(file);
   try {
-    const repo=new Datasets(migrated);
-    const job=repo.requestParse(docId,1,'local',null,()=>{});
-    await runOne(repo.jobs,{directory:dir,cloud:new CloudParser('',undefined)});
+    const repo = new Datasets(migrated);
+    const job = repo.requestParse(docId, 1, 'local', null, () => {});
+    await runOne(repo.jobs, {
+      directory: dir,
+      cloud: new CloudParser('', undefined),
+    });
     expect(repo.jobs.get(job.id).state).toBe('succeeded');
-    expect(repo.getDocument(datasetId,docId,1)).toMatchObject({content:'Phase three',versionId:version,size:bytes.length});
+    expect(repo.getDocument(datasetId, docId, 1)).toMatchObject({
+      content: 'Phase three',
+      versionId: version,
+      size: bytes.length,
+    });
     expect(repo.get(datasetId).revision).toBe(1);
-  } finally {migrated.close();}
+  } finally {
+    migrated.close();
+  }
 });

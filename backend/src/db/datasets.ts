@@ -73,7 +73,9 @@ export class Datasets extends Definitions {
       (SELECT id FROM jobs WHERE version_id=d.id AND chunk_config IS NULL ORDER BY rowid DESC LIMIT 1) AS jobId, d.hash,coalesce(d.byte_size,length(d.bytes)) AS size FROM revision_documents r JOIN document_versions d ON r.version_id=d.id
       WHERE r.dataset_id=? AND r.revision=? ORDER BY d.document_id`)
       .all(id, head.revision)
-      .map(({jobId,...row}) => document.parse({...row,jobId:jobId??undefined}));
+      .map(({ jobId, ...row }) =>
+        document.parse({ ...row, jobId: jobId ?? undefined }),
+      );
     return dataset.parse({
       ...head,
       documents,
@@ -93,8 +95,13 @@ export class Datasets extends Definitions {
       WHERE r.dataset_id=? AND r.revision=? AND d.document_id=?`)
       .get(id, revision, documentId);
     if (!row) return missing();
-    const {content,seed,pages,jobId,...fields}=row;
-    return document.parse({...fields, jobId:jobId??undefined, content:content??seed??undefined, pages:pages?JSON.parse(String(pages)):undefined});
+    const { content, seed, pages, jobId, ...fields } = row;
+    return document.parse({
+      ...fields,
+      jobId: jobId ?? undefined,
+      content: content ?? seed ?? undefined,
+      pages: pages ? JSON.parse(String(pages)) : undefined,
+    });
   }
 
   private edit(
@@ -103,26 +110,31 @@ export class Datasets extends Definitions {
     change: (revision: number) => void,
     name?: string,
   ) {
-    return transaction(this.db,()=>this.editRevision(id,expected,change,name));
+    return transaction(this.db, () =>
+      this.editRevision(id, expected, change, name),
+    );
   }
-  private editRevision(id:string,expected:number,change:(revision:number)=>void,name?:string) {
-      const current = this.writable(id, expected);
-      const next = expected + 1;
+  private editRevision(
+    id: string,
+    expected: number,
+    change: (revision: number) => void,
+    name?: string,
+  ) {
+    const current = this.writable(id, expected);
+    const next = expected + 1;
+    this.db
+      .prepare('INSERT INTO dataset_revisions VALUES (?,?,?,?)')
+      .run(id, next, name ?? current.name, new Date().toISOString());
+    for (const table of ['revision_tasks', 'revision_documents']) {
       this.db
-        .prepare('INSERT INTO dataset_revisions VALUES (?,?,?,?)')
-        .run(id, next, name ?? current.name, new Date().toISOString());
-      for (const table of ['revision_tasks', 'revision_documents']) {
-        this.db
-          .prepare(
-            `INSERT INTO ${table} SELECT dataset_id,?,version_id FROM ${table} WHERE dataset_id=? AND revision=?`,
-          )
-          .run(next, id, expected);
-      }
-      change(next);
-      this.db
-        .prepare('UPDATE datasets SET revision=? WHERE id=?')
-        .run(next, id);
-      return this.get(id);
+        .prepare(
+          `INSERT INTO ${table} SELECT dataset_id,?,version_id FROM ${table} WHERE dataset_id=? AND revision=?`,
+        )
+        .run(next, id, expected);
+    }
+    change(next);
+    this.db.prepare('UPDATE datasets SET revision=? WHERE id=?').run(next, id);
+    return this.get(id);
   }
   rename(id: string, expected: number, name: string) {
     return this.edit(id, expected, () => {}, name);
@@ -140,44 +152,98 @@ export class Datasets extends Definitions {
       version = randomUUID();
     this.db.prepare('INSERT INTO documents VALUES (?,?)').run(id, datasetId);
     this.db
-      .prepare('INSERT INTO document_versions(id,document_id,name,mime_type,hash,bytes,is_text) VALUES (?,?,?,?,?,?,?)')
+      .prepare(
+        'INSERT INTO document_versions(id,document_id,name,mime_type,hash,bytes,is_text) VALUES (?,?,?,?,?,?,?)',
+      )
       .run(version, id, name, mimeType, hash(bytes), bytes, Number(isText));
     this.db
       .prepare('INSERT INTO revision_documents VALUES (?,?,?)')
       .run(datasetId, revision, version);
     return id;
   }
-  addUpload(id:string,expected:number,name:string,blob:StoredBlob,parser:Parser,key:string|null) {
-    return transaction(this.db,()=>{
-      const fingerprint=hash(JSON.stringify(['upload',id,expected,name,blob.mimeType,blob.hash,parser]));
-      const previous=this.jobs.replay(key,fingerprint);
-      if(previous) {
-        const job=this.jobs.get(previous);
-        const doc=this.db.prepare('SELECT document_id FROM document_versions WHERE id=?').get(job.versionId);
-        return {dataset:this.get(id,expected+1),documentId:String(doc?.document_id),jobId:previous,reused:true};
+  addUpload(
+    id: string,
+    expected: number,
+    name: string,
+    blob: StoredBlob,
+    parser: Parser,
+    key: string | null,
+  ) {
+    return transaction(this.db, () => {
+      const fingerprint = hash(
+        JSON.stringify([
+          'upload',
+          id,
+          expected,
+          name,
+          blob.mimeType,
+          blob.hash,
+          parser,
+        ]),
+      );
+      const previous = this.jobs.replay(key, fingerprint);
+      if (previous) {
+        const job = this.jobs.get(previous);
+        const doc = this.db
+          .prepare('SELECT document_id FROM document_versions WHERE id=?')
+          .get(job.versionId);
+        return {
+          dataset: this.get(id, expected + 1),
+          documentId: String(doc?.document_id),
+          jobId: previous,
+          reused: true,
+        };
       }
-      const documentId=randomUUID(), version=randomUUID();
-      let jobId='';
-      const dataset=this.editRevision(id,expected,revision=>{
-        this.db.prepare('INSERT INTO documents VALUES (?,?)').run(documentId,id);
-        this.db.prepare("INSERT INTO document_versions VALUES (?,?,?,?,?,X'',0,?,?)").run(version,documentId,name,blob.mimeType,blob.hash,blob.key,blob.size);
-        this.db.prepare('INSERT INTO revision_documents VALUES (?,?,?)').run(id,revision,version);
-        jobId=this.jobs.enqueue(version,parser,key,fingerprint);
+      const documentId = randomUUID(),
+        version = randomUUID();
+      let jobId = '';
+      const dataset = this.editRevision(id, expected, (revision) => {
+        this.db
+          .prepare('INSERT INTO documents VALUES (?,?)')
+          .run(documentId, id);
+        this.db
+          .prepare("INSERT INTO document_versions VALUES (?,?,?,?,?,X'',0,?,?)")
+          .run(
+            version,
+            documentId,
+            name,
+            blob.mimeType,
+            blob.hash,
+            blob.key,
+            blob.size,
+          );
+        this.db
+          .prepare('INSERT INTO revision_documents VALUES (?,?,?)')
+          .run(id, revision, version);
+        jobId = this.jobs.enqueue(version, parser, key, fingerprint);
       });
-      return {dataset,documentId,jobId,reused:false};
+      return { dataset, documentId, jobId, reused: false };
     });
   }
-  requestParse(docId:string,expected:number,parser:Parser,key:string|null,validate:(name:string,mime:string)=>void) {
-    return transaction(this.db,()=>{
-      const hashValue=hash(JSON.stringify(['parse',docId,expected,parser]));
-      const previous=this.jobs.replay(key,hashValue);
+  requestParse(
+    docId: string,
+    expected: number,
+    parser: Parser,
+    key: string | null,
+    validate: (name: string, mime: string) => void,
+  ) {
+    return transaction(this.db, () => {
+      const hashValue = hash(
+        JSON.stringify(['parse', docId, expected, parser]),
+      );
+      const previous = this.jobs.replay(key, hashValue);
       if (previous) return this.jobs.get(previous);
-      const row=this.db.prepare('SELECT dataset_id FROM documents WHERE id=?').get(docId)??missing();
-      const datasetId=String(row.dataset_id);
-      this.writable(datasetId,expected);
-      const doc=this.getDocument(datasetId,docId);
-      validate(doc.name,doc.mimeType);
-      return this.jobs.get(this.jobs.enqueue(doc.versionId,parser,key,hashValue));
+      const row =
+        this.db
+          .prepare('SELECT dataset_id FROM documents WHERE id=?')
+          .get(docId) ?? missing();
+      const datasetId = String(row.dataset_id);
+      this.writable(datasetId, expected);
+      const doc = this.getDocument(datasetId, docId);
+      validate(doc.name, doc.mimeType);
+      return this.jobs.get(
+        this.jobs.enqueue(doc.versionId, parser, key, hashValue),
+      );
     });
   }
   removeDocument(id: string, expected: number, documentId: string) {

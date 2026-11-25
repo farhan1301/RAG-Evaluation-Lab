@@ -33,16 +33,19 @@ export class OpenAIClient {
 
   async createEmbeddings(
     inputs: string[],
-    options: { model?: string; signal?: AbortSignal } = {}
+    options: { model?: string; signal?: AbortSignal } = {},
   ): Promise<EmbeddingResponse> {
     if (!inputs.length) {
       return { vectors: [] };
     }
 
-    const targetModel = options.model?.trim() || this.config.openaiEmbeddingModel;
+    const targetModel =
+      options.model?.trim() || this.config.openaiEmbeddingModel;
 
     const local = targetModel === this.config.localEmbedModel;
-    const baseUrl = local ? this.config.localEmbedBaseUrl : 'https://api.openai.com/v1';
+    const baseUrl = local
+      ? this.config.localEmbedBaseUrl
+      : 'https://api.openai.com/v1';
     if (!baseUrl) throw new Error('Embedding endpoint is unavailable.');
     const response = await fetch(`${baseUrl.replace(/\/$/, '')}/embeddings`, {
       method: 'POST',
@@ -59,7 +62,9 @@ export class OpenAIClient {
 
     if (!response.ok) {
       const detail = await response.text();
-      throw new Error(`OpenAI embeddings failed (${response.status}): ${detail}`);
+      throw new Error(
+        `OpenAI embeddings failed (${response.status}): ${detail}`,
+      );
     }
 
     const payload: unknown = await response.json();
@@ -76,7 +81,9 @@ export class OpenAIClient {
         item !== null &&
         'embedding' in item &&
         Array.isArray(item.embedding) &&
-        item.embedding.every((value): value is number => typeof value === 'number')
+        item.embedding.every(
+          (value): value is number => typeof value === 'number',
+        )
           ? item.embedding
           : null,
       )
@@ -92,7 +99,7 @@ export class OpenAIClient {
   async chatCompletion(
     messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
     options: ChatCompletionOptions = {},
-    signal?: AbortSignal
+    signal?: AbortSignal,
   ): Promise<ChatResponse> {
     const { model, temperature, maxTokens, responseFormat } = options;
 
@@ -100,7 +107,13 @@ export class OpenAIClient {
     const body: Record<string, unknown> = {
       model: resolvedModel,
       messages,
-      ...(typeof maxTokens === 'number' ? { [resolvedModel.toLowerCase().startsWith('gpt-5') ? 'max_completion_tokens' : 'max_tokens']: maxTokens } : {}),
+      ...(typeof maxTokens === 'number'
+        ? {
+            [resolvedModel.toLowerCase().startsWith('gpt-5')
+              ? 'max_completion_tokens'
+              : 'max_tokens']: maxTokens,
+          }
+        : {}),
       ...(responseFormat ? { response_format: responseFormat } : {}),
     };
 
@@ -122,7 +135,9 @@ export class OpenAIClient {
 
     if (!response.ok) {
       const detail = await response.text();
-      throw new Error(`OpenAI chat completion failed (${response.status}): ${detail}`);
+      throw new Error(
+        `OpenAI chat completion failed (${response.status}): ${detail}`,
+      );
     }
 
     const payload: unknown = await response.json();
@@ -141,9 +156,7 @@ export class OpenAIClient {
         ? firstChoice.message
         : undefined;
     const content =
-      typeof message === 'object' &&
-      message !== null &&
-      'content' in message
+      typeof message === 'object' && message !== null && 'content' in message
         ? message.content
         : undefined;
 

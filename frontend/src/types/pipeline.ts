@@ -1,4 +1,5 @@
-export type ChunkingStrategy = import('@rag-eval/contracts').PipelineConfig['chunking']['strategy'];
+export type ChunkingStrategy =
+  import('@rag-eval/contracts').PipelineConfig['chunking']['strategy'];
 
 export type ParsingStrategy = 'llama-parse';
 

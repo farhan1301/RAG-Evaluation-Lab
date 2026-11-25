@@ -23,7 +23,11 @@ export function ready(db: DatabaseSync) {
 }
 
 export function openDatabase(path: string, targetVersion = migrations.length) {
-  if (!Number.isInteger(targetVersion) || targetVersion<1 || targetVersion>migrations.length)
+  if (
+    !Number.isInteger(targetVersion) ||
+    targetVersion < 1 ||
+    targetVersion > migrations.length
+  )
     throw new RangeError('Invalid migration target.');
   if (path !== ':memory:')
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });

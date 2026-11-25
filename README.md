@@ -29,6 +29,7 @@ RAG Evaluation Lab is an end-to-end workspace for building, running, and evaluat
 ## 🛠️ Tech Stack
 
 ### Frontend
+
 - **Framework**: React 19 with TypeScript and React Router 8
 - **Build Tool**: Vite 8
 - **Styling**: Tailwind CSS 4
@@ -36,6 +37,7 @@ RAG Evaluation Lab is an end-to-end workspace for building, running, and evaluat
 - **State Management**: TanStack Query for saved resources and React context for the active run
 
 ### Backend
+
 - **Runtime**: Node.js 22.13+ (tested on 22.22.3)
 - **Framework**: Express.js
 - **Language**: TypeScript
@@ -51,7 +53,6 @@ RAG Evaluation Lab is an end-to-end workspace for building, running, and evaluat
 Click the image below to watch a demonstration of the platform:
 
 [![Watch Demo](/RAG_Demo_Thumbnail.png)](https://drive.google.com/file/d/1N9gWsj2-VUxENEvvmErER1WbRtXOn-Ph/view?usp=sharing)
-
 
 ---
 
@@ -112,13 +113,13 @@ RAG Evaluation Lab/
 
 Before getting started, ensure you have the following:
 
-| Requirement | Version | Notes |
-|------------|---------|-------|
-| Node.js | 22.13+ | JavaScript runtime |
-| npm | 9+ | Package manager |
-| Qdrant | Optional | Dense retrieval in the current runner |
-| OpenAI API Key | Optional | OpenAI embedding, answer and judge profiles |
-| LlamaParse API Key | Optional | Optional cloud parsing, including DOCX |
+| Requirement        | Version  | Notes                                       |
+| ------------------ | -------- | ------------------------------------------- |
+| Node.js            | 22.13+   | JavaScript runtime                          |
+| npm                | 9+       | Package manager                             |
+| Qdrant             | Optional | Dense retrieval in the current runner       |
+| OpenAI API Key     | Optional | OpenAI embedding, answer and judge profiles |
+| LlamaParse API Key | Optional | Optional cloud parsing, including DOCX      |
 
 ---
 
@@ -149,6 +150,7 @@ npm ci
 ### 3. Run the Application
 
 **Terminal 1 - Start Backend:**
+
 ```bash
 npm run dev:backend
 # Server starts at http://127.0.0.1:7070
@@ -161,6 +163,7 @@ npm run dev:worker
 ```
 
 **Terminal 3 - Start Frontend:**
+
 ```bash
 npm run dev
 # Open http://127.0.0.1:3000
@@ -182,30 +185,31 @@ Browser requests use same-origin `/api` paths. Vite proxies them to `http://127.
 
 ## 🔌 API Reference
 
-| Endpoint | Method | Purpose |
-|---|---|---|
-| `/health/live`, `/health/ready` | GET | Process liveness and storage readiness |
-| `/api/v1/capabilities` | GET | Available server profiles and parser and vector store configuration |
-| `/api/v1/datasets`, `/api/v1/pipelines` | GET, POST | List active definitions or create one |
-| `/api/v1/datasets/sample` | POST | Load the labeled RAG fundamentals sample |
-| `/api/v1/{datasets,pipelines}/:id` | GET, PATCH, DELETE | Read, edit, or archive |
-| `/api/v1/{datasets,pipelines}/:id/revisions[/:revision]` | GET | List revisions or read a frozen definition |
-| `/api/v1/datasets/:id/tasks` | GET, POST | List or add questions |
-| `/api/v1/datasets/:id/tasks/:taskId` | PATCH, DELETE | Edit or remove a question |
-| `/api/v1/tasks/:id/qrels` | PUT | Replace the labeling pool and graded document labels |
-| `/api/v1/datasets/:id/documents?name=…&parser=local` | POST | Stream raw file bytes with their Content-Type. Returns 202 with document ID, job ID and Location. |
-| `/api/v1/datasets/:id/documents/:docId?preview=true` | GET | Read up to 4,000 characters of extracted text |
-| `/api/v1/documents/:id/parses` | POST | Request another extraction with `{"parser":"local"}` or `{"parser":"llama-parse"}` |
-| `/api/v1/datasets/:id/task-imports` | POST | Supply `csv` and `mode` (`preview` or `commit`). Commit replaces questions at the specified revision. |
-| `/api/v1/jobs/:id`, `/api/v1/jobs/:id/events?after=0` | GET | Read progress or up to 100 ordered events after the supplied sequence number |
-| `/api/v1/jobs/:id/cancel`, `/api/v1/jobs/:id/retry` | POST | Cancel work or create a linked retry |
-| `/api/v1/pipelines/:id/copies` | POST | Create an independent copy |
+| Endpoint                                                 | Method             | Purpose                                                                                               |
+| -------------------------------------------------------- | ------------------ | ----------------------------------------------------------------------------------------------------- |
+| `/health/live`, `/health/ready`                          | GET                | Process liveness and storage readiness                                                                |
+| `/api/v1/capabilities`                                   | GET                | Available server profiles and parser and vector store configuration                                   |
+| `/api/v1/datasets`, `/api/v1/pipelines`                  | GET, POST          | List active definitions or create one                                                                 |
+| `/api/v1/datasets/sample`                                | POST               | Load the labeled RAG fundamentals sample                                                              |
+| `/api/v1/{datasets,pipelines}/:id`                       | GET, PATCH, DELETE | Read, edit, or archive                                                                                |
+| `/api/v1/{datasets,pipelines}/:id/revisions[/:revision]` | GET                | List revisions or read a frozen definition                                                            |
+| `/api/v1/datasets/:id/tasks`                             | GET, POST          | List or add questions                                                                                 |
+| `/api/v1/datasets/:id/tasks/:taskId`                     | PATCH, DELETE      | Edit or remove a question                                                                             |
+| `/api/v1/tasks/:id/qrels`                                | PUT                | Replace the labeling pool and graded document labels                                                  |
+| `/api/v1/datasets/:id/documents?name=…&parser=local`     | POST               | Stream raw file bytes with their Content-Type. Returns 202 with document ID, job ID and Location.     |
+| `/api/v1/datasets/:id/documents/:docId?preview=true`     | GET                | Read up to 4,000 characters of extracted text                                                         |
+| `/api/v1/documents/:id/parses`                           | POST               | Request another extraction with `{"parser":"local"}` or `{"parser":"llama-parse"}`                    |
+| `/api/v1/datasets/:id/task-imports`                      | POST               | Supply `csv` and `mode` (`preview` or `commit`). Commit replaces questions at the specified revision. |
+| `/api/v1/jobs/:id`, `/api/v1/jobs/:id/events?after=0`    | GET                | Read progress or up to 100 ordered events after the supplied sequence number                          |
+| `/api/v1/jobs/:id/cancel`, `/api/v1/jobs/:id/retry`      | POST               | Cancel work or create a linked retry                                                                  |
+| `/api/v1/pipelines/:id/copies`                           | POST               | Create an independent copy                                                                            |
 
 Send the current quoted revision in `If-Match` when changing an existing resource, including its tasks, grades and documents. A stale revision returns `409`, and a missing precondition returns `428`. Successful edits return the updated definition with an `ETag`. List responses contain `items` and `nextCursor`. Pass the cursor with `?cursor=…&limit=…` for the next page. Error responses carry a safe message, code, and request ID.
 
 ### Metrics and Evaluation
 
 The platform calculates comprehensive metrics from actual LLM evaluations:
+
 - Judge pass rate and coverage
 - Judged context precision and groundedness
 - Latency (p50, p95, p99)
@@ -272,30 +276,33 @@ This section provides detailed information about the architecture, components, a
 ### Backend (`/backend`)
 
 #### Goals
+
 - Provide a TypeScript + Express façade that keeps OpenAI, Qdrant, and LlamaParse credentials out of the browser.
 - Offer a complete RAG evaluation pipeline: ingest documents, embed chunks, retrieve context, draft answers, judge responses, and expose per-pipeline analytics.
 - Centralize configuration, logging, and CORS controls so the frontend and backend share a consistent runtime story, plus scripts that sanity-check each API surface.
 
 #### Key Components
-| Location | Description |
-| --- | --- |
-| `package.json`, `tsconfig.json` | Node/TypeScript scaffolding (ES modules, `tsx` dev runner, `tsc` build output). |
-| `src/config/env.ts` | Loads and validates server settings and derives safe provider capabilities. |
-| `src/lib/logger.ts` | Pino emits structured, redacted records to stdout. |
-| `src/lib/openaiClient.ts` | Embedding + chat helpers that surface latency, token usage, GPT‑5 model quirks, and response-format support. |
-| `src/lib/qdrantClient.ts` | Pipeline-aware collection manager (sanitizes names, ensures payload indexes, retries deletes, and filters searches per `pipelineId`). |
-| `src/ingestion/cloud.ts` | Resumable LlamaParse upload, poll and download. An uncertain upload requires explicit retry. |
-| `src/routes/embeddings.ts` | `POST /api/chunks` – embeds chunk payloads, replaces only the selected pipeline’s points, and returns vector dimension metadata. |
-| `src/routes/search.ts` | `POST /api/search` – embeds a query, searches the pipeline-specific collection, and exposes the resolved collection + vector size. |
-| `src/routes/answer.ts` | `POST /api/answer` – runs retrieval, composes a grounded answer prompt, returns matches/usage/latency, and mirrors the resolved collection metadata. |
-| `src/routes/judge.ts` | `POST /api/judge` – coaxes structured JSON verdicts, aggregates pass rate + average scores, and keeps raw per-task rationales. |
-| `src/jobs/worker.ts` | Claims durable parse and chunk jobs, renews leases, and checkpoints completed work. |
-| `src/index.ts` | Migrates SQLite, starts the app on loopback, drains requests and closes the database on SIGINT or SIGTERM. |
-| `scripts/*.ts` | Optional scoped index setup: `node --import tsx backend/scripts/setup-qdrant-index.ts <pipeline-id> <vector-dimension>` from the root. |
+
+| Location                        | Description                                                                                                                                          |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `package.json`, `tsconfig.json` | Node/TypeScript scaffolding (ES modules, `tsx` dev runner, `tsc` build output).                                                                      |
+| `src/config/env.ts`             | Loads and validates server settings and derives safe provider capabilities.                                                                          |
+| `src/lib/logger.ts`             | Pino emits structured, redacted records to stdout.                                                                                                   |
+| `src/lib/openaiClient.ts`       | Embedding + chat helpers that surface latency, token usage, GPT‑5 model quirks, and response-format support.                                         |
+| `src/lib/qdrantClient.ts`       | Pipeline-aware collection manager (sanitizes names, ensures payload indexes, retries deletes, and filters searches per `pipelineId`).                |
+| `src/ingestion/cloud.ts`        | Resumable LlamaParse upload, poll and download. An uncertain upload requires explicit retry.                                                         |
+| `src/routes/embeddings.ts`      | `POST /api/chunks` – embeds chunk payloads, replaces only the selected pipeline’s points, and returns vector dimension metadata.                     |
+| `src/routes/search.ts`          | `POST /api/search` – embeds a query, searches the pipeline-specific collection, and exposes the resolved collection + vector size.                   |
+| `src/routes/answer.ts`          | `POST /api/answer` – runs retrieval, composes a grounded answer prompt, returns matches/usage/latency, and mirrors the resolved collection metadata. |
+| `src/routes/judge.ts`           | `POST /api/judge` – coaxes structured JSON verdicts, aggregates pass rate + average scores, and keeps raw per-task rationales.                       |
+| `src/jobs/worker.ts`            | Claims durable parse and chunk jobs, renews leases, and checkpoints completed work.                                                                  |
+| `src/index.ts`                  | Migrates SQLite, starts the app on loopback, drains requests and closes the database on SIGINT or SIGTERM.                                           |
+| `scripts/*.ts`                  | Optional scoped index setup: `node --import tsx backend/scripts/setup-qdrant-index.ts <pipeline-id> <vector-dimension>` from the root.               |
 
 Start locally with `npm run dev:backend` from the root. Run the compiled backend with `npm start -w rag-eval-backend` and the compiled worker with `npm run start:worker` after the workspace build.
 
 #### Notable Behaviors
+
 - Pipeline-aware Qdrant usage keeps embeddings partitioned per experiment configuration while provisioning a collection per pipeline and vector size. Reindexing replaces points for that pipeline. Existing legacy collections stay intact.
 - The API returns safe error codes and request IDs for provider failures.
 - A confirmed LlamaParse job ID survives worker restarts. Page offsets address normalized text in UTF-16 code units.
@@ -305,29 +312,32 @@ Start locally with `npm run dev:backend` from the root. Run the compiled backend
 ### Frontend (`/frontend`)
 
 #### Goals
+
 - Provide a multi-step workspace (with a polished landing page) for dataset ingestion, pipeline configuration, experiment execution, and results analysis.
 - Load saved definitions through TanStack Query and retain the latest run results in React context.
 - Surface richer guidance via in-app documentation, the latest run in History, and theme preferences.
 
 #### Key Modules & Screens
-| Location | Highlights |
-| --- | --- |
-| `src/App.tsx` | Responsive navigation, route focus management, and deep links to workspace pages and reports. |
-| `src/data/workspace.ts` | Fetches saved definitions and applies conditional mutations through TanStack Query. |
-| `src/data/legacyRunner.ts` | Projects the selected saved documents, tasks, baseline and pipeline settings into the transitional runner. |
-| `src/state/experimentResults.tsx` | Keeps progress, per-pipeline answers, and the latest completed run available across routes in the current tab. |
-| `src/lib/chunking.ts` | Chunking strategies (recursive/semantic/layout/table), sentence-aware splitting, and chunk statistics helpers. |
-| `src/lib/backend.ts` | Strongly-typed fetch utilities for `/api/chunks`, `/api/search`, `/api/answer`, and `/api/judge`, including error parsing. |
-| `src/components/DatasetsPage.tsx` | File ingestion with progress UI, removal, sample dataset loader, and CSV task import feedback. |
-| `src/components/PipelinesPage.tsx` | Configure parsing, chunking, embedding, retrieval, reranker (placeholder), LLM, and judge stages per pipeline with expand/collapse controls. |
-| `src/components/ExperimentsPage.tsx` | Orchestrates runs across multiple pipelines, reads worker-generated chunks, tracks status logs/progress, and rolls up cost + latency estimates. |
-| `src/components/ReportsPage.tsx` | Compares pipelines, recommends top configs, highlights metric deltas, and exports Markdown/PDF summaries. |
-| `src/components/HistoryPage.tsx` | Links to the latest completed report by run ID. Refreshing the tab clears run data. |
-| `src/components/DocumentationPage.tsx` | Rich in-app documentation with copy-to-clipboard snippets, tabbed guides, and workflow walkthroughs. |
-| `src/components/SettingsPage.tsx` | Stores a system, light, or dark theme preference in this browser. |
-| `src/main.tsx` | Mounts the browser router, query client, and in-memory workspace providers. |
+
+| Location                               | Highlights                                                                                                                                      |
+| -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/App.tsx`                          | Responsive navigation, route focus management, and deep links to workspace pages and reports.                                                   |
+| `src/data/workspace.ts`                | Fetches saved definitions and applies conditional mutations through TanStack Query.                                                             |
+| `src/data/legacyRunner.ts`             | Projects the selected saved documents, tasks, baseline and pipeline settings into the transitional runner.                                      |
+| `src/state/experimentResults.tsx`      | Keeps progress, per-pipeline answers, and the latest completed run available across routes in the current tab.                                  |
+| `src/lib/chunking.ts`                  | Chunking strategies (recursive/semantic/layout/table), sentence-aware splitting, and chunk statistics helpers.                                  |
+| `src/lib/backend.ts`                   | Strongly-typed fetch utilities for `/api/chunks`, `/api/search`, `/api/answer`, and `/api/judge`, including error parsing.                      |
+| `src/components/DatasetsPage.tsx`      | File ingestion with progress UI, removal, sample dataset loader, and CSV task import feedback.                                                  |
+| `src/components/PipelinesPage.tsx`     | Configure parsing, chunking, embedding, retrieval, reranker (placeholder), LLM, and judge stages per pipeline with expand/collapse controls.    |
+| `src/components/ExperimentsPage.tsx`   | Orchestrates runs across multiple pipelines, reads worker-generated chunks, tracks status logs/progress, and rolls up cost + latency estimates. |
+| `src/components/ReportsPage.tsx`       | Compares pipelines, recommends top configs, highlights metric deltas, and exports Markdown/PDF summaries.                                       |
+| `src/components/HistoryPage.tsx`       | Links to the latest completed report by run ID. Refreshing the tab clears run data.                                                             |
+| `src/components/DocumentationPage.tsx` | Rich in-app documentation with copy-to-clipboard snippets, tabbed guides, and workflow walkthroughs.                                            |
+| `src/components/SettingsPage.tsx`      | Stores a system, light, or dark theme preference in this browser.                                                                               |
+| `src/main.tsx`                         | Mounts the browser router, query client, and in-memory workspace providers.                                                                     |
 
 #### Experiment Pipeline Logic
+
 1. **Prerequisites:** The UI blocks experiment runs until the dataset has parsed documents and at least one task.
 2. **Parsing:** Uploading a document queues extraction. Open Datasets to inspect progress or retry a failed job.
 3. **Chunking:** The worker generates chunks using the active pipeline strategy. `summarizeChunkGroups` produces quick stats for the report.
@@ -339,6 +349,7 @@ Start locally with `npm run dev:backend` from the root. Run the compiled backend
 9. **Persistence:** The latest `ExperimentRun` snapshot (including configuration copies) is stored in context for Reports, History, and Documentation pages.
 
 ### Remaining / Optional Work
+
 - **Authentication & Authorization (critical):** No auth guard or rate limiting exists today; add API keys/session middleware before exposing beyond localhost.
 - **Persistent Storage (critical):** Dataset and pipeline revisions are durable. Run history remains in tab memory.
 - **Provider Coverage (critical):** Backend only supports OpenAI even though the UI advertises other providers; wire up reranker + additional integrations (Anthropic/Cohere).
@@ -353,14 +364,14 @@ Start locally with `npm run dev:backend` from the root. Run the compiled backend
 
 ### Common Issues
 
-| Issue | Solution |
-|-------|----------|
-| `ERR_UNKNOWN_FILE_EXTENSION ".ts"` | Use provided `npm run dev` scripts to apply proper TypeScript transpilation |
+| Issue                                | Solution                                                                    |
+| ------------------------------------ | --------------------------------------------------------------------------- |
+| `ERR_UNKNOWN_FILE_EXTENSION ".ts"`   | Use provided `npm run dev` scripts to apply proper TypeScript transpilation |
 | `fs.Stats constructor is deprecated` | Reinstall backend dependencies to ensure `tsx` is used instead of `ts-node` |
-| `Invalid environment settings` | Verify all required environment variables are set in `.env.local` |
-| Express fails to bind to port 7070 | Check if port is in use or override with `PORT` environment variable |
-| Backend route errors | Match the request ID in backend stdout |
-| Missing parser capability | Ensure `LLAMA_CLOUD_API_KEY` or `LLAMA_PARSE_API_KEY` is configured |
+| `Invalid environment settings`       | Verify all required environment variables are set in `.env.local`           |
+| Express fails to bind to port 7070   | Check if port is in use or override with `PORT` environment variable        |
+| Backend route errors                 | Match the request ID in backend stdout                                      |
+| Missing parser capability            | Ensure `LLAMA_CLOUD_API_KEY` or `LLAMA_PARSE_API_KEY` is configured         |
 
 ### Getting Help
 

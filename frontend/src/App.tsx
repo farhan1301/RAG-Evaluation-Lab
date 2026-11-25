@@ -174,7 +174,11 @@ function NotFound() {
 }
 
 function LoadingPage() {
-  return <p role="status" className="page">Loading page…</p>;
+  return (
+    <p role="status" className="page">
+      Loading page…
+    </p>
+  );
 }
 
 export function createRoutes(): RouteObject[] {

@@ -14,7 +14,7 @@ export interface DatasetDocument {
   snippet: string;
   statusMessage?: string;
   content?: string;
-  versionId:string;
+  versionId: string;
   mimeType?: string;
   uploadedAt?: string;
   error?: string;
