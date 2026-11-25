@@ -1,12 +1,12 @@
-import { createContext, ReactNode, useCallback, useContext, useMemo, useState } from 'react';
+import { createContext, type ReactNode, useCallback, useContext, useMemo, useState } from 'react';
 import type { Pipeline } from '../types/pipeline';
 
 interface PipelineContextValue {
   pipelines: Pipeline[];
-  addPipeline: (overrides?: Partial<Pipeline>) => Pipeline;
+  addPipeline: (overrides?: Partial<Pipeline>) => void;
   updatePipeline: (id: string, updates: Partial<Pipeline>) => void;
   removePipeline: (id: string) => void;
-  duplicatePipeline: (id: string) => Pipeline | null;
+  duplicatePipeline: (id: string) => void;
   setBaseline: (id: string) => void;
 }
 
@@ -41,7 +41,7 @@ const createPipelineTemplate = (index: number, overrides: Partial<Pipeline> = {}
     },
     retriever: {
       topK: overrides.retriever?.topK ?? 5,
-      deduplicate: overrides.retriever?.deduplicate ?? true,
+      deduplicate: overrides.retriever?.deduplicate ?? false,
     },
     reranker: {
       enabled: overrides.reranker?.enabled ?? false,
@@ -91,12 +91,7 @@ export function PipelineProvider({ children }: { children: ReactNode }) {
   ]);
 
   const addPipeline = useCallback((overrides?: Partial<Pipeline>) => {
-    let next: Pipeline | undefined;
-    setPipelines((prev) => {
-      next = createPipelineTemplate(prev.length, overrides ?? {});
-      return [...prev, next!];
-    });
-    return next!;
+    setPipelines((prev) => [...prev, createPipelineTemplate(prev.length, overrides)]);
   }, []);
 
   const updatePipeline = useCallback((id: string, updates: Partial<Pipeline>) => {
@@ -104,18 +99,23 @@ export function PipelineProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const removePipeline = useCallback((id: string) => {
-    setPipelines((prev) => prev.filter((pipeline) => pipeline.id !== id));
+    setPipelines((prev) => {
+      const remaining = prev.filter((pipeline) => pipeline.id !== id);
+      if (remaining.length && !remaining.some((pipeline) => pipeline.isBaseline)) {
+        return remaining.map((pipeline, index) => ({ ...pipeline, isBaseline: index === 0 }));
+      }
+      return remaining;
+    });
   }, []);
 
   const duplicatePipeline = useCallback((id: string) => {
-    let duplicate: Pipeline | null = null;
     setPipelines((prev) => {
       const source = prev.find((pipeline) => pipeline.id === id);
       if (!source) {
         return prev;
       }
 
-      duplicate = createPipelineTemplate(prev.length, {
+      const duplicate = createPipelineTemplate(prev.length, {
         name: `${source.name} Copy`,
         description: source.description,
         parsing: { ...source.parsing },
@@ -130,7 +130,6 @@ export function PipelineProvider({ children }: { children: ReactNode }) {
 
       return [...prev, duplicate];
     });
-    return duplicate;
   }, []);
 
   const setBaseline = useCallback((id: string) => {

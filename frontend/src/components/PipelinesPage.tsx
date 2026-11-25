@@ -1,18 +1,16 @@
-import { useEffect, useMemo, useState } from 'react';
+import { Link } from 'react-router';
+import { Switch } from './ui/switch';
+import { useEffect, useState } from 'react';
 import { Plus, ChevronDown, ChevronUp, Trash2, Copy } from 'lucide-react';
 import { Button } from './ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
+import { Card, CardContent, CardHeader } from './ui/card';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { Slider } from './ui/slider';
 import { Input } from './ui/input';
 import { Checkbox } from './ui/checkbox';
 import { Badge } from './ui/badge';
 import { usePipelines } from '../state/pipelines';
-import type { Pipeline } from '../types/pipeline';
-
-interface PipelinesPageProps {
-  onNext: () => void;
-}
+import type { Pipeline, PipelineStageKey } from '../types/pipeline';
 
 interface PipelineStageProps {
   title: string;
@@ -21,6 +19,8 @@ interface PipelineStageProps {
   onToggle: () => void;
   children: React.ReactNode;
 }
+
+const stages: PipelineStageKey[] = ['parsing', 'chunking', 'embedding', 'vectordb', 'retriever', 'reranker', 'llm', 'judge'];
 
 const MODEL_OPTIONS = [
   { value: 'gpt-5-chat-latest', label: 'GPT-5 Chat (Latest)' },
@@ -41,15 +41,15 @@ const EMBEDDING_MODEL_COSTS: Record<string, string> = {
 
 function PipelineStage({ title, description, isExpanded, onToggle, children }: PipelineStageProps) {
   return (
-    <div className="border border-zinc-200 bg-white rounded-lg">
-      <button
+    <div className="border border-border bg-card rounded-lg">
+      <button type="button" aria-expanded={isExpanded}
         onClick={onToggle}
-        className="w-full p-4 flex items-center justify-between hover:opacity-80 transition-opacity"
+        className="w-full p-4 flex flex-wrap items-center justify-between gap-2 hover:opacity-80 transition-opacity"
       >
-        <div className="text-left">
-          <h4>{title}</h4>
-          <p className="text-sm text-zinc-600">{description}</p>
-        </div>
+        <span className="text-left">
+          <span className="block font-semibold">{title}</span>
+          <span className="text-sm text-muted-foreground">{description}</span>
+        </span>
         {isExpanded ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
       </button>
       {isExpanded && <div className="px-4 pb-4 space-y-4">{children}</div>}
@@ -57,39 +57,36 @@ function PipelineStage({ title, description, isExpanded, onToggle, children }: P
   );
 }
 
-export function PipelinesPage({ onNext }: PipelinesPageProps) {
+export function PipelinesPage() {
   const {
     pipelines,
+    setBaseline,
     addPipeline: addPipelineToContext,
     updatePipeline: updatePipelineInContext,
     removePipeline: removePipelineFromContext,
     duplicatePipeline: duplicatePipelineInContext,
   } = usePipelines();
-  const [expandedStages, setExpandedStages] = useState<{ [key: string]: string }>(() => {
-    const firstPipelineId = pipelines[0]?.id;
-    return firstPipelineId ? { [firstPipelineId]: 'parsing' } : {};
-  });
-  const [expandAllStages, setExpandAllStages] = useState(false);
-  const [expandedPipelines, setExpandedPipelines] = useState<Record<string, boolean>>({});
+  const [expandedStages, setExpandedStages] = useState<Record<string, PipelineStageKey[]>>(() =>
+    pipelines[0] ? { [pipelines[0].id]: ['parsing'] } : {}
+  );
+  const isStageExpanded = (id: string, stage: PipelineStageKey) => expandedStages[id]?.includes(stage) ?? false;
+  const isPipelineExpanded = (id: string) => expandedStages[id]?.length === stages.length;
+  const expandAllStages = pipelines.every(({ id }) => isPipelineExpanded(id));
 
-  const pipelineIds = useMemo(() => pipelines.map((pipeline) => pipeline.id), [pipelines]);
+  function toggleStage(id: string, stage: PipelineStageKey) {
+    setExpandedStages((prev) => {
+      const open = prev[id] ?? [];
+      return { ...prev, [id]: open.includes(stage) ? open.filter((key) => key !== stage) : [...open, stage] };
+    });
+  }
 
-  const toggleStage = (pipelineId: string, stage: string) => {
-    if (expandAllStages) {
-      setExpandAllStages(false);
-      setExpandedStages({ [pipelineId]: stage });
-      return;
-    }
-    if (expandedPipelines[pipelineId]) {
-      setExpandedPipelines((prev) => ({ ...prev, [pipelineId]: false }));
-      setExpandedStages((prev) => ({ ...prev, [pipelineId]: stage }));
-      return;
-    }
-    setExpandedStages((prev) => ({
-      ...prev,
-      [pipelineId]: prev[pipelineId] === stage ? '' : stage,
-    }));
-  };
+  function handleTogglePipelineExpansion(id: string) {
+    setExpandedStages((prev) => ({ ...prev, [id]: prev[id]?.length === stages.length ? [] : stages }));
+  }
+
+  function handleToggleExpandAll() {
+    setExpandedStages(expandAllStages ? {} : Object.fromEntries(pipelines.map(({ id }) => [id, stages])));
+  }
 
   const handleAddPipeline = () => {
     const baseline = pipelines.find((pipeline) => pipeline.isBaseline) ?? pipelines[0];
@@ -153,47 +150,16 @@ export function PipelinesPage({ onNext }: PipelinesPageProps) {
     });
   }, [pipelines, updatePipelineInContext]);
 
-  const isStageExpanded = (pipelineId: string, stage: string) =>
-    expandAllStages || expandedPipelines[pipelineId] || expandedStages[pipelineId] === stage;
-
-  const handleToggleExpandAll = () => {
-    setExpandAllStages((prev) => !prev);
-  };
-
-  const handleTogglePipelineExpansion = (pipelineId: string) => {
-    setExpandedPipelines((prev) => ({
-      ...prev,
-      [pipelineId]: !prev[pipelineId],
-    }));
-  };
-
-  useEffect(() => {
-    setExpandedPipelines((prev) => {
-      const updated = pipelineIds.reduce<Record<string, boolean>>((acc, id) => {
-        acc[id] = prev[id] ?? false;
-        return acc;
-      }, {});
-      return updated;
-    });
-  }, [pipelineIds]);
-
-  useEffect(() => {
-    if (!expandAllStages) {
-      return;
-    }
-    setExpandedPipelines({});
-  }, [expandAllStages]);
-
   return (
-    <div className="p-8 bg-zinc-50">
+    <div className="px-4 py-6 sm:p-8 bg-background">
       <div className="max-w-7xl mx-auto space-y-6">
         {/* Header */}
-        <div className="flex items-center justify-between">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
-            <h2>Pipeline Configuration</h2>
-            <p className="text-zinc-600">Design RAG pipelines step-by-step</p>
+            <h1>Pipeline Configuration</h1>
+            <p className="text-muted-foreground">Design RAG pipelines step-by-step</p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <Button variant="outline" onClick={handleToggleExpandAll}>
               {expandAllStages ? 'Collapse All' : 'Expand All'}
             </Button>
@@ -205,22 +171,24 @@ export function PipelinesPage({ onNext }: PipelinesPageProps) {
         </div>
 
         {/* Pipelines Grid */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6">
+        <div className="grid grid-cols-1 md:grid-cols-2 2xl:grid-cols-3 gap-6">
           {pipelines.map((pipeline) => (
             <Card key={pipeline.id}>
               <CardHeader>
-                <div className="flex items-center justify-between mb-3">
+                <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
                   <div className="flex items-center gap-2">
-                    <Badge variant="outline">{pipeline.isBaseline ? 'Baseline' : 'Variant'}</Badge>
+                    {pipeline.isBaseline ? <Badge variant="outline">Baseline</Badge> :
+                      <Button size="sm" variant="outline" onClick={() => setBaseline(pipeline.id)}>Set as baseline</Button>}
                   </div>
                   <div className="flex items-center gap-1">
                     <Button
                       variant="ghost"
                       size="sm"
+                      aria-expanded={isPipelineExpanded(pipeline.id)}
                       onClick={() => handleTogglePipelineExpansion(pipeline.id)}
-                      aria-label={expandedPipelines[pipeline.id] ? 'Collapse pipeline' : 'Expand pipeline'}
+                      aria-label={isPipelineExpanded(pipeline.id) ? 'Collapse pipeline' : 'Expand pipeline'}
                     >
-                      {expandedPipelines[pipeline.id] ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                      {isPipelineExpanded(pipeline.id) ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
                     </Button>
                     <Button
                       variant="ghost"
@@ -243,6 +211,7 @@ export function PipelinesPage({ onNext }: PipelinesPageProps) {
                   </div>
                 </div>
                 <Input
+                  aria-label="Pipeline name"
                   value={pipeline.name}
                   onChange={(e) => handleUpdatePipeline(pipeline.id, { name: e.target.value })}
                   className="text-lg mb-0"
@@ -258,7 +227,7 @@ export function PipelinesPage({ onNext }: PipelinesPageProps) {
                   onToggle={() => toggleStage(pipeline.id, 'parsing')}
                 >
                   <div>
-                    <label className="text-sm opacity-60 block mb-2">Parsing Strategy</label>
+                    <label htmlFor={`parser-${pipeline.id}`} className="text-sm opacity-60 block mb-2">Parsing Strategy</label>
                     <Select
                       value={pipeline.parsing.strategy}
                       onValueChange={(value) =>
@@ -270,7 +239,7 @@ export function PipelinesPage({ onNext }: PipelinesPageProps) {
                         })
                       }
                     >
-                      <SelectTrigger>
+                      <SelectTrigger id={`parser-${pipeline.id}`}>
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -289,16 +258,16 @@ export function PipelinesPage({ onNext }: PipelinesPageProps) {
                 >
                   <div className="space-y-3">
                     <div>
-                      <label className="text-sm opacity-60 block mb-2">Strategy</label>
+                      <label htmlFor={`chunker-${pipeline.id}`} className="text-sm opacity-60 block mb-2">Strategy</label>
                       <Select
                         value={pipeline.chunking.strategy}
                         onValueChange={(value) =>
                           handleUpdatePipeline(pipeline.id, {
-                            chunking: { ...pipeline.chunking, strategy: value },
+                            chunking: { ...pipeline.chunking, strategy: value as Pipeline['chunking']['strategy'] },
                           })
                         }
                       >
-                        <SelectTrigger>
+                        <SelectTrigger id={`chunker-${pipeline.id}`}>
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
@@ -310,10 +279,10 @@ export function PipelinesPage({ onNext }: PipelinesPageProps) {
                       </Select>
                     </div>
                     <div>
-                      <label className="text-sm opacity-60 block mb-2">
+                      <p className="text-sm opacity-60 block mb-2">
                         Chunk Size: {pipeline.chunking.chunkSize} tokens
-                      </label>
-                      <Slider
+                      </p>
+                      <Slider aria-label="Chunk Size"
                         value={[pipeline.chunking.chunkSize]}
                         onValueChange={([value]) =>
                           handleUpdatePipeline(pipeline.id, {
@@ -326,10 +295,10 @@ export function PipelinesPage({ onNext }: PipelinesPageProps) {
                       />
                     </div>
                     <div>
-                      <label className="text-sm opacity-60 block mb-2">
+                      <p className="text-sm opacity-60 block mb-2">
                         Overlap: {pipeline.chunking.overlap}%
-                      </label>
-                      <Slider
+                      </p>
+                      <Slider aria-label="Overlap"
                         value={[pipeline.chunking.overlap]}
                         onValueChange={([value]) =>
                           handleUpdatePipeline(pipeline.id, {
@@ -358,7 +327,7 @@ export function PipelinesPage({ onNext }: PipelinesPageProps) {
                         handleUpdatePipeline(pipeline.id, { embedding: { model: value } })
                       }
                     >
-                      <SelectTrigger>
+                      <SelectTrigger aria-label="Embedding model">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -380,7 +349,7 @@ export function PipelinesPage({ onNext }: PipelinesPageProps) {
                   isExpanded={isStageExpanded(pipeline.id, 'vectordb')}
                   onToggle={() => toggleStage(pipeline.id, 'vectordb')}
                 >
-                  <div className="p-3 rounded border border-zinc-200 bg-zinc-50">
+                  <div className="p-3 rounded border border-border bg-background">
                     <p className="text-sm">
                       <span className="opacity-60">Using:</span> Qdrant
                     </p>
@@ -399,13 +368,13 @@ export function PipelinesPage({ onNext }: PipelinesPageProps) {
                 >
                   <div className="space-y-3">
                     <div>
-                      <label className="text-sm opacity-60 block mb-2">Top-K Results</label>
-                      <Input
+                      <label htmlFor={`top-k-${pipeline.id}`} className="text-sm opacity-60 block mb-2">Top-K Results</label>
+                      <Input id={`top-k-${pipeline.id}`}
                         type="number"
                         value={pipeline.retriever.topK}
                         onChange={(e) =>
                           handleUpdatePipeline(pipeline.id, {
-                            retriever: { ...pipeline.retriever, topK: parseInt(e.target.value) },
+                            retriever: { ...pipeline.retriever, topK: Math.max(1, Math.min(20, Number.parseInt(e.target.value, 10) || 1)) },
                           })
                         }
                         min={1}
@@ -413,15 +382,8 @@ export function PipelinesPage({ onNext }: PipelinesPageProps) {
                       />
                     </div>
                     <div className="flex items-center gap-2">
-                      <Checkbox
-                        checked={pipeline.retriever.deduplicate}
-                        onCheckedChange={(checked) =>
-                          handleUpdatePipeline(pipeline.id, {
-                            retriever: { ...pipeline.retriever, deduplicate: checked as boolean },
-                          })
-                        }
-                      />
-                      <label className="text-sm">Deduplicate similar chunks</label>
+                      <Checkbox id={`dedupe-${pipeline.id}`} disabled checked={false} />
+                      <label htmlFor={`dedupe-${pipeline.id}`} className="text-sm">Deduplication is unavailable in this runner</label>
                     </div>
                   </div>
                 </PipelineStage>
@@ -435,35 +397,10 @@ export function PipelinesPage({ onNext }: PipelinesPageProps) {
                 >
                   <div className="space-y-3">
                     <div className="flex items-center gap-2">
-                      <Checkbox
-                        checked={pipeline.reranker.enabled}
-                        disabled
-                        onCheckedChange={(checked) =>
-                          handleUpdatePipeline(pipeline.id, {
-                            reranker: { ...pipeline.reranker, enabled: checked as boolean },
-                          })
-                        }
-                      />
-                      <label className="text-sm opacity-60">Enable reranking (coming soon)</label>
+                      <Switch id={`rerank-${pipeline.id}`} checked={false} disabled />
+                      <label htmlFor={`rerank-${pipeline.id}`} className="text-sm">Reranking is unavailable in this runner</label>
                     </div>
-                    {pipeline.reranker.enabled && (
-                      <Select
-                        value={pipeline.reranker.model}
-                        onValueChange={(value) =>
-                          handleUpdatePipeline(pipeline.id, {
-                            reranker: { ...pipeline.reranker, model: value },
-                          })
-                        }
-                      >
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="cohere-rerank">Cohere Rerank v3</SelectItem>
-                          <SelectItem value="bge-reranker">BGE Reranker</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    )}
+
                   </div>
                 </PipelineStage>
 
@@ -476,51 +413,24 @@ export function PipelinesPage({ onNext }: PipelinesPageProps) {
                 >
                   <div className="space-y-3">
                     <div>
-                      <label className="text-sm opacity-60 block mb-2">Model</label>
+                      <label htmlFor={`llm-${pipeline.id}`} className="text-sm opacity-60 block mb-2">Model</label>
                       <Select
                         value={pipeline.llm.model}
                         onValueChange={(value) =>
                           handleUpdatePipeline(pipeline.id, { llm: { ...pipeline.llm, model: value } })
                         }
-                    >
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {MODEL_OPTIONS.map((option) => (
-                          <SelectItem key={option.value} value={option.value}>
-                            {option.label}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div>
-                    <label className="text-sm opacity-60 block mb-2">
-                        Temperature: {pipeline.llm.temperature}
-                      </label>
-                      <Slider
-                        value={[pipeline.llm.temperature]}
-                        onValueChange={([value]) =>
-                          handleUpdatePipeline(pipeline.id, { llm: { ...pipeline.llm, temperature: value } })
-                        }
-                        min={0}
-                        max={1}
-                        step={0.1}
-                      />
+                      >
+                        <SelectTrigger id={`llm-${pipeline.id}`}>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {MODEL_OPTIONS.map((option) => (
+                            <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
                     </div>
-                    <div>
-                      <label className="text-sm opacity-60 block mb-2">Max Tokens</label>
-                      <Input
-                        type="number"
-                        value={pipeline.llm.maxTokens}
-                        onChange={(e) =>
-                          handleUpdatePipeline(pipeline.id, {
-                            llm: { ...pipeline.llm, maxTokens: parseInt(e.target.value) },
-                          })
-                        }
-                      />
-                    </div>
+                    <p className="text-sm text-muted-foreground">This runner uses server defaults for temperature and token limits.</p>
                   </div>
                 </PipelineStage>
 
@@ -539,7 +449,7 @@ export function PipelinesPage({ onNext }: PipelinesPageProps) {
                           handleUpdatePipeline(pipeline.id, { judge: { model: value } })
                         }
                       >
-                        <SelectTrigger>
+                        <SelectTrigger aria-label="Judge model">
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
@@ -551,7 +461,7 @@ export function PipelinesPage({ onNext }: PipelinesPageProps) {
                         </SelectContent>
                       </Select>
                     </div>
-                    <div className="p-3 rounded text-sm space-y-1 bg-zinc-50">
+                    <div className="p-3 rounded text-sm space-y-1 bg-background">
                       <p className="opacity-60">Evaluation Rubric:</p>
                       <p>✓ Groundedness in context</p>
                       <p>✓ Faithfulness to sources</p>
@@ -566,8 +476,8 @@ export function PipelinesPage({ onNext }: PipelinesPageProps) {
 
         {/* Bottom CTA */}
         <div className="flex justify-end">
-          <Button onClick={onNext} size="lg" className="gap-2">
-            Run Experiment →
+          <Button asChild size="lg" className="gap-2">
+            <Link to="/experiments">Run experiment →</Link>
           </Button>
         </div>
       </div>

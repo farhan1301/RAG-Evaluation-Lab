@@ -1,3 +1,5 @@
+import { Link } from 'react-router';
+import { reportPath } from './HistoryPage';
 import { useEffect, useMemo, useState } from 'react';
 import { Play, FileText } from 'lucide-react';
 import { Button } from './ui/button';
@@ -21,7 +23,7 @@ import {
 } from './ui/table';
 import { useDataset } from '../state/dataset';
 import { usePipelines } from '../state/pipelines';
-import { useExperimentResults } from '../state/experimentResults';
+import { type TaskResult, useExperimentResults } from '../state/experimentResults';
 import {
   chunkDocumentsWithConfig,
   summarizeChunkGroups,
@@ -30,7 +32,7 @@ import {
   type DocumentChunk,
 } from '../lib/chunking';
 import { upsertChunks, answerQuestion, judgeAnswers, parseDocument } from '../lib/backend';
-import type { DatasetDocument, DatasetTask } from '../types/dataset';
+import type { DatasetDocument } from '../types/dataset';
 import type { Pipeline } from '../types/pipeline';
 import type {
   AnswerDetail,
@@ -41,12 +43,6 @@ import type {
   RetrievedChunk,
 } from '../types/experiment';
 import { METRIC_DEFINITIONS } from '../types/experiment';
-
-interface ExperimentsPageProps {
-  onNext: () => void;
-}
-
-type Stage = 'idle' | 'parsing' | 'chunking' | 'answering' | 'judging' | 'complete';
 
 const CHAT_COST_PER_1K_TOKENS: Record<string, { input: number; output: number }> = {
   // Rates reflect the Standard tier prices (per 1M tokens) normalized to a 1K token basis.
@@ -93,25 +89,6 @@ const computePercentile = (values: number[], percentile: number) => {
   return sorted[index];
 };
 
-interface TaskResult {
-  taskId: string;
-  question: string;
-  expectedAnswer: string;
-  answer: string;
-  matches: Array<{
-    id: string;
-    score: number;
-    text: string;
-    documentName?: string;
-  }>;
-  latencyMs?: number;
-  usage?: {
-    promptTokens: number;
-    completionTokens: number;
-    totalTokens: number;
-  };
-}
-
 const formatTimestamp = () =>
   new Date().toLocaleString(undefined, {
     dateStyle: 'medium',
@@ -121,13 +98,14 @@ const formatTimestamp = () =>
 const DEFAULT_PIPELINE: Pipeline = {
   id: 'default-pipeline',
   name: 'Default Pipeline',
+  parsing: { strategy: 'llama-parse' },
   chunking: {
     strategy: 'recursive',
     chunkSize: 500,
     overlap: 50,
   },
   embedding: { model: 'text-embedding-3-small' },
-  retriever: { topK: 5, deduplicate: true },
+  retriever: { topK: 5, deduplicate: false },
   reranker: { enabled: false, model: 'cohere-rerank' },
   llm: { model: 'gpt-4o-mini', temperature: 0.3, maxTokens: 512 },
   judge: { model: 'gpt-4o-mini' },
@@ -144,17 +122,14 @@ const getEmbeddingVectorDim = (model: string) => {
   return 1536;
 };
 
-export function ExperimentsPage({ onNext }: ExperimentsPageProps) {
+export function ExperimentsPage() {
   const { documents, setDocuments, tasks } = useDataset();
   const { pipelines } = usePipelines();
-  const { latestRun, setLatestRun } = useExperimentResults();
-
-  const [stage, setStage] = useState<Stage>('idle');
-  const [statusLog, setStatusLog] = useState<string[]>([]);
-  const [taskResults, setTaskResults] = useState<TaskResult[]>([]);
-  const [isRunning, setIsRunning] = useState(false);
-  const [progress, setProgress] = useState(0);
-  const [error, setError] = useState<string | null>(null);
+  const {
+    latestRun, setLatestRun, stage, setStage, statusLog, setStatusLog,
+    taskResultsByPipeline, setTaskResultsByPipeline, progress, setProgress,
+    error, setError, isRunning, setIsRunning,
+  } = useExperimentResults();
 
   const experimentPipelines = pipelines.length ? pipelines : [DEFAULT_PIPELINE];
   const baselinePipelineId =
@@ -163,9 +138,6 @@ export function ExperimentsPage({ onNext }: ExperimentsPageProps) {
     pipelines.find((pipeline) => pipeline.id === baselinePipelineId) ?? experimentPipelines[0];
 
   const [selectedPipelineId, setSelectedPipelineId] = useState(baselinePipelineId);
-  const [taskResultsByPipeline, setTaskResultsByPipeline] = useState<
-    Record<string, TaskResult[]>
-  >({});
 
   useEffect(() => {
     setSelectedPipelineId((prev) => {
@@ -242,7 +214,7 @@ export function ExperimentsPage({ onNext }: ExperimentsPageProps) {
               documentName: chunk.documentName,
             };
           })
-          .filter((match): match is TaskResult['matches'][number] => Boolean(match));
+          .filter((match) => match !== null);
 
         return {
           taskId: detail.taskId,
@@ -265,9 +237,7 @@ export function ExperimentsPage({ onNext }: ExperimentsPageProps) {
       ? selectedPipelineId
       : pipelineOptions[0]?.id ?? '';
 
-  const localTaskResults =
-    taskResultsByPipeline[activePipelineId] ??
-    (activePipelineId === baselinePipelineId ? taskResults : undefined);
+  const localTaskResults = taskResultsByPipeline[activePipelineId];
 
   const displayedTaskResults =
     localTaskResults && localTaskResults.length > 0
@@ -275,7 +245,7 @@ export function ExperimentsPage({ onNext }: ExperimentsPageProps) {
       : previousRunTaskResults[activePipelineId] ?? [];
 
   const canViewReport =
-    !isRunning && Boolean(latestRun && latestRun.pipelines && latestRun.pipelines.length > 0);
+    !isRunning && latestRun && latestRun.pipelines.length > 0;
 
   const buildSnippet = (text: string) => {
     const normalized = text.replace(/\s+/g, ' ').trim();
@@ -287,7 +257,6 @@ export function ExperimentsPage({ onNext }: ExperimentsPageProps) {
 
   const resetState = () => {
     setStatusLog([]);
-    setTaskResults([]);
     setTaskResultsByPipeline({});
     setProgress(0);
     setError(null);
@@ -316,7 +285,7 @@ export function ExperimentsPage({ onNext }: ExperimentsPageProps) {
     const localLog: string[] = [];
     const appendLog = (message: string) => {
       localLog.push(message);
-      setStatusLog((prev) => [...prev, message]);
+      setStatusLog((prev) => [...prev, { id: prev.length + 1, message }]);
     };
 
     const startedAt = new Date().toISOString();
@@ -332,7 +301,7 @@ export function ExperimentsPage({ onNext }: ExperimentsPageProps) {
     let latestDocuments: DatasetDocument[] = documents;
     const applyDocuments = (updater: (prev: DatasetDocument[]) => DatasetDocument[]) => {
       latestDocuments = updater(latestDocuments);
-      setDocuments(latestDocuments);
+      setDocuments(updater);
     };
 
     appendLog(`Experiment started at ${formatTimestamp()}.`);
@@ -351,7 +320,7 @@ export function ExperimentsPage({ onNext }: ExperimentsPageProps) {
       const documentsNeedingParse = latestDocuments.filter(
         (doc) =>
           doc.status === 'complete' &&
-          (!doc.content || !doc.content.trim()) &&
+          !doc.content?.trim() &&
           typeof doc.fileBase64 === 'string' &&
           doc.fileBase64.trim()
       );
@@ -512,7 +481,6 @@ export function ExperimentsPage({ onNext }: ExperimentsPageProps) {
         const { pipeline: currentPipeline, id: pipelineId, name: pipelineName } = entry;
         const chunkConfig = currentPipeline.chunking ?? DEFAULT_PIPELINE.chunking;
         const retrieverK = currentPipeline.retriever?.topK ?? DEFAULT_PIPELINE.retriever.topK;
-        const isBaselinePipeline = pipelineId === baselinePipelineId;
         const pipelineEmbeddingModel = currentPipeline.embedding?.model;
 
         setStage('chunking');
@@ -672,10 +640,6 @@ export function ExperimentsPage({ onNext }: ExperimentsPageProps) {
           [pipelineId]: results,
         }));
 
-        if (isBaselinePipeline) {
-          setTaskResults(results);
-        }
-
         setStage('judging');
         appendLog(
           `[${pipelineName}] Scoring answers with judge model for quality and groundedness…`
@@ -791,7 +755,7 @@ export function ExperimentsPage({ onNext }: ExperimentsPageProps) {
           },
           retrievalSummary: {
             topK: retrieverK,
-            deduplicate: currentPipeline.retriever?.deduplicate ?? true,
+            deduplicate: currentPipeline.retriever?.deduplicate ?? false,
             candidatePool: chunkCount,
             uniqueResults: uniqueChunkIds.size,
           },
@@ -865,12 +829,12 @@ export function ExperimentsPage({ onNext }: ExperimentsPageProps) {
   };
 
   return (
-    <div className="p-8 bg-zinc-50">
+    <div className="px-4 py-6 sm:p-8 bg-background">
       <div className="max-w-7xl mx-auto space-y-6">
-        <div className="flex items-center justify-between">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
-            <h2 className="text-zinc-900">Experiment Runner</h2>
-            <p className="text-zinc-600">
+            <h1>Experiment Runner</h1>
+            <p className="text-muted-foreground">
               Upload documents, embed them with Qdrant, and evaluate answers with the LLM.
             </p>
           </div>
@@ -881,14 +845,14 @@ export function ExperimentsPage({ onNext }: ExperimentsPageProps) {
         </div>
 
         {error && (
-          <Card className="border-red-300 bg-red-50 text-red-700">
+          <Card role="alert" className="border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950 text-red-700 dark:text-red-300">
             <CardContent className="py-4 text-sm">{error}</CardContent>
           </Card>
         )}
 
         <Card>
           <CardHeader>
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <CardTitle>Experiment Progress</CardTitle>
               <Badge variant={stage === 'complete' ? 'default' : stage === 'idle' ? 'outline' : 'secondary'}>
                 {stage === 'idle' ? 'Not Started' : stage === 'complete' ? 'Complete' : 'In Progress'}
@@ -901,7 +865,7 @@ export function ExperimentsPage({ onNext }: ExperimentsPageProps) {
                 <span>Overall Progress</span>
                 <span className="text-sm opacity-60">{progress}%</span>
               </div>
-              <Progress value={progress} />
+              <Progress aria-label="Overall experiment progress" value={progress} />
             </div>
 
             <div className="flex items-center gap-2 text-sm">
@@ -909,14 +873,14 @@ export function ExperimentsPage({ onNext }: ExperimentsPageProps) {
               <span className="capitalize">{stage}</span>
             </div>
 
-            <div className="max-h-48 overflow-y-auto overflow-x-hidden text-sm pr-2 text-zinc-700">
+            <div className="max-h-48 overflow-y-auto overflow-x-hidden text-sm pr-2 text-foreground">
               {statusLog.length === 0 ? (
                 <p className="opacity-60">Status updates will appear here once the experiment starts.</p>
               ) : (
-                statusLog.map((entry, index) => (
-                  <div key={index} className="flex items-start gap-2 py-1">
+                statusLog.map((entry) => (
+                  <div key={entry.id} className="flex items-start gap-2 py-1">
                     <span className="opacity-40 flex-none">•</span>
-                    <span className="flex-1 min-w-0 break-words">{entry}</span>
+                    <span className="flex-1 min-w-0 break-words">{entry.message}</span>
                   </div>
                 ))
               )}
@@ -926,7 +890,7 @@ export function ExperimentsPage({ onNext }: ExperimentsPageProps) {
 
         <Card>
           <CardHeader className="space-y-3">
-            <div className="flex items-start justify-between gap-3">
+            <div className="flex flex-wrap items-start justify-between gap-3">
               <CardTitle>Question &amp; Answer Review</CardTitle>
               {pipelineOptions.length > 1 ? (
                 <div className="flex items-center gap-2 text-sm">
@@ -937,7 +901,7 @@ export function ExperimentsPage({ onNext }: ExperimentsPageProps) {
                       setSelectedPipelineId(value);
                     }}
                   >
-                    <SelectTrigger className="w-48">
+                    <SelectTrigger aria-label="Review pipeline" className="max-w-full sm:w-48">
                       <SelectValue placeholder="Choose pipeline">
                         {pipelineNameLookup[activePipelineId] ?? 'Choose pipeline'}
                       </SelectValue>
@@ -956,7 +920,7 @@ export function ExperimentsPage({ onNext }: ExperimentsPageProps) {
           </CardHeader>
           <CardContent>
             {displayedTaskResults.length === 0 ? (
-              <p className="text-zinc-600">
+              <p className="text-muted-foreground">
                 Run an experiment to generate answers for your evaluation tasks.
               </p>
             ) : (
@@ -991,7 +955,7 @@ export function ExperimentsPage({ onNext }: ExperimentsPageProps) {
                             {result.matches.slice(0, 2).map((match) => (
                               <div
                                 key={match.id}
-                                className="p-2 rounded border border-zinc-200"
+                                className="p-2 rounded border border-border"
                               >
                                 <div className="flex items-center gap-2 text-xs uppercase tracking-wide opacity-60 mb-1">
                                   <FileText size={12} />
@@ -1017,7 +981,7 @@ export function ExperimentsPage({ onNext }: ExperimentsPageProps) {
 
         {canViewReport && (
           <div className="flex justify-end">
-            <Button onClick={onNext}>View Report</Button>
+            <Button asChild><Link to={reportPath(latestRun.id)}>View report</Link></Button>
           </div>
         )}
       </div>

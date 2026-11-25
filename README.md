@@ -29,14 +29,14 @@ RAG Evaluation Lab is an end-to-end workspace for building, running, and evaluat
 ## 🛠️ Tech Stack
 
 ### Frontend
-- **Framework**: React 18 with TypeScript
-- **Build Tool**: Vite
-- **Styling**: Tailwind CSS
+- **Framework**: React 19 with TypeScript and React Router 8
+- **Build Tool**: Vite 8
+- **Styling**: Tailwind CSS 4
 - **UI Components**: Radix UI primitives
 - **State Management**: React Context API
 
 ### Backend
-- **Runtime**: Node.js 22.13+
+- **Runtime**: Node.js 22.22+
 - **Framework**: Express.js
 - **Language**: TypeScript
 - **Key Integrations**:
@@ -61,7 +61,7 @@ Click the image below to watch a demonstration of the platform:
 
 - **Guided Workflow**: Interactive landing page that explains the RAG evaluation process with direct navigation to datasets and experiments
 - **Dataset Management**:
-  - Drag-and-drop file uploads with real-time status tracking
+  - File uploads with real-time status tracking
   - Curated sample datasets for quick starts
   - CSV import with flexible header alias support
 - **Multi-Pipeline Configuration**:
@@ -72,16 +72,16 @@ Click the image below to watch a demonstration of the platform:
   - Auto-parsing of documents on-demand
   - Real-time progress logging
   - Comprehensive metrics: latency, token usage, and cost tracking
-  - Automatic persistence of experiment runs
+  - In-tab progress and access to the latest completed run
 - **Advanced Reporting**:
   - Pipeline comparison with metric deltas
   - Automated recommendations for optimal configurations
   - Export capabilities (Markdown and PDF)
 - **Document Processing**: LlamaParse-powered ingestion for consistent parsing with extensibility for additional techniques
 
-### 🚀 Coming Soon
+### Appearance
 
-View our roadmap for upcoming features including additional model support, advanced reranking, dark mode, and enhanced metrics.
+Choose System, Light, or Dark in Settings. The browser remembers the choice when you reload.
 
 ---
 
@@ -114,7 +114,7 @@ Before getting started, ensure you have the following:
 
 | Requirement | Version | Notes |
 |------------|---------|-------|
-| Node.js | 22.13+ | JavaScript runtime |
+| Node.js | 22.22+ | JavaScript runtime |
 | npm | 9+ | Package manager |
 | Qdrant | Latest | Vector database (cloud or local) |
 | OpenAI API Key | - | For embeddings and chat completions |
@@ -164,7 +164,7 @@ npm run dev:backend
 **Terminal 2 - Start Frontend:**
 ```bash
 npm run dev
-# Application opens at http://127.0.0.1:3000
+# Open http://127.0.0.1:3000
 ```
 
 > **Tip:** Use `npm run dev:watch` in the backend for auto-restart on file changes during development.
@@ -187,7 +187,7 @@ The backend reads provider settings from the repository root via `dotenv`. The `
 
 #### Optional Variables
 
-For a different backend address, set the public `VITE_BACKEND_URL` in `frontend/.env.local` or the frontend process environment.
+Browser requests use same-origin `/api` paths. The Vite dev server proxies them to `http://127.0.0.1:7070`. To use another backend, set `BACKEND_PROXY_TARGET` in the Vite process environment.
 
 See `.env.example` for the complete list of optional configuration variables including model selection, collection names, CORS settings, and logging options.
 
@@ -262,7 +262,7 @@ npm run lint && npm run typecheck && npm test && npm run build
 node scripts/check-browser-secrets.mjs
 ```
 
-Vitest uses synthetic documents and fake providers. TypeScript checks the backend and TypeScript test fixtures strictly. Vite builds the browser source in Phase 1. Full strict browser typechecking starts in Phase 2. The build exercises the compiled backend with fixture configuration. CI also checks its HTTP health endpoint on loopback.
+Vitest uses synthetic documents and fake providers. TypeScript strictly checks the frontend, Vite config, backend, and TypeScript test fixtures. The build exercises the compiled backend with fixture configuration. CI also checks its HTTP health endpoint on loopback.
 
 ---
 
@@ -316,15 +316,15 @@ This section provides detailed information about the architecture, components, a
 #### Goals
 - Provide a multi-step workspace (with a polished landing page) for dataset ingestion, pipeline configuration, experiment execution, and results analysis.
 - Persist experiment state within React context so datasets, pipelines, and results stay synchronized across pages.
-- Surface richer guidance via in-app documentation, experiment history, roadmap previews, and settings scaffolding.
+- Surface richer guidance via in-app documentation, the latest run in History, and theme preferences.
 
 #### Key Modules & Screens
 | Location | Highlights |
 | --- | --- |
-| `src/App.tsx` | Entry shell with sidebar navigation, workflow helper, quick access to History/Reports, and route scaffolding. |
+| `src/App.tsx` | Responsive navigation, route focus management, and deep links to workspace pages and reports. |
 | `src/state/dataset.tsx` | Context for uploaded documents and evaluation tasks, including sample dataset seeding and CSV import updates. |
 | `src/state/pipelines.tsx` | Manages pipeline definitions, baseline selection, duplication, timestamp tracking, and strategy defaults. |
-| `src/state/experimentResults.tsx` | Tracks experiment stage, status log, chunk previews, per-task results, judge details, and latest `ExperimentRun`. |
+| `src/state/experimentResults.tsx` | Keeps progress, per-pipeline answers, and the latest completed run available across routes in the current tab. |
 | `src/lib/chunking.ts` | Chunking strategies (recursive/semantic/layout/table), sentence-aware splitting, and chunk statistics helpers. |
 | `src/lib/taskCsv.ts` | CSV parser that accepts header aliases, surfaces warnings, and hydrates task lists. |
 | `src/lib/backend.ts` | Strongly-typed fetch utilities for `/api/parse`, `/api/chunks`, `/api/search`, `/api/answer`, and `/api/judge`, including error parsing. |
@@ -332,11 +332,10 @@ This section provides detailed information about the architecture, components, a
 | `src/components/PipelinesPage.tsx` | Configure parsing, chunking, embedding, retrieval, reranker (placeholder), LLM, and judge stages per pipeline with expand/collapse controls. |
 | `src/components/ExperimentsPage.tsx` | Orchestrates runs across multiple pipelines, auto-parses documents when needed, tracks status logs/progress, and rolls up cost + latency estimates. |
 | `src/components/ReportsPage.tsx` | Compares pipelines, recommends top configs, highlights metric deltas, and exports Markdown/PDF summaries. |
-| `src/components/HistoryPage.tsx` | Presentational scaffolding for browsing previous experiments (seeded data + management affordances). |
+| `src/components/HistoryPage.tsx` | Links to the latest completed report by run ID. Refreshing the tab clears run data. |
 | `src/components/DocumentationPage.tsx` | Rich in-app documentation with copy-to-clipboard snippets, tabbed guides, and workflow walkthroughs. |
-| `src/components/ComingSoonPage.tsx` | Product roadmap showcasing planned features (re-ranking, model support, dark mode, metrics). |
-| `src/components/SettingsPage.tsx` | UX shell for future account preferences (forms and toggles are presently static). |
-| `src/main.tsx` | Binds the dataset, pipeline, and experiment providers so every screen shares the same shared state. |
+| `src/components/SettingsPage.tsx` | Stores a system, light, or dark theme preference in this browser. |
+| `src/main.tsx` | Mounts the browser router, query client, and in-memory workspace providers. |
 
 #### Experiment Pipeline Logic
 1. **Prerequisites:** The UI blocks experiment runs until at least one uploaded document (raw content or ready-to-parse file) and one task exist.
@@ -351,10 +350,9 @@ This section provides detailed information about the architecture, components, a
 
 ### Remaining / Optional Work
 - **Authentication & Authorization (critical):** No auth guard or rate limiting exists today; add API keys/session middleware before exposing beyond localhost.
-- **Persistent Storage (critical):** Experiment history and settings screens remain static—replace with real storage (backend API, database, or export/import utilities).
+- **Persistent Storage (critical):** Dataset, pipeline, and run data currently live in tab memory. Durable storage is planned for later phases.
 - **Parsing Flexibility (critical):** `/api/parse` returns `503` without `LLAMA_CLOUD_API_KEY`; introduce alternative connectors so LlamaParse is optional.
 - **Provider Coverage (critical):** Backend only supports OpenAI even though the UI advertises other providers; wire up reranker + additional integrations (Anthropic/Cohere).
-- **Roadmap Delivery (critical):** Items showcased on the Coming Soon page (reranking, metrics, dark mode) are not implemented yet.
 - **Real-time Feedback:** Consider SSE/websocket progress updates instead of polling to show real-time pipeline stages.
 - **Testing & Observability:** Add unit/integration coverage for backend clients/routes, plus telemetry dashboards for token/cost monitoring.
 - **Deployment Tooling:** Docker images, CI workflows, and environment templates for staging/production readiness.
@@ -392,7 +390,6 @@ This section provides detailed information about the architecture, components, a
 - **Persistent Storage**: Database integration for experiment history and user settings
 - **Authentication & Authorization**: User management and API access controls
 - **Additional Parsing Methods**: Local parsers and OCR capabilities
-- **Dark Mode**: UI theme customization
 - **Enhanced Metrics**: Additional evaluation dimensions and custom metrics
 - **CI/CD Pipeline**: Automated testing and deployment workflows
 

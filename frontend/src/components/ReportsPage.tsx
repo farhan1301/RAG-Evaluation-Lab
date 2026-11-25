@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { Link, useParams } from 'react-router';
 import { Download, FileText } from 'lucide-react';
 import { Button } from './ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
@@ -16,6 +16,7 @@ import { cn } from './ui/utils';
 import {
   METRIC_DEFINITIONS,
   type MetricKey,
+  type ExperimentRun,
   type PipelineMetrics,
   type ExperimentPipelineResult,
 } from '../types/experiment';
@@ -28,13 +29,9 @@ const PIPELINE_COLORS: Record<string, string> = {
 
 const FALLBACK_COLORS = ['#a855f7', '#ec4899', '#14b8a6'];
 
-const METRIC_LOOKUP = METRIC_DEFINITIONS.reduce(
-  (acc, metric) => ({
-    ...acc,
-    [metric.key]: metric,
-  }),
-  {} as Record<MetricKey, (typeof METRIC_DEFINITIONS)[number]>
-);
+const METRIC_LOOKUP = Object.fromEntries(
+  METRIC_DEFINITIONS.map((definition) => [definition.key, definition])
+) as Record<MetricKey, (typeof METRIC_DEFINITIONS)[number]>;
 
 const NEXT_STEPS = [
   'Tune chunking or retriever settings on the recommended configuration and rerun experiments to confirm the performance lift.',
@@ -95,12 +92,11 @@ const buildPdfDocument = (lines: string[]) => {
   ].join('\n');
 
   const header = '%PDF-1.4\n';
-  const objects: string[] = [];
   const offsets: string[] = ['0000000000 65535 f \n'];
   let body = '';
 
   const appendObject = (object: string) => {
-    offsets.push(String(header.length + body.length).padStart(10, '0') + ' 00000 n \n');
+    offsets.push(`${String(header.length + body.length).padStart(10, '0')} 00000 n \n`);
     body += object;
   };
 
@@ -119,7 +115,7 @@ const buildPdfDocument = (lines: string[]) => {
 
 
 const formatMetricValue = (key: MetricKey, value: number) =>
-  METRIC_LOOKUP[key]?.format ? METRIC_LOOKUP[key].format(value) : value.toString();
+  METRIC_LOOKUP[key].format(value);
 
 const capitalize = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
 
@@ -196,50 +192,26 @@ const buildPipelineMetrics = (pipeline: ExperimentPipelineResult): PipelineMetri
 export function ReportsPage() {
   const { latestRun } = useExperimentResults();
 
-  const pipelineMap = useMemo(() => {
-    if (!latestRun) {
-      return {};
-    }
-    return latestRun.pipelines.reduce((acc, pipeline) => {
-      acc[pipeline.pipelineId] = pipeline;
-      return acc;
-    }, {} as Record<string, (typeof latestRun.pipelines)[number]>);
-  }, [latestRun]);
-
-  const pipelineOrder = useMemo(
-    () => (latestRun ? latestRun.pipelines.map((pipeline) => pipeline.pipelineId) : []),
-    [latestRun]
-  );
-
-  const hasRun = Boolean(latestRun && pipelineOrder.length > 0);
-
-  if (!hasRun) {
+  const { runId } = useParams();
+  if (!latestRun?.pipelines.length || (runId && runId !== latestRun.id)) {
     return (
-      <div className="p-8 bg-zinc-50">
-        <div className="max-w-4xl mx-auto">
-          <Card>
-            <CardHeader>
-              <CardTitle>No experiment results yet</CardTitle>
-              <CardDescription className="text-zinc-600">
-                Run an experiment to generate comparative metrics and a downloadable report.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4 text-sm">
-              <p className="text-zinc-600">
-                Once your first experiment completes, this page will populate with judge pass rate, judged context precision, latency, and cost
-                comparisons for every pipeline you tested. You will also unlock export options for sharing the findings
-                with stakeholders.
-              </p>
-              <p className="text-zinc-500">
-                Head to the <strong>Experiments</strong> tab to launch a run.
-              </p>
-            </CardContent>
-          </Card>
-        </div>
-      </div>
+      <section className="page max-w-4xl">
+        <h1>{runId ? 'Report unavailable' : 'No experiment results yet'}</h1>
+        <p className="my-3 text-muted-foreground">
+          {runId ? 'This run is no longer available in this tab.' : 'Complete an experiment to compare metrics and export its report.'}
+        </p>
+        <Link className="text-primary underline" to={runId ? '/history' : '/experiments'}>
+          {runId ? 'Open experiment history' : 'Open experiments'}
+        </Link>
+      </section>
     );
   }
+  return <RunReport latestRun={latestRun} />;
+}
 
+function RunReport({ latestRun }: { latestRun: ExperimentRun }) {
+  const pipelineMap = Object.fromEntries(latestRun.pipelines.map((pipeline) => [pipeline.pipelineId, pipeline]));
+  const pipelineOrder = latestRun.pipelines.map((pipeline) => pipeline.pipelineId);
   const baselineId =
     (latestRun?.baselinePipelineId && pipelineMap[latestRun.baselinePipelineId]
       ? latestRun.baselinePipelineId
@@ -541,15 +513,15 @@ export function ReportsPage() {
   };
 
   return (
-    <div className="p-8 bg-zinc-50">
+    <div className="px-4 py-6 sm:p-8 bg-background">
       <div className="max-w-7xl mx-auto space-y-6">
         {/* Header */}
         <div className="flex items-center justify-between gap-4 flex-wrap">
           <div>
-            <h2 className="text-zinc-900">
-              {latestRun?.name ?? 'Experiment Report'}
-            </h2>
-            <p className="text-zinc-600">Generated on {formattedTimestamp}</p>
+            <h1>
+              {latestRun.name ?? 'Experiment Report'}
+            </h1>
+            <p className="text-muted-foreground">Generated on {formattedTimestamp}</p>
           </div>
           <div className="flex gap-2 flex-wrap">
             <Button variant="outline" className="gap-2" onClick={handleExportPdf}>
@@ -569,7 +541,7 @@ export function ReportsPage() {
             <CardTitle>Pipeline Recommendation</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
-            <p className="text-zinc-700">
+            <p className="text-foreground">
               {recommendedPipeline ? (
                 <>
                   Based on the most recent experiment,{' '}
@@ -581,11 +553,11 @@ export function ReportsPage() {
             </p>
 
             {recommendedSnapshot && (
-              <div className="p-4 rounded-lg border border-zinc-200 bg-zinc-50">
-                <p className="mb-2 text-zinc-600">
+              <div className="p-4 rounded-lg border border-border bg-background">
+                <p className="mb-2 text-muted-foreground">
                   Recommended configuration snapshot:
                 </p>
-                <ul className="space-y-1 text-sm text-zinc-700">
+                <ul className="space-y-1 text-sm text-foreground">
                   <li>
                     • <strong>Chunking:</strong>{' '}
                     {capitalize(recommendedSnapshot.chunking.strategy)} chunks (
@@ -615,7 +587,7 @@ export function ReportsPage() {
               </div>
             )}
 
-            <p className="text-sm text-zinc-600">
+            <p className="text-sm text-muted-foreground">
               Keep iterating on the recommended pipeline to validate that these improvements hold up
               across new evaluation datasets before promoting the configuration to production.
             </p>
@@ -626,7 +598,7 @@ export function ReportsPage() {
         <Card>
           <CardHeader>
             <CardTitle>Pipeline Comparison Overview</CardTitle>
-            <CardDescription className="text-zinc-600">
+            <CardDescription className="text-muted-foreground">
               All metrics compared against {baselinePipeline?.pipelineName ?? 'the first pipeline'}
             </CardDescription>
           </CardHeader>
@@ -705,17 +677,10 @@ export function ReportsPage() {
                                 return 'neutral';
                               })();
 
-                              const valueColorClass =
-                                highlightState === 'neutral' ? 'text-zinc-700' : '';
-
-                              const valueStyle =
-                                highlightState === 'best'
-                                  ? { color: '#16a34a' }
-                                  : highlightState === 'worst'
-                                  ? { color: '#dc2626' }
-                                  : undefined;
-
-                              const valueClasses = cn('font-semibold', valueColorClass);
+                              const valueClasses = cn('font-semibold', {
+                                'text-green-700 dark:text-green-300': highlightState === 'best',
+                                'text-red-700 dark:text-red-300': highlightState === 'worst',
+                              });
 
                               const arrowSymbol =
                                 typeof percentChange === 'number'
@@ -763,9 +728,9 @@ export function ReportsPage() {
                                 if (percentChange === 0) {
                                   deltaClass = 'text-xs font-medium text-muted-foreground';
                                 } else if (improvement) {
-                                  deltaClass = 'text-xs font-medium text-green-600';
+                                  deltaClass = 'text-xs font-medium text-green-600 dark:text-green-300';
                                 } else if (regression) {
-                                  deltaClass = 'text-xs font-medium text-red-600';
+                                  deltaClass = 'text-xs font-medium text-red-600 dark:text-red-300';
                                 }
                               } else if (
                                 typeof difference === 'number' &&
@@ -779,15 +744,15 @@ export function ReportsPage() {
                                 if (difference === 0) {
                                   deltaClass = 'text-xs font-medium text-muted-foreground';
                                 } else if (improvement) {
-                                  deltaClass = 'text-xs font-medium text-green-600';
+                                  deltaClass = 'text-xs font-medium text-green-600 dark:text-green-300';
                                 } else if (regression) {
-                                  deltaClass = 'text-xs font-medium text-red-600';
+                                  deltaClass = 'text-xs font-medium text-red-600 dark:text-red-300';
                                 }
                               }
 
                               return (
                                 <>
-                                  <span className={valueClasses} style={valueStyle}>
+                                  <span className={valueClasses}>
                                     {formatMetricValue(metric, value)}
                                   </span>
                                   {deltaText ? <span className={deltaClass}>{deltaText}</span> : null}
@@ -806,7 +771,7 @@ export function ReportsPage() {
             </Table>
               </div>
             ) : (
-              <p className="text-zinc-600">
+              <p className="text-muted-foreground">
                 No pipeline results detected in the latest experiment.
               </p>
             )}
@@ -817,11 +782,11 @@ export function ReportsPage() {
         <Card>
           <CardHeader>
             <CardTitle>Suggested Next Steps</CardTitle>
-            <CardDescription className="text-zinc-600">
+            <CardDescription className="text-muted-foreground">
               Iterate on your strongest pipeline and validate improvements with fresh data.
             </CardDescription>
           </CardHeader>
-          <CardContent className="space-y-3 text-sm text-zinc-700">
+          <CardContent className="space-y-3 text-sm text-foreground">
             <ul className="list-disc list-inside space-y-2">
               {NEXT_STEPS.map((step) => (
                 <li key={step}>{step}</li>

@@ -21,39 +21,41 @@ import { Button } from './ui/button';
 import { Separator } from './ui/separator';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from './ui/accordion';
 
-export function DocumentationPage() {
-  const [copiedText, setCopiedText] = useState<string | null>(null);
-
-  const copyToClipboard = (text: string, id: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedText(id);
-    setTimeout(() => setCopiedText(null), 2000);
-  };
-
-  const CodeBlock = ({ code, id }: { code: string; id: string }) => (
-    <div className="relative rounded-lg border bg-zinc-50 border-zinc-200 p-4 mt-3">
-      <pre className="text-sm overflow-x-auto">
-        <code>{code}</code>
-      </pre>
-      <Button size="sm" variant="ghost" className="absolute top-2 right-2" onClick={() => copyToClipboard(code, id)}>
-        {copiedText === id ? <CheckCircle2 size={14} /> : <Copy size={14} />}
-      </Button>
+function CodeBlock({ code }: { code: string }) {
+  const [feedback, setFeedback] = useState('');
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(code);
+      setFeedback('Copied');
+    } catch {
+      setFeedback('Select the code to copy it manually.');
+    }
+  }
+  return (
+    <div className="mt-3 min-w-0 rounded-lg border bg-background p-4">
+      <div className="mb-2 flex items-center justify-end gap-2">
+        <span role="status" className="text-sm">{feedback}</span>
+        <Button size="sm" variant="ghost" aria-label="Copy code" onClick={copy}><Copy size={14} /></Button>
+      </div>
+      <pre className="overflow-x-auto text-sm"><code>{code}</code></pre>
     </div>
   );
+}
 
+export function DocumentationPage() {
   return (
-    <div className="p-8 bg-zinc-50 min-h-screen">
+    <div className="px-4 py-6 sm:p-8 bg-background min-h-screen">
       <div className="max-w-6xl mx-auto space-y-6">
         <div>
           <div className="flex items-center gap-3 mb-2">
-            <Book className="text-blue-500" size={32} />
+            <Book className="text-blue-500 dark:text-blue-300" size={32} />
             <h1 className="text-3xl">Documentation</h1>
           </div>
-          <p className="text-lg text-zinc-600">Complete guide to using the RAG Evaluation Lab</p>
+          <p className="text-lg text-muted-foreground">Complete guide to using the RAG Evaluation Lab</p>
         </div>
 
         <Tabs defaultValue="overview" className="space-y-6">
-          <TabsList className="grid w-full grid-cols-3 lg:grid-cols-6">
+          <TabsList aria-label="Documentation sections" className="grid h-auto w-full grid-cols-2 sm:grid-cols-3 lg:grid-cols-6">
             <TabsTrigger value="overview">Overview</TabsTrigger>
             <TabsTrigger value="api-keys">API Keys</TabsTrigger>
             <TabsTrigger value="datasets">Datasets</TabsTrigger>
@@ -77,7 +79,7 @@ export function DocumentationPage() {
                   this platform gives you the tools to make data-driven decisions.
                 </p>
 
-                <Alert className="bg-blue-50 border-blue-200">
+                <Alert className="bg-blue-50 dark:bg-blue-950 border-blue-200 dark:border-blue-800">
                   <AlertCircle className="h-4 w-4" />
                   <AlertTitle>Key Philosophy</AlertTitle>
                   <AlertDescription>
@@ -97,10 +99,10 @@ export function DocumentationPage() {
                     ].map((step) => (
                       <div
                         key={step.num}
-                        className="flex gap-3 p-3 rounded-lg border border-zinc-200 bg-white"
+                        className="flex gap-3 p-3 rounded-lg border border-border bg-card"
                       >
                         <div
-                          className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 bg-blue-100 text-blue-600"
+                          className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 bg-blue-100 dark:bg-blue-950 text-blue-600 dark:text-blue-300"
                         >
                           {step.num}
                         </div>
@@ -118,17 +120,17 @@ export function DocumentationPage() {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {[
                 {
-                  icon: <Sparkles className="text-purple-500" size={20} />,
+                  icon: <Sparkles className="text-purple-500 dark:text-purple-300" size={20} />,
                   title: 'Key Capabilities',
                   items: ['Compare multiple RAG configurations', 'Track experiment history and results', 'Get AI-generated improvement suggestions'],
                 },
                 {
-                  icon: <FlaskConical className="text-blue-500" size={20} />,
+                  icon: <FlaskConical className="text-blue-500 dark:text-blue-300" size={20} />,
                   title: 'Common Use Cases',
                   items: ['Choosing the best embedding model', 'Optimizing chunking strategies', 'Benchmarking retrieval techniques'],
                 },
-              ].map((card, index) => (
-                <Card key={index}>
+              ].map((card) => (
+                <Card key={card.title}>
                   <CardHeader className="flex flex-row items-center gap-3">
                     <div className="p-2 rounded-md bg-blue-500/10">{card.icon}</div>
                     <div>
@@ -137,9 +139,9 @@ export function DocumentationPage() {
                   </CardHeader>
                   <CardContent>
                     <ul className="space-y-2 text-sm">
-                      {card.items.map((item, itemIndex) => (
-                        <li key={itemIndex} className="flex items-center gap-2">
-                          <CheckCircle2 size={14} className="text-green-500" />
+                      {card.items.map((item) => (
+                        <li key={item} className="flex items-center gap-2">
+                          <CheckCircle2 size={14} className="text-green-500 dark:text-green-300" />
                           <span>{item}</span>
                         </li>
                       ))}
@@ -182,7 +184,7 @@ export function DocumentationPage() {
                       description: 'Review comprehensive metrics and AI-generated recommendations.',
                     },
                   ].map((step, index) => (
-                    <li key={index} className="flex items-start gap-3">
+                    <li key={step.title} className="flex items-start gap-3">
                       <Badge className="h-6 w-6 rounded-full flex items-center justify-center p-0">{index + 1}</Badge>
                       <div>
                         <div className="font-medium mb-1">{step.title}</div>
@@ -208,7 +210,7 @@ export function DocumentationPage() {
                 </CardDescription>
               </CardHeader>
               <CardContent>
-                <Alert className="bg-yellow-50 border-yellow-200">
+                <Alert className="bg-yellow-50 dark:bg-yellow-950 border-yellow-200 dark:border-yellow-800">
                   <AlertCircle className="h-4 w-4" />
                   <AlertTitle>Security Note</AlertTitle>
                   <AlertDescription>
@@ -221,12 +223,12 @@ export function DocumentationPage() {
             <Accordion type="single" collapsible className="space-y-3">
               <AccordionItem
                 value="llamaparse"
-                className="border rounded-lg px-4 border-zinc-200"
+                className="border rounded-lg px-4 border-border"
               >
                 <AccordionTrigger>
                   <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 rounded-lg flex items-center justify-center bg-blue-100">
-                      <FileText className="text-blue-500" size={20} />
+                    <div className="w-10 h-10 rounded-lg flex items-center justify-center bg-blue-100 dark:bg-blue-950">
+                      <FileText className="text-blue-500 dark:text-blue-300" size={20} />
                     </div>
                     <div className="text-left">
                       <div className="font-medium">LlamaParse API Key</div>
@@ -244,7 +246,7 @@ export function DocumentationPage() {
                           href="https://cloud.llamaindex.ai"
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="text-blue-500 hover:underline inline-flex items-center gap-1"
+                          className="text-blue-500 dark:text-blue-300 hover:underline inline-flex items-center gap-1"
                         >
                           cloud.llamaindex.ai <ExternalLink size={12} />
                         </a>
@@ -262,11 +264,11 @@ export function DocumentationPage() {
                     <h4 className="mb-2">Why You Need It:</h4>
                     <ul className="space-y-1 text-sm">
                       <li className="flex items-center gap-2">
-                        <CheckCircle2 size={14} className="text-green-500" />
+                        <CheckCircle2 size={14} className="text-green-500 dark:text-green-300" />
                         Powers all document parsing before chunking and experiments
                       </li>
                       <li className="flex items-center gap-2">
-                        <CheckCircle2 size={14} className="text-green-500" />
+                        <CheckCircle2 size={14} className="text-green-500 dark:text-green-300" />
                         Enables page counts and job tracking within experiment logs
                       </li>
                     </ul>
@@ -276,14 +278,14 @@ export function DocumentationPage() {
 
               <AccordionItem
                 value="openai"
-                className="border rounded-lg px-4 border-zinc-200"
+                className="border rounded-lg px-4 border-border"
               >
                 <AccordionTrigger>
                   <div className="flex items-center gap-3">
                     <div
-                      className="w-10 h-10 rounded-lg flex items-center justify-center bg-green-100"
+                      className="w-10 h-10 rounded-lg flex items-center justify-center bg-green-100 dark:bg-green-950"
                     >
-                      <Key className="text-green-500" size={20} />
+                      <Key className="text-green-500 dark:text-green-300" size={20} />
                     </div>
                     <div className="text-left">
                       <div className="font-medium">OpenAI API Key</div>
@@ -301,7 +303,7 @@ export function DocumentationPage() {
                           href="https://platform.openai.com"
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="text-blue-500 hover:underline inline-flex items-center gap-1"
+                          className="text-blue-500 dark:text-blue-300 hover:underline inline-flex items-center gap-1"
                         >
                           platform.openai.com <ExternalLink size={12} />
                         </a>
@@ -320,15 +322,15 @@ export function DocumentationPage() {
                     <h4 className="mb-2">What You&apos;ll Need It For:</h4>
                     <ul className="space-y-1 text-sm">
                       <li className="flex items-center gap-2">
-                        <CheckCircle2 size={14} className="text-green-500" />
+                        <CheckCircle2 size={14} className="text-green-500 dark:text-green-300" />
                         Embedding models (text-embedding-3-small, text-embedding-3-large)
                       </li>
                       <li className="flex items-center gap-2">
-                        <CheckCircle2 size={14} className="text-green-500" />
+                        <CheckCircle2 size={14} className="text-green-500 dark:text-green-300" />
                         LLM generators (GPT-5 Chat, GPT-5 Mini, GPT-4.1 family, GPT-4o series)
                       </li>
                       <li className="flex items-center gap-2">
-                        <CheckCircle2 size={14} className="text-green-500" />
+                        <CheckCircle2 size={14} className="text-green-500 dark:text-green-300" />
                         Judge models for evaluation
                       </li>
                     </ul>
@@ -337,7 +339,6 @@ export function DocumentationPage() {
                   <div>
                     <h4 className="mb-2">Example Usage:</h4>
                     <CodeBlock
-                      id="openai-example"
                       code={`import openai
 
 openai.api_key = "sk-..."
@@ -360,14 +361,14 @@ response = openai.chat.completions.create(
 
               <AccordionItem
                 value="cohere"
-                className="border rounded-lg px-4 border-zinc-200"
+                className="border rounded-lg px-4 border-border"
               >
                 <AccordionTrigger>
                   <div className="flex items-center gap-3">
                     <div
-                      className="w-10 h-10 rounded-lg flex items-center justify-center bg-purple-100"
+                      className="w-10 h-10 rounded-lg flex items-center justify-center bg-purple-100 dark:bg-purple-950"
                     >
-                      <Key className="text-purple-500" size={20} />
+                      <Key className="text-purple-500 dark:text-purple-300" size={20} />
                     </div>
                     <div className="text-left">
                       <div className="font-medium">Cohere API Key</div>
@@ -385,7 +386,7 @@ response = openai.chat.completions.create(
                           href="https://dashboard.cohere.ai"
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="text-blue-500 hover:underline inline-flex items-center gap-1"
+                          className="text-blue-500 dark:text-blue-300 hover:underline inline-flex items-center gap-1"
                         >
                           dashboard.cohere.ai <ExternalLink size={12} />
                         </a>
@@ -404,11 +405,11 @@ response = openai.chat.completions.create(
                     <h4 className="mb-2">What You&apos;ll Need It For:</h4>
                     <ul className="space-y-1 text-sm">
                       <li className="flex items-center gap-2">
-                        <CheckCircle2 size={14} className="text-green-500" />
+                        <CheckCircle2 size={14} className="text-green-500 dark:text-green-300" />
                         Multilingual embeddings (cohere-embed-v3)
                       </li>
                       <li className="flex items-center gap-2">
-                        <CheckCircle2 size={14} className="text-green-500" />
+                        <CheckCircle2 size={14} className="text-green-500 dark:text-green-300" />
                         Reranking models (Cohere Rerank v3)
                       </li>
                     </ul>
@@ -417,7 +418,6 @@ response = openai.chat.completions.create(
                   <div>
                     <h4 className="mb-2">Example Usage:</h4>
                     <CodeBlock
-                      id="cohere-example"
                       code={`import cohere
 
 co = cohere.Client("your-api-key")
@@ -441,14 +441,14 @@ response = co.rerank(
 
               <AccordionItem
                 value="anthropic"
-                className="border rounded-lg px-4 border-zinc-200"
+                className="border rounded-lg px-4 border-border"
               >
                 <AccordionTrigger>
                   <div className="flex items-center gap-3">
                     <div
-                      className="w-10 h-10 rounded-lg flex items-center justify-center bg-orange-100"
+                      className="w-10 h-10 rounded-lg flex items-center justify-center bg-orange-100 dark:bg-orange-950"
                     >
-                      <Key className="text-orange-500" size={20} />
+                      <Key className="text-orange-500 dark:text-orange-300" size={20} />
                     </div>
                     <div className="text-left">
                       <div className="font-medium">Anthropic API Key</div>
@@ -466,7 +466,7 @@ response = co.rerank(
                           href="https://console.anthropic.com"
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="text-blue-500 hover:underline inline-flex items-center gap-1"
+                          className="text-blue-500 dark:text-blue-300 hover:underline inline-flex items-center gap-1"
                         >
                           console.anthropic.com <ExternalLink size={12} />
                         </a>
@@ -484,11 +484,11 @@ response = co.rerank(
                     <h4 className="mb-2">What You&apos;ll Need It For:</h4>
                     <ul className="space-y-1 text-sm">
                       <li className="flex items-center gap-2">
-                        <CheckCircle2 size={14} className="text-green-500" />
+                        <CheckCircle2 size={14} className="text-green-500 dark:text-green-300" />
                         Claude 3 models (Haiku, Opus)
                       </li>
                       <li className="flex items-center gap-2">
-                        <CheckCircle2 size={14} className="text-green-500" />
+                        <CheckCircle2 size={14} className="text-green-500 dark:text-green-300" />
                         Alternative LLM for generation and judging
                       </li>
                     </ul>
@@ -514,13 +514,13 @@ response = co.rerank(
                     The Datasets page allows you to upload documents that will serve as your knowledge base for RAG evaluation.
                   </p>
                   <div
-                    className="p-4 rounded-lg border border-zinc-200 bg-zinc-50"
+                    className="p-4 rounded-lg border border-border bg-background"
                   >
                     <h5 className="text-sm font-medium mb-2">Supported Formats:</h5>
                     <ul className="text-sm space-y-1">
                       {['PDF documents', 'Microsoft Word (.doc, .docx)', 'Text files (.txt)', 'Markdown files (.md)'].map((item) => (
                         <li key={item} className="flex items-center gap-2">
-                          <CheckCircle2 size={14} className="text-green-500" />
+                          <CheckCircle2 size={14} className="text-green-500 dark:text-green-300" />
                           {item}
                         </li>
                       ))}
@@ -548,7 +548,7 @@ response = co.rerank(
                         description: 'Specific passages that contain the answer',
                       },
                     ].map((card) => (
-                    <div key={card.title} className="p-3 rounded-lg border border-zinc-200">
+                    <div key={card.title} className="p-3 rounded-lg border border-border">
                         <div className="font-medium text-sm mb-1">{card.title}</div>
                         <div className="text-sm opacity-60">{card.description}</div>
                       </div>
@@ -556,7 +556,7 @@ response = co.rerank(
                   </div>
                 </div>
 
-                <Alert className="bg-blue-50 border-blue-200">
+                <Alert className="bg-blue-50 dark:bg-blue-950 border-blue-200 dark:border-blue-800">
                   <AlertCircle className="h-4 w-4" />
                   <AlertTitle>Best Practice</AlertTitle>
                   <AlertDescription>
@@ -644,7 +644,7 @@ response = co.rerank(
                       params: 'Weights for composite scoring',
                     },
                   ].map((item) => (
-                    <Card key={item.stage} className="bg-white">
+                    <Card key={item.stage} className="bg-card">
                       <CardContent className="p-6 space-y-3">
                         <div className="flex items-center justify-between">
                           <div>
@@ -705,7 +705,7 @@ response = co.rerank(
                   ].map((item) => (
                     <div
                       key={item.title}
-                      className="p-4 rounded-lg border border-zinc-200 bg-zinc-50"
+                      className="p-4 rounded-lg border border-border bg-background"
                     >
                       <div className="font-medium mb-1">{item.title}</div>
                       <div className="text-sm opacity-80">{item.description}</div>
@@ -713,7 +713,7 @@ response = co.rerank(
                   ))}
                 </div>
 
-                <Alert className="bg-purple-50 border-purple-200">
+                <Alert className="bg-purple-50 dark:bg-purple-950 border-purple-200 dark:border-purple-800">
                   <Sparkles className="h-4 w-4" />
                   <AlertTitle>Tip</AlertTitle>
                   <AlertDescription>
@@ -764,7 +764,7 @@ response = co.rerank(
                     ].map((section) => (
                       <div
                         key={section.title}
-                        className="p-4 rounded-lg border border-zinc-200 bg-zinc-50"
+                        className="p-4 rounded-lg border border-border bg-background"
                       >
                         <h5 className="font-medium mb-2">{section.title}</h5>
                         <p className="text-sm opacity-80">{section.description}</p>
@@ -793,7 +793,7 @@ response = co.rerank(
                   </div>
                 </div>
 
-                <Alert className="bg-green-50 border-green-200">
+                <Alert className="bg-green-50 dark:bg-green-950 border-green-200 dark:border-green-800">
                   <CheckCircle2 className="h-4 w-4" />
                   <AlertTitle>Best Practice</AlertTitle>
                   <AlertDescription>

@@ -1,3 +1,4 @@
+import { Link } from 'react-router';
 import { useState } from 'react';
 import { Upload, FileText, Plus, Trash2, Sparkles, AlertCircle, CheckCircle2, Info } from 'lucide-react';
 import { Button } from './ui/button';
@@ -10,10 +11,6 @@ import type { DatasetDocument, DatasetTask } from '../types/dataset';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 import { Alert, AlertDescription, AlertTitle } from './ui/alert';
 import { parseTaskCsv } from '../lib/taskCsv';
-
-interface DatasetsPageProps {
-  onNext: () => void;
-}
 
 const arrayBufferToBase64 = (buffer: ArrayBuffer) => {
   const bytes = new Uint8Array(buffer);
@@ -35,7 +32,7 @@ type CsvFeedback = {
   details?: string[];
 };
 
-export function DatasetsPage({ onNext }: DatasetsPageProps) {
+export function DatasetsPage() {
   const { documents, setDocuments, tasks, setTasks } = useDataset();
   const [uploading, setUploading] = useState(false);
   const [csvImporting, setCsvImporting] = useState(false);
@@ -291,12 +288,12 @@ export function DatasetsPage({ onNext }: DatasetsPageProps) {
   };
 
   return (
-    <div className="p-8 bg-zinc-50">
+    <div className="px-4 py-6 sm:p-8 bg-background">
       <div className="max-w-6xl mx-auto space-y-6">
         {/* Header */}
         <div>
-          <h2>Datasets & Tasks</h2>
-          <p className="text-zinc-600">
+          <h1>Datasets & Tasks</h1>
+          <p className="text-muted-foreground">
             Upload documents and define evaluation questions
           </p>
         </div>
@@ -310,22 +307,11 @@ export function DatasetsPage({ onNext }: DatasetsPageProps) {
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="border-2 border-dashed rounded-lg p-8 text-center border-zinc-300 bg-zinc-50">
+            <div className="border-2 border-dashed rounded-lg p-8 text-center border-input bg-background">
               <Upload className="mx-auto mb-4 opacity-40" size={48} />
-              <p className="mb-4">Drag and drop files here, or click to browse</p>
-              <Input
-                type="file"
-                multiple
-                accept=".pdf,.txt,.docx"
-                onChange={handleFileUpload}
-                className="hidden"
-                id="file-upload"
-              />
-              <Button asChild>
-                <label htmlFor="file-upload" className="cursor-pointer">
-                  Choose Files
-                </label>
-              </Button>
+              <label htmlFor="file-upload" className="mb-3 block font-medium">Choose documents</label>
+              <Input type="file" multiple accept=".pdf,.txt,.docx" onChange={handleFileUpload}
+                disabled={uploading} id="file-upload" className="mx-auto max-w-md" />
             </div>
 
             {documents.length > 0 && (
@@ -333,12 +319,12 @@ export function DatasetsPage({ onNext }: DatasetsPageProps) {
                 {documents.map((doc) => (
                   <div
                     key={doc.id}
-                    className="p-4 rounded-lg border border-zinc-200 bg-white"
+                    className="p-4 rounded-lg border border-border bg-card"
                   >
                     <div className="flex items-start gap-3">
                       <FileText size={20} className="mt-1 opacity-60" />
-                      <div className="flex-1">
-                        <div className="flex items-center justify-between mb-2">
+                      <div className="min-w-0 flex-1 break-words">
+                        <div className="flex flex-wrap gap-2 items-center justify-between mb-2">
                           <span>{doc.name}</span>
                           <div className="flex items-center gap-2">
                             <span className="text-sm opacity-60">{doc.progress}%</span>
@@ -346,24 +332,24 @@ export function DatasetsPage({ onNext }: DatasetsPageProps) {
                               variant="ghost"
                               size="icon"
                               onClick={() => removeDocument(doc.id)}
-                              aria-label="Remove document"
+                              aria-label={`Remove ${doc.name}`}
                             >
                               <Trash2 size={16} />
                             </Button>
                           </div>
                         </div>
-                        <Progress value={doc.progress} className="mb-2" />
+                        <Progress aria-label={`Upload progress for ${doc.name}`} value={doc.progress} className="mb-2" />
                         {doc.statusMessage && (
                           <p
                             className={`text-xs mb-2 ${
-                              doc.status === 'error' ? 'text-red-600' : 'text-zinc-600'
+                              doc.status === 'error' ? 'text-red-600 dark:text-red-300' : 'text-muted-foreground'
                             }`}
                           >
                             {doc.statusMessage}
                           </p>
                         )}
                         {doc.progress === 100 && doc.snippet && (
-                          <p className="text-sm text-zinc-600">
+                          <p className="text-sm text-muted-foreground">
                             {doc.snippet}
                           </p>
                         )}
@@ -391,7 +377,7 @@ export function DatasetsPage({ onNext }: DatasetsPageProps) {
         {/* Task Builder Section */}
         <Card>
           <CardHeader>
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap gap-2 items-center justify-between">
               <div>
                 <CardTitle>Evaluation Tasks</CardTitle>
                 <CardDescription>
@@ -405,27 +391,20 @@ export function DatasetsPage({ onNext }: DatasetsPageProps) {
             </div>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="rounded-lg border border-dashed border-zinc-300 bg-zinc-50 p-4 md:flex md:items-center md:justify-between">
+            <div className="rounded-lg border border-dashed border-input bg-background p-4 md:flex md:items-center md:justify-between">
               <div className="mb-3 md:mb-0 md:max-w-xl">
                 <p className="font-medium">Import from CSV</p>
-                <p className="text-sm text-zinc-600">
+                <p className="text-sm text-muted-foreground">
                   Upload a CSV with the headers <code>question</code>, <code>expected_answer</code>, and{' '}
                   <code>acceptance_rule</code>. Importing replaces the current task list.
                 </p>
               </div>
               <div className="flex items-center gap-2">
-                <Input
-                  type="file"
-                  accept=".csv"
-                  onChange={handleTaskCsvUpload}
-                  className="hidden"
-                  id="task-csv-upload"
-                />
-                <Button asChild variant="outline" disabled={csvImporting}>
-                  <label htmlFor="task-csv-upload" className="cursor-pointer">
-                    {csvImporting ? 'Importing…' : 'Upload CSV'}
-                  </label>
-                </Button>
+                <div>
+                  <label htmlFor="task-csv-upload" className="mb-1 block text-sm">Upload CSV</label>
+                  <Input type="file" accept=".csv" onChange={handleTaskCsvUpload}
+                    disabled={csvImporting} id="task-csv-upload" />
+                </div>
               </div>
             </div>
 
@@ -450,7 +429,7 @@ export function DatasetsPage({ onNext }: DatasetsPageProps) {
             )}
 
             {tasks.length === 0 ? (
-              <div className="text-center py-8 text-zinc-400">
+              <div className="text-center py-8 text-muted-foreground">
                 No tasks yet. Add a question or load the sample dataset.
               </div>
             ) : (
@@ -458,33 +437,36 @@ export function DatasetsPage({ onNext }: DatasetsPageProps) {
                 {tasks.map((task, index) => (
                   <div
                     key={task.id}
-                    className="p-4 rounded-lg border border-zinc-200 bg-white"
+                    className="p-4 rounded-lg border border-border bg-card"
                   >
                     <div className="flex items-start gap-3">
                       <div className="flex-1 space-y-3">
                         <div>
-                          <label className="text-sm opacity-60 block mb-1">
+                          <label htmlFor={`question-${task.id}`} className="text-sm opacity-60 block mb-1">
                             Question {index + 1}
                           </label>
                           <Textarea
-                            value={task.question}
+                            id={`question-${task.id}`}
+                              value={task.question}
                             onChange={(e) => updateTask(task.id, 'question', e.target.value)}
                             placeholder="What question should the RAG system answer?"
                             rows={2}
                           />
                         </div>
-                        <div className="grid grid-cols-2 gap-3">
+                        <div className="grid sm:grid-cols-2 gap-3">
                           <div>
-                            <label className="text-sm opacity-60 block mb-1">Expected Answer</label>
+                            <label htmlFor={`expectedAnswer-${task.id}`} className="text-sm opacity-60 block mb-1">Expected Answer</label>
                             <Input
+                              id={`expectedAnswer-${task.id}`}
                               value={task.expectedAnswer}
                               onChange={(e) => updateTask(task.id, 'expectedAnswer', e.target.value)}
                               placeholder="Ground truth answer"
                             />
                           </div>
                           <div>
-                            <label className="text-sm opacity-60 block mb-1">Acceptance Rule</label>
+                            <label htmlFor={`acceptanceRule-${task.id}`} className="text-sm opacity-60 block mb-1">Acceptance Rule</label>
                             <Input
+                              id={`acceptanceRule-${task.id}`}
                               value={task.acceptanceRule}
                               onChange={(e) => updateTask(task.id, 'acceptanceRule', e.target.value)}
                               placeholder="Must include..."
@@ -495,6 +477,7 @@ export function DatasetsPage({ onNext }: DatasetsPageProps) {
                       <Button
                         variant="ghost"
                         size="sm"
+                        aria-label={`Remove question ${index + 1}`}
                         onClick={() => removeTask(task.id)}
                         className="mt-1"
                       >
@@ -510,14 +493,11 @@ export function DatasetsPage({ onNext }: DatasetsPageProps) {
 
         {/* Bottom CTA */}
         <div className="flex justify-end">
-          <Button
-            onClick={onNext}
-            size="lg"
-            disabled={documents.length === 0 || tasks.length === 0}
-            className="gap-2"
-          >
-            Proceed to Pipeline Setup →
-          </Button>
+          {documents.length && tasks.length ? (
+            <Button asChild size="lg"><Link to="/pipelines">Proceed to pipeline setup →</Link></Button>
+          ) : (
+            <p className="text-sm text-muted-foreground">Add documents and questions to continue to pipeline setup.</p>
+          )}
         </div>
       </div>
     </div>

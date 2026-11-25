@@ -1,17 +1,25 @@
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { createRoot } from 'react-dom/client';
+import { createBrowserRouter, RouterProvider } from 'react-router';
+import { createRoutes } from './App';
+import './index.css';
+import { DatasetProvider } from './state/dataset';
+import { ExperimentResultsProvider } from './state/experimentResults';
+import { PipelineProvider } from './state/pipelines';
 
-import { createRoot } from "react-dom/client";
-import App from "./App.tsx";
-import "./index.css";
-import { ExperimentResultsProvider } from "./state/experimentResults";
-import { PipelineProvider } from "./state/pipelines";
-import { DatasetProvider } from "./state/dataset";
+const router = createBrowserRouter(createRoutes());
+const queryClient = new QueryClient();
+const root = document.getElementById('root');
+if (!root) throw new Error('Missing application root');
 
-createRoot(document.getElementById("root")!).render(
-  <PipelineProvider>
-    <DatasetProvider>
-      <ExperimentResultsProvider>
-        <App />
-      </ExperimentResultsProvider>
-    </DatasetProvider>
-  </PipelineProvider>,
+createRoot(root).render(
+  <QueryClientProvider client={queryClient}>
+    <PipelineProvider>
+      <DatasetProvider>
+        <ExperimentResultsProvider>
+          <RouterProvider router={router} />
+        </ExperimentResultsProvider>
+      </DatasetProvider>
+    </PipelineProvider>
+  </QueryClientProvider>,
 );

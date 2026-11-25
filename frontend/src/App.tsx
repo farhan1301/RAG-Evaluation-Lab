@@ -1,162 +1,195 @@
-import { useEffect, useState } from 'react';
-import { HomePage } from './components/HomePage';
-import { DatasetsPage } from './components/DatasetsPage';
-import { PipelinesPage } from './components/PipelinesPage';
-import { ExperimentsPage } from './components/ExperimentsPage';
-import { ReportsPage } from './components/ReportsPage';
+import {
+  BookOpen,
+  Clock,
+  Database,
+  FileText,
+  FlaskConical,
+  Home,
+  Menu,
+  Settings,
+  Workflow,
+  X,
+} from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import {
+  Link,
+  NavLink,
+  Outlet,
+  type RouteObject,
+  useLocation,
+  useMatches,
+} from 'react-router';
 import { HistoryPage } from './components/HistoryPage';
+import { HomePage } from './components/HomePage';
 import { SettingsPage } from './components/SettingsPage';
-import { DocumentationPage } from './components/DocumentationPage';
-import { ComingSoonPage } from './components/ComingSoonPage';
-import { FlaskConical, Database, Zap, FileText, Settings, Clock, Moon, Home, Book, Sparkles } from 'lucide-react';
-import { Button } from './components/ui/button';
+import { useTheme } from './lib/theme';
 
-type Page = 'home' | 'datasets' | 'pipelines' | 'experiments' | 'reports' | 'history' | 'settings' | 'docs' | 'coming-soon';
+const pages = [
+  { path: '/', label: 'Home', icon: Home, Component: HomePage },
+  {
+    path: '/datasets',
+    label: 'Datasets & Tasks',
+    icon: Database,
+    load: async () => (await import('./components/DatasetsPage')).DatasetsPage,
+  },
+  {
+    path: '/pipelines',
+    label: 'Pipelines',
+    icon: Workflow,
+    load: async () =>
+      (await import('./components/PipelinesPage')).PipelinesPage,
+  },
+  {
+    path: '/experiments',
+    label: 'Experiments',
+    icon: FlaskConical,
+    load: async () =>
+      (await import('./components/ExperimentsPage')).ExperimentsPage,
+  },
+  {
+    path: '/reports/:runId?',
+    to: '/reports',
+    label: 'Reports',
+    icon: FileText,
+    load: async () => (await import('./components/ReportsPage')).ReportsPage,
+  },
+  { path: '/history', label: 'History', icon: Clock, Component: HistoryPage },
+  {
+    path: '/docs',
+    label: 'Documentation',
+    icon: BookOpen,
+    load: async () =>
+      (await import('./components/DocumentationPage')).DocumentationPage,
+  },
+  {
+    path: '/settings',
+    label: 'Settings',
+    icon: Settings,
+    Component: SettingsPage,
+  },
+];
 
-export default function App() {
-  const [currentPage, setCurrentPage] = useState<Page>('home');
-  const [showDarkModeMessage, setShowDarkModeMessage] = useState(false);
-
+function Navigation() {
+  const [open, setOpen] = useState(false);
+  const button = useRef<HTMLButtonElement>(null);
   useEffect(() => {
-    if (!showDarkModeMessage) {
-      return;
-    }
-
-    const timeout = window.setTimeout(() => setShowDarkModeMessage(false), 2500);
-    return () => window.clearTimeout(timeout);
-  }, [showDarkModeMessage]);
-
-  const handleDarkModeClick = () => {
-    setShowDarkModeMessage(true);
-  };
-
-  const navItems = [
-    { id: 'home' as Page, label: 'Home', icon: Home },
-    { id: 'datasets' as Page, label: 'Datasets & Tasks', icon: Database },
-    { id: 'pipelines' as Page, label: 'Pipelines', icon: FlaskConical },
-    { id: 'experiments' as Page, label: 'Experiments', icon: Zap },
-    { id: 'reports' as Page, label: 'Reports', icon: FileText },
-    { id: 'docs' as Page, label: 'Documentation', icon: Book },
-    { id: 'coming-soon' as Page, label: 'Coming Soon', icon: Sparkles },
-  ];
-
+    if (!open) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setOpen(false);
+        button.current?.focus();
+      }
+    };
+    document.addEventListener('keydown', closeOnEscape);
+    return () => document.removeEventListener('keydown', closeOnEscape);
+  }, [open]);
   return (
-    <div className="min-h-screen bg-zinc-50 text-zinc-900">
-      {/* Top Bar */}
-      <div className="border-b border-zinc-200 bg-white">
-        <div className="relative flex items-center justify-between px-6 py-3">
-          <div className="flex items-center gap-3">
-            <FlaskConical className="text-blue-600" size={24} />
-            <div>
-              <h1 className="tracking-tight">RAG Evaluation Lab</h1>
-              <p className="text-sm text-zinc-500">Build, test, and compare retrieval pipelines</p>
-            </div>
-          </div>
-
-          {/* Utility Bar */}
-          <div className="flex items-center gap-4">
-            {/* Experiment History */}
-            <Button
-              variant="outline"
-              size="sm"
-              className="gap-2"
-              onClick={() => setCurrentPage('history')}
+    <header className="border-b bg-card">
+      <div className="mx-auto flex max-w-screen-2xl flex-wrap items-center justify-between gap-3 px-4 py-3 lg:px-8">
+        <Link
+          to="/"
+          className="flex items-center gap-2 font-semibold tracking-tight"
+        >
+          <FlaskConical aria-hidden="true" className="text-primary" /> RAG
+          Evaluation Lab
+        </Link>
+        <button
+          type="button"
+          ref={button}
+          aria-expanded={open}
+          aria-controls="navigation"
+          onClick={() => setOpen(!open)}
+          className="flex items-center gap-2 rounded-md border px-3 py-2 text-sm lg:hidden"
+        >
+          {open ? (
+            <X size={16} aria-hidden="true" />
+          ) : (
+            <Menu size={16} aria-hidden="true" />
+          )}{' '}
+          Menu
+        </button>
+        <nav
+          id="navigation"
+          aria-label="Main navigation"
+          className={`${open ? 'grid' : 'hidden'} w-full grid-cols-2 gap-1 lg:flex lg:w-auto lg:flex-wrap`}
+        >
+          {pages.map(({ path, to = path, label, icon: Icon }) => (
+            <NavLink
+              key={path}
+              to={to}
+              end={path === '/'}
+              onClick={() => setOpen(false)}
+              className="flex items-center gap-2 rounded-md px-2.5 py-2 text-sm text-muted-foreground hover:bg-muted aria-[current=page]:bg-accent aria-[current=page]:text-primary"
             >
-              <Clock size={16} />
-              History
-            </Button>
-
-            {/* Settings */}
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setCurrentPage('settings')}
-            >
-              <Settings size={16} />
-            </Button>
-
-            {/* Theme Toggle */}
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={handleDarkModeClick}
-            >
-              <Moon size={16} />
-            </Button>
-          </div>
-          {showDarkModeMessage && (
-            <div className="absolute right-0 top-full mt-2 rounded-md border border-zinc-200 bg-white px-3 py-2 text-xs text-zinc-600 shadow-sm">
-              Dark mode is coming soon.
-            </div>
-          )}
-        </div>
+              <Icon size={16} aria-hidden="true" />
+              {label}
+            </NavLink>
+          ))}
+        </nav>
       </div>
-
-      <div className="flex">
-        {/* Left Sidebar Navigation */}
-        <div className="w-64 min-h-[calc(100vh-73px)] border-r border-zinc-200 bg-white">
-          <nav className="p-4 space-y-2">
-            {navItems.map((item) => {
-              const Icon = item.icon;
-              const isActive = currentPage === item.id;
-              return (
-                <button
-                  key={item.id}
-                  onClick={() => setCurrentPage(item.id)}
-                  className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${
-                    isActive
-                      ? 'bg-blue-50 text-blue-600'
-                      : 'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900'
-                  }`}
-                >
-                  <Icon size={20} />
-                  <span>{item.label}</span>
-                </button>
-              );
-            })}
-          </nav>
-
-          {/* Flow Indicator */}
-          <div className="mx-4 mt-6 p-4 rounded-lg border border-zinc-200 bg-zinc-50">
-            <h3 className="text-sm mb-3 opacity-60">Workflow</h3>
-            <div className="space-y-2 text-sm">
-              <div className="flex items-center gap-2">
-                <div className="w-6 h-6 rounded-full flex items-center justify-center text-xs bg-blue-100 text-blue-600">1</div>
-                <span>Upload</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <div className="w-6 h-6 rounded-full flex items-center justify-center text-xs bg-blue-100 text-blue-600">2</div>
-                <span>Configure</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <div className="w-6 h-6 rounded-full flex items-center justify-center text-xs bg-blue-100 text-blue-600">3</div>
-                <span>Run</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <div className="w-6 h-6 rounded-full flex items-center justify-center text-xs bg-blue-100 text-blue-600">4</div>
-                <span>Compare</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <div className="w-6 h-6 rounded-full flex items-center justify-center text-xs bg-blue-100 text-blue-600">5</div>
-                <span>Report</span>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Main Content */}
-        <div className="flex-1">
-          {currentPage === 'home' && <HomePage onNavigate={(page) => setCurrentPage(page as Page)} />}
-          {currentPage === 'datasets' && <DatasetsPage onNext={() => setCurrentPage('pipelines')} />}
-          {currentPage === 'pipelines' && <PipelinesPage onNext={() => setCurrentPage('experiments')} />}
-          {currentPage === 'experiments' && <ExperimentsPage onNext={() => setCurrentPage('reports')} />}
-          {currentPage === 'reports' && <ReportsPage />}
-          {currentPage === 'history' && <HistoryPage onViewReport={(id) => setCurrentPage('reports')} />}
-          {currentPage === 'settings' && <SettingsPage />}
-          {currentPage === 'docs' && <DocumentationPage />}
-          {currentPage === 'coming-soon' && <ComingSoonPage darkMode={false} />}
-        </div>
-      </div>
-    </div>
+    </header>
   );
+}
+
+function Shell() {
+  const { pathname } = useLocation();
+  const matches = useMatches();
+  const title = String(matches.at(-1)?.handle);
+  const main = useRef<HTMLElement>(null);
+  const previousPath = useRef(pathname);
+  const theme = useTheme();
+  useEffect(() => {
+    document.title = `${title} · RAG Evaluation Lab`;
+    if (pathname !== previousPath.current) {
+      main.current?.focus();
+      previousPath.current = pathname;
+      window.scrollTo(0, 0);
+    }
+  }, [pathname, title]);
+  return (
+    <>
+      <a
+        href="#main"
+        className="sr-only focus:not-sr-only focus:absolute focus:z-50 focus:bg-card focus:p-3"
+      >
+        Skip to content
+      </a>
+      <Navigation key={pathname} />
+      <main id="main" aria-label={title} ref={main} tabIndex={-1}>
+        <Outlet context={theme} />
+      </main>
+    </>
+  );
+}
+
+function NotFound() {
+  return (
+    <section className="page">
+      <h1>Page not found</h1>
+      <Link className="text-primary underline" to="/">
+        Return home
+      </Link>
+    </section>
+  );
+}
+
+function LoadingPage() {
+  return <p role="status" className="page">Loading page…</p>;
+}
+
+export function createRoutes(): RouteObject[] {
+  return [
+    {
+      Component: Shell,
+      HydrateFallback: LoadingPage,
+      children: [
+        ...pages.map(({ label, icon: _icon, to: _to, load, ...route }) => ({
+          ...route,
+          lazy: load ? { Component: load } : undefined,
+          handle: label,
+        })),
+        { path: '*', handle: 'Page not found', Component: NotFound },
+      ],
+    },
+  ];
 }
