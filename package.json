@@ -1,11 +1,43 @@
 {
   "name": "rag-eval-lab",
+  "version": "1.0.0",
+  "license": "MIT",
   "private": true,
+  "type": "module",
+  "engines": {
+    "node": "^22.22.0 || ^24.0.0 || >=26.0.0"
+  },
+  "workspaces": [
+    "packages/*",
+    "frontend",
+    "backend"
+  ],
   "scripts": {
-    "dev": "npm run dev --prefix frontend",
-    "dev:frontend": "npm run dev --prefix frontend",
-    "dev:backend": "npm run dev --prefix backend",
-    "build": "npm run build --prefix frontend",
-    "build:backend": "npm run build --prefix backend"
+    "dev": "npm run dev -w rag-eval-frontend",
+    "dev:backend": "npm run dev -w rag-eval-backend",
+    "build": "npm run build --workspaces --if-present && node scripts/check-startup.mjs",
+    "lint": "biome lint . && biome format .",
+    "typecheck": "tsc -p packages/contracts/tsconfig.json && tsc -p backend/tsconfig.json --noEmit && tsc -p frontend/tsconfig.json && tsc -p frontend/tsconfig.node.json && tsc -p tests/tsconfig.json && tsc -p e2e/tsconfig.json",
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "format": "biome format --write .",
+    "dev:worker": "npm run dev:worker -w rag-eval-backend",
+    "start:worker": "npm run start:worker -w rag-eval-backend",
+    "backup": "tsx backend/src/ops/backup.ts",
+    "restore": "tsx backend/src/ops/restore.ts",
+    "rebuild:qdrant": "tsx backend/src/ops/rebuild-qdrant.ts"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.6.9",
+    "@playwright/test": "1.65.1",
+    "@types/node": "26.6.6",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2",
+    "vitest": "5.1.1"
+  },
+  "overrides": {
+    "@qdrant/js-client-rest": {
+      "undici": "7.30.2"
+    }
   }
 }

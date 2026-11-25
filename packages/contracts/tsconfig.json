@@ -1,0 +1,5 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": { "module": "NodeNext", "types": [], "noEmit": true },
+  "include": ["src/**/*.ts"]
+}

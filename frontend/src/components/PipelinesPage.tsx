@@ -1,576 +1,478 @@
-import { useEffect, useMemo, useState } from 'react';
-import { Plus, ChevronDown, ChevronUp, Trash2, Copy } from 'lucide-react';
+import * as c from '@rag-eval/contracts';
+import { useQuery } from '@tanstack/react-query';
+import { Link } from 'react-router';
+import {
+  useCapabilities,
+  useList,
+  useSelection,
+  useWrite,
+  request,
+  pipelineQuery,
+} from '../data/workspace';
+import { useDraft } from '../data/draft';
 import { Button } from './ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
-import { Slider } from './ui/slider';
 import { Input } from './ui/input';
-import { Checkbox } from './ui/checkbox';
-import { Badge } from './ui/badge';
-import { usePipelines } from '../state/pipelines';
-import type { Pipeline } from '../types/pipeline';
+import { Card, CardHeader, CardTitle, CardContent } from './ui/card';
+import { EditorActions } from './EditorActions';
+import { RetrievalPreviewPanel } from './RetrievalPreviewPanel';
 
-interface PipelinesPageProps {
-  onNext: () => void;
-}
-
-interface PipelineStageProps {
-  title: string;
-  description: string;
-  isExpanded: boolean;
-  onToggle: () => void;
-  children: React.ReactNode;
-}
-
-const MODEL_OPTIONS = [
-  { value: 'gpt-5-chat-latest', label: 'GPT-5 Chat (Latest)' },
-  { value: 'gpt-5-mini', label: 'GPT-5 Mini' },
-  { value: 'gpt-5-nano', label: 'GPT-5 Nano' },
-  { value: 'gpt-4.1', label: 'GPT-4.1' },
-  { value: 'gpt-4.1-mini', label: 'GPT-4.1 Mini' },
-  { value: 'gpt-4.1-nano', label: 'GPT-4.1 Nano' },
-  { value: 'gpt-4o', label: 'GPT-4o (Balanced, $$)' },
-  { value: 'gpt-4o-mini', label: 'GPT-4o Mini (Fast, $)' },
-  { value: 'gpt-4-turbo', label: 'GPT-4 Turbo (Advanced, $$$)' },
-];
-
-const EMBEDDING_MODEL_COSTS: Record<string, string> = {
-  'text-embedding-3-small': '$0.02 / 1M tokens',
-  'text-embedding-3-large': '$0.13 / 1M tokens',
-};
-
-function PipelineStage({ title, description, isExpanded, onToggle, children }: PipelineStageProps) {
-  return (
-    <div className="border border-zinc-200 bg-white rounded-lg">
-      <button
-        onClick={onToggle}
-        className="w-full p-4 flex items-center justify-between hover:opacity-80 transition-opacity"
-      >
-        <div className="text-left">
-          <h4>{title}</h4>
-          <p className="text-sm text-zinc-600">{description}</p>
-        </div>
-        {isExpanded ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
-      </button>
-      {isExpanded && <div className="px-4 pb-4 space-y-4">{children}</div>}
-    </div>
+// Keep incomplete numeric edits recoverable. Saving still uses the strict wire contract.
+const form = c.pipelineInput.extend({
+  name: c.z.string(),
+  config: c.pipelineConfig.extend({
+    chunking: c.pipelineConfig.shape.chunking
+      .unwrap()
+      .extend({ chunkSize: c.z.number(), overlap: c.z.number() }),
+    retriever: c.pipelineConfig.shape.retriever
+      .unwrap()
+      .extend({ topK: c.z.number() }),
+    llm: c.pipelineConfig.shape.llm
+      .unwrap()
+      .extend({ temperature: c.z.number(), maxTokens: c.z.number() }),
+  }),
+});
+function PipelineEditor({
+  saved,
+  profiles,
+  baseline,
+  setBaseline,
+}: {
+  saved: c.SavedPipeline;
+  profiles: c.Capabilities['profiles'];
+  baseline: boolean;
+  setBaseline: () => void;
+}) {
+  const write = useWrite('pipelines');
+  const draft = useDraft(
+    saved.id,
+    saved.revision,
+    { name: saved.name, description: saved.description, config: saved.config },
+    form,
   );
-}
-
-export function PipelinesPage({ onNext }: PipelinesPageProps) {
-  const {
-    pipelines,
-    addPipeline: addPipelineToContext,
-    updatePipeline: updatePipelineInContext,
-    removePipeline: removePipelineFromContext,
-    duplicatePipeline: duplicatePipelineInContext,
-  } = usePipelines();
-  const [expandedStages, setExpandedStages] = useState<{ [key: string]: string }>(() => {
-    const firstPipelineId = pipelines[0]?.id;
-    return firstPipelineId ? { [firstPipelineId]: 'parsing' } : {};
-  });
-  const [expandAllStages, setExpandAllStages] = useState(false);
-  const [expandedPipelines, setExpandedPipelines] = useState<Record<string, boolean>>({});
-
-  const pipelineIds = useMemo(() => pipelines.map((pipeline) => pipeline.id), [pipelines]);
-
-  const toggleStage = (pipelineId: string, stage: string) => {
-    if (expandAllStages) {
-      setExpandAllStages(false);
-      setExpandedStages({ [pipelineId]: stage });
-      return;
-    }
-    if (expandedPipelines[pipelineId]) {
-      setExpandedPipelines((prev) => ({ ...prev, [pipelineId]: false }));
-      setExpandedStages((prev) => ({ ...prev, [pipelineId]: stage }));
-      return;
-    }
-    setExpandedStages((prev) => ({
-      ...prev,
-      [pipelineId]: prev[pipelineId] === stage ? '' : stage,
-    }));
+  const { name, description, config } = draft.value;
+  const update = (changes: Partial<c.PipelineConfig>) =>
+    draft.change({ ...draft.value, config: { ...config, ...changes } });
+  const path = `pipelines/${saved.id}`;
+  const answerProfile = profiles.find(
+    (p) =>
+      p.role === 'chat' && (!config.llm.model || p.model === config.llm.model),
+  );
+  const fixedTemperature =
+    answerProfile && !answerProfile.options.includes('temperature');
+  const maxTemperature = fixedTemperature
+    ? 1
+    : (answerProfile?.capabilities.maxTemperature ?? 2);
+  const selectProfile = (
+    role: c.Role,
+    stage: 'llm' | 'judge' | 'embedding',
+  ) => {
+    const fieldId = `${saved.id}-${stage}-model`;
+    return (
+      <div>
+        <label htmlFor={fieldId} className="block">
+          {role === 'chat'
+            ? 'Answer model'
+            : role === 'judge'
+              ? 'Judge model'
+              : 'Embedding model'}
+        </label>
+        <select
+          id={fieldId}
+          className="block rounded border p-2"
+          value={config[stage].model}
+          onChange={(e) => {
+            const model = e.target.value,
+              selected = profiles.find(
+                (p) => p.role === role && (!model || p.model === model),
+              );
+            update({
+              [stage]: {
+                ...config[stage],
+                model,
+                ...(stage === 'llm' &&
+                  selected &&
+                  !selected.options.includes('temperature') && {
+                    temperature: 1,
+                  }),
+              },
+            });
+          }}
+        >
+          <option value="">
+            Server default (
+            {profiles.find((p) => p.role === role)?.model ?? 'unconfigured'})
+          </option>
+          {profiles
+            .filter((p) => p.role === role)
+            .map((p) => (
+              <option key={p.name} value={p.model}>
+                {p.name}
+              </option>
+            ))}
+        </select>
+      </div>
+    );
   };
-
-  const handleAddPipeline = () => {
-    const baseline = pipelines.find((pipeline) => pipeline.isBaseline) ?? pipelines[0];
-    const overrides = baseline
-      ? {
-          parsing: { ...baseline.parsing },
-          chunking: { ...baseline.chunking },
-          embedding: { ...baseline.embedding },
-          retriever: { ...baseline.retriever },
-          reranker: { ...baseline.reranker },
-          llm: { ...baseline.llm },
-          judge: { ...baseline.judge },
-        }
-      : undefined;
-
-    addPipelineToContext(overrides);
-  };
-
-  const handleRemovePipeline = (id: string) => {
-    removePipelineFromContext(id);
-  };
-
-  const handleUpdatePipeline = (id: string, updates: Partial<Pipeline>) => {
-    updatePipelineInContext(id, updates);
-  };
-
-  const handleDuplicatePipeline = (id: string) => {
-    duplicatePipelineInContext(id);
-  };
-
-  useEffect(() => {
-    pipelines.forEach((pipeline) => {
-      const updates: Partial<Pipeline> = {};
-      let requiresUpdate = false;
-
-      if (pipeline.embedding.model === 'cohere-embed-v3') {
-        updates.embedding = { model: 'text-embedding-3-small' };
-        requiresUpdate = true;
-      }
-
-      const llmModel = pipeline.llm.model;
-      if (llmModel.startsWith('claude')) {
-        updates.llm = { ...pipeline.llm, model: 'gpt-4o-mini' };
-        requiresUpdate = true;
-      }
-
-      const judgeModel = pipeline.judge.model;
-      if (judgeModel.startsWith('claude')) {
-        updates.judge = { model: 'gpt-4o' };
-        requiresUpdate = true;
-      }
-
-      if (pipeline.reranker.enabled) {
-        updates.reranker = { ...pipeline.reranker, enabled: false };
-        requiresUpdate = true;
-      }
-
-      if (requiresUpdate) {
-        updatePipelineInContext(pipeline.id, updates);
-      }
-    });
-  }, [pipelines, updatePipelineInContext]);
-
-  const isStageExpanded = (pipelineId: string, stage: string) =>
-    expandAllStages || expandedPipelines[pipelineId] || expandedStages[pipelineId] === stage;
-
-  const handleToggleExpandAll = () => {
-    setExpandAllStages((prev) => !prev);
-  };
-
-  const handleTogglePipelineExpansion = (pipelineId: string) => {
-    setExpandedPipelines((prev) => ({
-      ...prev,
-      [pipelineId]: !prev[pipelineId],
-    }));
-  };
-
-  useEffect(() => {
-    setExpandedPipelines((prev) => {
-      const updated = pipelineIds.reduce<Record<string, boolean>>((acc, id) => {
-        acc[id] = prev[id] ?? false;
-        return acc;
-      }, {});
-      return updated;
-    });
-  }, [pipelineIds]);
-
-  useEffect(() => {
-    if (!expandAllStages) {
-      return;
-    }
-    setExpandedPipelines({});
-  }, [expandAllStages]);
-
   return (
-    <div className="p-8 bg-zinc-50">
-      <div className="max-w-7xl mx-auto space-y-6">
-        {/* Header */}
-        <div className="flex items-center justify-between">
-          <div>
-            <h2>Pipeline Configuration</h2>
-            <p className="text-zinc-600">Design RAG pipelines step-by-step</p>
-          </div>
-          <div className="flex items-center gap-2">
-            <Button variant="outline" onClick={handleToggleExpandAll}>
-              {expandAllStages ? 'Collapse All' : 'Expand All'}
-            </Button>
-            <Button onClick={handleAddPipeline} className="gap-2">
-              <Plus size={16} />
-              Add Pipeline to Compare
-            </Button>
-          </div>
-        </div>
-
-        {/* Pipelines Grid */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6">
-          {pipelines.map((pipeline) => (
-            <Card key={pipeline.id}>
-              <CardHeader>
-                <div className="flex items-center justify-between mb-3">
-                  <div className="flex items-center gap-2">
-                    <Badge variant="outline">{pipeline.isBaseline ? 'Baseline' : 'Variant'}</Badge>
-                  </div>
-                  <div className="flex items-center gap-1">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => handleTogglePipelineExpansion(pipeline.id)}
-                      aria-label={expandedPipelines[pipeline.id] ? 'Collapse pipeline' : 'Expand pipeline'}
-                    >
-                      {expandedPipelines[pipeline.id] ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => handleDuplicatePipeline(pipeline.id)}
-                      aria-label="Duplicate pipeline"
-                    >
-                      <Copy size={16} />
-                    </Button>
-                    {pipelines.length > 1 && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => handleRemovePipeline(pipeline.id)}
-                        aria-label="Remove pipeline"
-                      >
-                        <Trash2 size={16} />
-                      </Button>
-                    )}
-                  </div>
-                </div>
+    <Card>
+      <CardHeader>
+        <CardTitle>{saved.name}</CardTitle>
+        <p>
+          Revision {saved.revision}
+          {baseline && ' · Baseline'}
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <fieldset disabled={write.isPending} className="space-y-3">
+          <label htmlFor={`${saved.id}-pipeline-name`} className="block">
+            Pipeline name
+            <Input
+              id={`${saved.id}-pipeline-name`}
+              value={name}
+              onChange={(e) =>
+                draft.change({ ...draft.value, name: e.target.value })
+              }
+            />
+          </label>
+          <label htmlFor={`${saved.id}-description`} className="block">
+            Description
+            <Input
+              id={`${saved.id}-description`}
+              value={description}
+              onChange={(e) =>
+                draft.change({ ...draft.value, description: e.target.value })
+              }
+            />
+          </label>
+          <details open>
+            <summary>Parsing and chunking</summary>
+            <div className="space-y-2 p-2">
+              <p>Choose the document parser on the Datasets page.</p>
+              <div>
+                <label htmlFor={`${saved.id}-chunking-strategy`}>
+                  Chunking strategy
+                </label>{' '}
+                <select
+                  id={`${saved.id}-chunking-strategy`}
+                  value={config.chunking.strategy}
+                  onChange={(e) =>
+                    update({
+                      chunking: {
+                        ...config.chunking,
+                        strategy: c.pipelineConfig.shape.chunking
+                          .unwrap()
+                          .shape.strategy.parse(e.target.value),
+                      },
+                    })
+                  }
+                >
+                  <option value="character-window">Character window</option>
+                  <option value="sentence-packed">Sentence packed</option>
+                  <option value="heading-aware">Heading aware</option>
+                  <option value="table-aware">Table aware</option>
+                </select>
+              </div>
+              <label
+                htmlFor={`${saved.id}-chunk-size-tokens`}
+                className="block"
+              >
+                Chunk size (characters)
                 <Input
-                  value={pipeline.name}
-                  onChange={(e) => handleUpdatePipeline(pipeline.id, { name: e.target.value })}
-                  className="text-lg mb-0"
-                  placeholder="Pipeline name..."
+                  id={`${saved.id}-chunk-size-tokens`}
+                  type="number"
+                  min={100}
+                  max={1000}
+                  value={config.chunking.chunkSize}
+                  onChange={(e) =>
+                    update({
+                      chunking: {
+                        ...config.chunking,
+                        chunkSize: Number(e.target.value),
+                      },
+                    })
+                  }
                 />
-              </CardHeader>
-              <CardContent className="space-y-3">
-                {/* Parsing */}
-                <PipelineStage
-                  title="Document Parsing"
-                  description="Convert uploaded files into text before chunking"
-                  isExpanded={isStageExpanded(pipeline.id, 'parsing')}
-                  onToggle={() => toggleStage(pipeline.id, 'parsing')}
+              </label>
+              <label htmlFor={`${saved.id}-overlap`} className="block">
+                Overlap (characters)
+                <Input
+                  id={`${saved.id}-overlap`}
+                  type="number"
+                  min={0}
+                  max={50}
+                  value={config.chunking.overlap}
+                  onChange={(e) =>
+                    update({
+                      chunking: {
+                        ...config.chunking,
+                        overlap: Number(e.target.value),
+                      },
+                    })
+                  }
+                />
+              </label>
+            </div>
+          </details>
+          <details open>
+            <summary>Embedding and retrieval</summary>
+            <div className="space-y-2 p-2">
+              <div>
+                <label htmlFor={`${saved.id}-retrieval-mode`} className="block">
+                  Retrieval mode
+                </label>
+                <select
+                  id={`${saved.id}-retrieval-mode`}
+                  className="block rounded border p-2"
+                  value={config.retriever.mode}
+                  onChange={(e) =>
+                    update({
+                      retriever: {
+                        ...config.retriever,
+                        mode: c.retrievalMode.parse(e.target.value),
+                      },
+                    })
+                  }
                 >
-                  <div>
-                    <label className="text-sm opacity-60 block mb-2">Parsing Strategy</label>
-                    <Select
-                      value={pipeline.parsing.strategy}
-                      onValueChange={(value) =>
-                        handleUpdatePipeline(pipeline.id, {
-                          parsing: {
-                            ...pipeline.parsing,
-                            strategy: value as Pipeline['parsing']['strategy'],
-                          },
-                        })
-                      }
-                    >
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="llama-parse">LlamaParse (cloud)</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                </PipelineStage>
-
-                {/* Chunking */}
-                <PipelineStage
-                  title="Chunking"
-                  description="How documents are split into pieces"
-                  isExpanded={isStageExpanded(pipeline.id, 'chunking')}
-                  onToggle={() => toggleStage(pipeline.id, 'chunking')}
-                >
-                  <div className="space-y-3">
-                    <div>
-                      <label className="text-sm opacity-60 block mb-2">Strategy</label>
-                      <Select
-                        value={pipeline.chunking.strategy}
-                        onValueChange={(value) =>
-                          handleUpdatePipeline(pipeline.id, {
-                            chunking: { ...pipeline.chunking, strategy: value },
-                          })
-                        }
-                      >
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="recursive">Recursive (Character-based)</SelectItem>
-                          <SelectItem value="semantic">Semantic (Meaning-based)</SelectItem>
-                          <SelectItem value="layout">Layout-aware (PDF)</SelectItem>
-                          <SelectItem value="table">Table Splitter</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <div>
-                      <label className="text-sm opacity-60 block mb-2">
-                        Chunk Size: {pipeline.chunking.chunkSize} tokens
-                      </label>
-                      <Slider
-                        value={[pipeline.chunking.chunkSize]}
-                        onValueChange={([value]) =>
-                          handleUpdatePipeline(pipeline.id, {
-                            chunking: { ...pipeline.chunking, chunkSize: value },
-                          })
-                        }
-                        min={100}
-                        max={1000}
-                        step={50}
-                      />
-                    </div>
-                    <div>
-                      <label className="text-sm opacity-60 block mb-2">
-                        Overlap: {pipeline.chunking.overlap}%
-                      </label>
-                      <Slider
-                        value={[pipeline.chunking.overlap]}
-                        onValueChange={([value]) =>
-                          handleUpdatePipeline(pipeline.id, {
-                            chunking: { ...pipeline.chunking, overlap: value },
-                          })
-                        }
-                        min={0}
-                        max={50}
-                        step={5}
-                      />
-                    </div>
-                  </div>
-                </PipelineStage>
-
-                {/* Embedding Model */}
-                <PipelineStage
-                  title="Embedding Model"
-                  description="Converts text to vectors"
-                  isExpanded={isStageExpanded(pipeline.id, 'embedding')}
-                  onToggle={() => toggleStage(pipeline.id, 'embedding')}
-                >
-                  <div>
-                    <Select
-                      value={pipeline.embedding.model}
-                      onValueChange={(value) =>
-                        handleUpdatePipeline(pipeline.id, { embedding: { model: value } })
-                      }
-                    >
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="text-embedding-3-small">
-                          {`text-embedding-3-small (${EMBEDDING_MODEL_COSTS['text-embedding-3-small']}, 1536d, Fast)`}
-                        </SelectItem>
-                        <SelectItem value="text-embedding-3-large">
-                          {`text-embedding-3-large (${EMBEDDING_MODEL_COSTS['text-embedding-3-large']}, 3072d, Accurate)`}
-                        </SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                </PipelineStage>
-
-                {/* Vector Database */}
-                <PipelineStage
-                  title="Vector Database"
-                  description="Stores document embeddings"
-                  isExpanded={isStageExpanded(pipeline.id, 'vectordb')}
-                  onToggle={() => toggleStage(pipeline.id, 'vectordb')}
-                >
-                  <div className="p-3 rounded border border-zinc-200 bg-zinc-50">
-                    <p className="text-sm">
-                      <span className="opacity-60">Using:</span> Qdrant
-                    </p>
-                    <p className="text-sm opacity-60 mt-1">
-                      High-performance vector similarity search engine
-                    </p>
-                  </div>
-                </PipelineStage>
-
-                {/* Retriever */}
-                <PipelineStage
-                  title="Retriever"
-                  description="Finds relevant chunks"
-                  isExpanded={isStageExpanded(pipeline.id, 'retriever')}
-                  onToggle={() => toggleStage(pipeline.id, 'retriever')}
-                >
-                  <div className="space-y-3">
-                    <div>
-                      <label className="text-sm opacity-60 block mb-2">Top-K Results</label>
-                      <Input
-                        type="number"
-                        value={pipeline.retriever.topK}
-                        onChange={(e) =>
-                          handleUpdatePipeline(pipeline.id, {
-                            retriever: { ...pipeline.retriever, topK: parseInt(e.target.value) },
-                          })
-                        }
-                        min={1}
-                        max={20}
-                      />
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <Checkbox
-                        checked={pipeline.retriever.deduplicate}
-                        onCheckedChange={(checked) =>
-                          handleUpdatePipeline(pipeline.id, {
-                            retriever: { ...pipeline.retriever, deduplicate: checked as boolean },
-                          })
-                        }
-                      />
-                      <label className="text-sm">Deduplicate similar chunks</label>
-                    </div>
-                  </div>
-                </PipelineStage>
-
-                {/* Reranker */}
-                <PipelineStage
-                  title="Reranker"
-                  description="Refines retrieval results"
-                  isExpanded={isStageExpanded(pipeline.id, 'reranker')}
-                  onToggle={() => toggleStage(pipeline.id, 'reranker')}
-                >
-                  <div className="space-y-3">
-                    <div className="flex items-center gap-2">
-                      <Checkbox
-                        checked={pipeline.reranker.enabled}
-                        disabled
-                        onCheckedChange={(checked) =>
-                          handleUpdatePipeline(pipeline.id, {
-                            reranker: { ...pipeline.reranker, enabled: checked as boolean },
-                          })
-                        }
-                      />
-                      <label className="text-sm opacity-60">Enable reranking (coming soon)</label>
-                    </div>
-                    {pipeline.reranker.enabled && (
-                      <Select
-                        value={pipeline.reranker.model}
-                        onValueChange={(value) =>
-                          handleUpdatePipeline(pipeline.id, {
-                            reranker: { ...pipeline.reranker, model: value },
-                          })
-                        }
-                      >
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="cohere-rerank">Cohere Rerank v3</SelectItem>
-                          <SelectItem value="bge-reranker">BGE Reranker</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    )}
-                  </div>
-                </PipelineStage>
-
-                {/* LLM Generator */}
-                <PipelineStage
-                  title="LLM Generator"
-                  description="Generates final answers"
-                  isExpanded={isStageExpanded(pipeline.id, 'llm')}
-                  onToggle={() => toggleStage(pipeline.id, 'llm')}
-                >
-                  <div className="space-y-3">
-                    <div>
-                      <label className="text-sm opacity-60 block mb-2">Model</label>
-                      <Select
-                        value={pipeline.llm.model}
-                        onValueChange={(value) =>
-                          handleUpdatePipeline(pipeline.id, { llm: { ...pipeline.llm, model: value } })
-                        }
-                    >
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {MODEL_OPTIONS.map((option) => (
-                          <SelectItem key={option.value} value={option.value}>
-                            {option.label}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div>
-                    <label className="text-sm opacity-60 block mb-2">
-                        Temperature: {pipeline.llm.temperature}
-                      </label>
-                      <Slider
-                        value={[pipeline.llm.temperature]}
-                        onValueChange={([value]) =>
-                          handleUpdatePipeline(pipeline.id, { llm: { ...pipeline.llm, temperature: value } })
-                        }
-                        min={0}
-                        max={1}
-                        step={0.1}
-                      />
-                    </div>
-                    <div>
-                      <label className="text-sm opacity-60 block mb-2">Max Tokens</label>
-                      <Input
-                        type="number"
-                        value={pipeline.llm.maxTokens}
-                        onChange={(e) =>
-                          handleUpdatePipeline(pipeline.id, {
-                            llm: { ...pipeline.llm, maxTokens: parseInt(e.target.value) },
-                          })
-                        }
-                      />
-                    </div>
-                  </div>
-                </PipelineStage>
-
-                {/* Judge Model */}
-                <PipelineStage
-                  title="Judge Model"
-                  description="Evaluates response quality"
-                  isExpanded={isStageExpanded(pipeline.id, 'judge')}
-                  onToggle={() => toggleStage(pipeline.id, 'judge')}
-                >
-                  <div className="space-y-3">
-                    <div>
-                      <Select
-                        value={pipeline.judge.model}
-                        onValueChange={(value) =>
-                          handleUpdatePipeline(pipeline.id, { judge: { model: value } })
-                        }
-                      >
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {MODEL_OPTIONS.map((option) => (
-                            <SelectItem key={option.value} value={option.value}>
-                              {option.label}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <div className="p-3 rounded text-sm space-y-1 bg-zinc-50">
-                      <p className="opacity-60">Evaluation Rubric:</p>
-                      <p>✓ Groundedness in context</p>
-                      <p>✓ Faithfulness to sources</p>
-                      <p>✓ Completeness of answer</p>
-                    </div>
-                  </div>
-                </PipelineStage>
-              </CardContent>
-            </Card>
-          ))}
-        </div>
-
-        {/* Bottom CTA */}
-        <div className="flex justify-end">
-          <Button onClick={onNext} size="lg" className="gap-2">
-            Run Experiment →
+                  <option value="keyword">Keyword (FTS5 BM25 — offline)</option>
+                  <option value="dense">Dense (Qdrant cosine)</option>
+                  <option value="hybrid">Hybrid (RRF fusion)</option>
+                </select>
+              </div>
+              {selectProfile('embedding', 'embedding')}
+              <label htmlFor={`${saved.id}-top-k-results`} className="block">
+                Top-K results
+                <Input
+                  id={`${saved.id}-top-k-results`}
+                  type="number"
+                  min={1}
+                  max={20}
+                  value={config.retriever.topK}
+                  onChange={(e) =>
+                    update({
+                      retriever: {
+                        ...config.retriever,
+                        topK: Number(e.target.value),
+                      },
+                    })
+                  }
+                />
+              </label>
+              <div className="flex items-center gap-2 text-sm">
+                <input
+                  id={`${saved.id}-reranker-enabled`}
+                  type="checkbox"
+                  checked={config.reranker.enabled}
+                  disabled={!profiles.some((p) => p.role === 'rerank')}
+                  onChange={(e) =>
+                    update({
+                      reranker: {
+                        ...config.reranker,
+                        enabled: e.target.checked,
+                      },
+                    })
+                  }
+                />
+                <label htmlFor={`${saved.id}-reranker-enabled`}>
+                  Enable HTTP reranker
+                  {!profiles.some((p) => p.role === 'rerank') &&
+                    ' (configure RERANK_BASE_URL & RERANK_MODEL)'}
+                </label>
+              </div>
+              {config.reranker.enabled && (
+                <div>
+                  <label
+                    htmlFor={`${saved.id}-rerank-failure-policy`}
+                    className="block text-sm"
+                  >
+                    Rerank failure policy
+                  </label>
+                  <select
+                    id={`${saved.id}-rerank-failure-policy`}
+                    className="block rounded border p-2"
+                    value={config.reranker.failurePolicy}
+                    onChange={(e) =>
+                      update({
+                        reranker: {
+                          ...config.reranker,
+                          failurePolicy: c.rerankFailurePolicy.parse(
+                            e.target.value,
+                          ),
+                        },
+                      })
+                    }
+                  >
+                    <option value="fail">Fail request</option>
+                    <option value="fallback">Fallback to pre-rerank</option>
+                  </select>
+                </div>
+              )}
+            </div>
+          </details>
+          <details>
+            <summary>Answer generation and judging</summary>
+            <div className="space-y-2 p-2">
+              {selectProfile('chat', 'llm')}
+              {selectProfile('judge', 'judge')}
+              <label htmlFor={`${saved.id}-temperature`} className="block">
+                Temperature{fixedTemperature && ' (this profile requires 1)'}
+                <Input
+                  id={`${saved.id}-temperature`}
+                  type="number"
+                  disabled={fixedTemperature && config.llm.temperature === 1}
+                  min={fixedTemperature ? 1 : 0}
+                  max={maxTemperature}
+                  step={0.1}
+                  value={config.llm.temperature}
+                  onChange={(e) =>
+                    update({
+                      llm: {
+                        ...config.llm,
+                        temperature: Number(e.target.value),
+                      },
+                    })
+                  }
+                />
+              </label>
+              <label
+                htmlFor={`${saved.id}-maximum-answer-tokens`}
+                className="block"
+              >
+                Maximum answer tokens
+                <Input
+                  id={`${saved.id}-maximum-answer-tokens`}
+                  type="number"
+                  min={1}
+                  max={32768}
+                  value={config.llm.maxTokens}
+                  onChange={(e) =>
+                    update({
+                      llm: { ...config.llm, maxTokens: Number(e.target.value) },
+                    })
+                  }
+                />
+              </label>
+            </div>
+          </details>
+        </fieldset>
+        <EditorActions
+          draft={draft}
+          pending={write.isPending}
+          save={() =>
+            write.mutate(
+              () =>
+                request(c.pipeline, path, 'PATCH', draft.value, draft.revision),
+              { onSuccess: draft.discard },
+            )
+          }
+        />
+        <div className="flex flex-wrap gap-2">
+          {!baseline && (
+            <Button variant="outline" onClick={setBaseline}>
+              Set as baseline
+            </Button>
+          )}
+          <Button
+            variant="outline"
+            disabled={write.isPending || draft.dirty}
+            onClick={() =>
+              write.mutate(() =>
+                request(
+                  c.pipeline,
+                  `${path}/copies`,
+                  'POST',
+                  {},
+                  saved.revision,
+                ),
+              )
+            }
+          >
+            Duplicate pipeline
+          </Button>
+          <Button
+            variant="outline"
+            disabled={write.isPending || draft.dirty}
+            onClick={() =>
+              write.mutate(() =>
+                request(
+                  c.z.undefined(),
+                  path,
+                  'DELETE',
+                  undefined,
+                  saved.revision,
+                ),
+              )
+            }
+          >
+            Archive pipeline
           </Button>
         </div>
+        {write.error && <p role="alert">{write.error.message}</p>}
+      </CardContent>
+    </Card>
+  );
+}
+function PipelineCard({
+  id,
+  ...props
+}: {
+  id: string;
+  profiles: c.Capabilities['profiles'];
+  baseline: boolean;
+  setBaseline: () => void;
+}) {
+  const detail = useQuery(pipelineQuery(id));
+  if (!detail.data)
+    return <p role="status">{detail.error?.message ?? 'Loading pipeline…'}</p>;
+  return <PipelineEditor saved={detail.data} {...props} />;
+}
+export function PipelinesPage() {
+  const list = useList('pipelines'),
+    capabilities = useCapabilities(),
+    write = useWrite('pipelines');
+  const [baseline, select] = useSelection('rag-eval.baseline', list.data);
+  return (
+    <div className="mx-auto max-w-6xl space-y-6 px-4 py-6 sm:p-8">
+      <h1>Pipeline Configuration</h1>
+      <Button
+        disabled={write.isPending || !list.data}
+        onClick={() =>
+          write.mutate(() =>
+            request(c.pipeline, 'pipelines', 'POST', {
+              name: list.data?.length
+                ? 'New configuration'
+                : 'Baseline configuration',
+            }),
+          )
+        }
+      >
+        Add pipeline
+      </Button>
+      {(write.error || list.error || capabilities.error) && (
+        <p role="alert">
+          {(write.error ?? list.error ?? capabilities.error)?.message}
+        </p>
+      )}
+      {list.isPending && <p role="status">Loading pipelines…</p>}
+      {list.data?.length === 0 && (
+        <p>Create a pipeline to configure retrieval and generation.</p>
+      )}
+      <div className="grid items-start gap-4 md:grid-cols-2">
+        {list.data?.map((p) => (
+          <PipelineCard
+            key={p.id}
+            id={p.id}
+            profiles={capabilities.data?.profiles ?? []}
+            baseline={baseline === p.id}
+            setBaseline={() => select(p.id)}
+          />
+        ))}
       </div>
+      {!!list.data?.length && (
+        <Button asChild>
+          <Link to="/experiments">Proceed to experiments</Link>
+        </Button>
+      )}
+      <RetrievalPreviewPanel />
     </div>
   );
 }

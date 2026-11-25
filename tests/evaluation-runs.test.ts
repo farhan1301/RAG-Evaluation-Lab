@@ -1,0 +1,3431 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as c from '@rag-eval/contracts';
+import { readConfig } from '../backend/src/config/env';
+import { openDatabase, ready } from '../backend/src/db/database';
+import { Datasets } from '../backend/src/db/datasets';
+import { Indexes } from '../backend/src/db/indexes';
+import { Jobs } from '../backend/src/db/jobs';
+import { Pipelines } from '../backend/src/db/pipelines';
+import { Runs } from '../backend/src/db/runs';
+import { EvaluationRunner } from '../backend/src/evaluation/runner';
+import { createApp } from '../backend/src/http/app';
+import { CloudParser } from '../backend/src/ingestion/cloud';
+import { runOne } from '../backend/src/jobs/run';
+import { createLogger } from '../backend/src/lib/logger';
+import {
+  ProviderRegistry,
+  type ProviderTransports,
+} from '../backend/src/providers/registry';
+import { ApiError } from '../backend/src/errors';
+import { IndexBuilder } from '../backend/src/retrieval/indexer';
+import {
+  QdrantStore,
+  type QdrantClientLike,
+} from '../backend/src/retrieval/qdrant';
+import { RetrievalService } from '../backend/src/retrieval/service';
+import { send } from './inProcess';
+
+function openaiChatResponse(
+  content: string,
+  model = 'fixture-chat',
+  usage = { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 },
+) {
+  return new Response(
+    JSON.stringify({
+      id: 'chatcmpl-fixture',
+      object: 'chat.completion',
+      created: 1700000000,
+      model,
+      choices: [
+        {
+          index: 0,
+          message: { role: 'assistant', content },
+          finish_reason: 'stop',
+        },
+      ],
+      usage,
+    }),
+    {
+      status: 200,
+      headers: {
+        'content-type': 'application/json',
+        'x-request-id': 'req-chat-fixture',
+      },
+    },
+  );
+}
+
+describe('server-side experiments, durable runs, checkpointing, and HTTP endpoints', () => {
+  let dir: string;
+  let dbPath: string;
+  let db: ReturnType<typeof openDatabase>;
+  let clock: number;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'rag-eval-phase6-'));
+    dbPath = join(dir, 'workspace.db');
+    db = openDatabase(dbPath);
+    clock = 1_700_000_000_000;
+  });
+
+  afterEach(() => {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function setupStack(
+    env: NodeJS.ProcessEnv = {},
+    transports: ProviderTransports = {},
+    qdrant?: QdrantStore,
+  ) {
+    const config = readConfig({
+      BLOB_DIRECTORY: join(dir, 'blobs'),
+      ...env,
+    });
+    const jobs = new Jobs(db, () => clock, 5000);
+    const datasets = new Datasets(db, jobs);
+    const pipelines = new Pipelines(db);
+    const indexes = new Indexes(db, jobs, () => clock);
+    const runs = new Runs(db, datasets, pipelines, indexes, jobs, () => clock);
+    const providers = new ProviderRegistry(config, transports);
+    const indexBuilder = new IndexBuilder({
+      indexes,
+      providers,
+      qdrant,
+      now: () => clock,
+    });
+    const retrieval = new RetrievalService({
+      indexes,
+      providers,
+      now: () => clock,
+    });
+    const evaluationRunner = new EvaluationRunner({
+      runs,
+      indexes,
+      indexBuilder,
+      retrieval,
+      providers,
+      now: () => clock,
+      retryDelayMs: 1,
+    });
+    const app = createApp({
+      config,
+      datasets,
+      pipelines,
+      indexes,
+      runs,
+      providers,
+      retrieval,
+      logger: createLogger({ write: () => {} }),
+      ready: () => true,
+      now: () => clock,
+    });
+    return {
+      config,
+      jobs,
+      datasets,
+      pipelines,
+      indexes,
+      runs,
+      providers,
+      indexBuilder,
+      retrieval,
+      evaluationRunner,
+      app,
+    };
+  }
+
+  function oneTaskRun(
+    stack: ReturnType<typeof setupStack>,
+    pipelineIds: string[],
+    judgeEnabled = false,
+  ) {
+    const sample = stack.datasets.sample().value;
+    const taskId = sample.tasks.find(
+      (task) => task.answerable && task.referenceFacts.length,
+    )?.id;
+    if (!taskId) throw new Error('Missing answerable fixture task');
+    let revision = sample.revision;
+    for (const task of sample.tasks.filter((t) => t.id !== taskId)) {
+      revision = stack.datasets.editTask(
+        sample.id,
+        revision,
+        task.id,
+        undefined,
+      ).revision;
+    }
+    const mode = judgeEnabled ? 'full_rag' : 'retrieval_only';
+    const exp = stack.runs.createExperiment({
+      name: 'Timeout recovery',
+      datasetId: sample.id,
+      baselinePipelineId: pipelineIds[0],
+      pipelineIds,
+      mode,
+    });
+    const { run, job } = stack.runs.createRun(
+      exp.id,
+      { datasetRevision: revision, mode, judgeEnabled },
+      stack.config,
+    );
+    return {
+      run,
+      job,
+      work: (signal?: AbortSignal) =>
+        runOne(stack.jobs, {
+          ...stack,
+          directory: join(dir, 'blobs'),
+          cloud: new CloudParser('', undefined),
+          signal,
+        }),
+    };
+  }
+
+  it('requires explicit retry after reclaiming a recorded rerank timeout', async () => {
+    const rerank = vi.fn<typeof fetch>(
+      async () => new Response(null, { status: 504 }),
+    );
+    const stack = setupStack(
+      { RERANK_BASE_URL: 'http://rerank.invalid', RERANK_MODEL: 'rerank' },
+      { rerank },
+    );
+    const pipeline = stack.pipelines.create({
+      name: 'Reranked',
+      config: {
+        retriever: { mode: 'keyword', topK: 3, deduplicate: false },
+        reranker: { enabled: true, model: 'rerank', failurePolicy: 'fail' },
+      },
+    });
+    const { run, job, work } = oneTaskRun(stack, [pipeline.id]);
+    const crash = new AbortController();
+    vi.spyOn(stack.runs, 'saveTaskRetrieval').mockImplementationOnce(() => {
+      crash.abort();
+      throw Error('Interrupted before retrieval checkpoint');
+    });
+    await work(crash.signal);
+    expect(rerank).toHaveBeenCalledTimes(1);
+    clock += 10_000;
+    await work();
+    expect(rerank).toHaveBeenCalledTimes(1);
+    expect(
+      db
+        .prepare(
+          'SELECT status, error_code FROM provider_calls WHERE job_id = ?',
+        )
+        .all(job.id),
+    ).toEqual([{ status: 'ambiguous', error_code: 'timeout' }]);
+    expect(stack.jobs.get(job.id).state).toBe('failed');
+    expect(stack.runs.getRun(run.id).errorMessage).toMatch(/explicit retry/i);
+    const retry = stack.jobs.retry(job.id);
+    rerank.mockResolvedValueOnce(
+      Response.json({ results: [{ index: 0, score: 1 }] }),
+    );
+    await work();
+    expect(rerank).toHaveBeenCalledTimes(2);
+    expect(stack.jobs.get(retry.id).state).toBe('succeeded');
+  });
+
+  it('keeps checkpointed judge timeouts retryable after reclaim', async () => {
+    const judge = vi.fn(() => new Response(null, { status: 504 }));
+    const stack = setupStack(
+      {
+        OPENAI_API_KEY: 'fixture',
+        OPENAI_CHAT_MODEL: 'chat',
+        OPENAI_JUDGE_MODEL: 'judge',
+      },
+      {
+        openai: async (_url, init) =>
+          JSON.parse(String(init?.body)).model === 'judge'
+            ? judge()
+            : openaiChatResponse(
+                JSON.stringify({
+                  answer: 'An answer.',
+                  citations: [],
+                  abstained: false,
+                }),
+                'chat',
+              ),
+      },
+    );
+    const pipeline = stack.pipelines.create({
+      name: 'Judged',
+      config: {
+        retriever: { mode: 'keyword', topK: 3, deduplicate: false },
+        llm: { model: 'chat', temperature: 0.2, maxTokens: 200 },
+        judge: { model: 'judge' },
+      },
+    });
+    const { run, job, work } = oneTaskRun(stack, [pipeline.id], true);
+    const crash = new AbortController();
+    vi.spyOn(stack.runs, 'finalizeRunTask').mockImplementationOnce(() => {
+      crash.abort();
+      throw Error('Interrupted after metric checkpoints');
+    });
+    await work(crash.signal);
+    expect(judge).toHaveBeenCalledTimes(5);
+    expect(
+      db
+        .prepare(
+          "SELECT count(*) AS n FROM metric_observations WHERE status='judge_timeout'",
+        )
+        .get()?.n,
+    ).toBe(5);
+    clock += 10_000;
+    await work();
+    expect(judge).toHaveBeenCalledTimes(5);
+    expect(stack.runs.listRunTasks(run.id, 10, 0).items[0]).toMatchObject({
+      state: 'partial',
+      judgeState: 'failed',
+    });
+    expect(stack.runs.getRun(run.id).state).toBe('failed');
+    expect(stack.jobs.get(job.id).state).toBe('failed');
+    expect(stack.jobs.retry(job.id).parentId).toBe(job.id);
+    // Even an inconsistent succeeded checkpoint cannot hide the job's receipts.
+    db.prepare(
+      "UPDATE run_tasks SET state='succeeded', error_code=NULL WHERE run_id=?",
+    ).run(run.id);
+    db.prepare('DELETE FROM metric_observations WHERE run_id=?').run(run.id);
+    expect(
+      stack.runs.getRunTaskOutcomeSummary(run.id, job.id)
+        .hasOutstandingAmbiguousStage,
+    ).toBe(true);
+  });
+
+  it('keeps a mixed keyword and dense run retryable after a corpus embedding timeout', async () => {
+    const embed = vi.fn<typeof fetch>(
+      async () => new Response(null, { status: 504 }),
+    );
+    const stack = setupStack(
+      {
+        OPENAI_API_KEY: 'fixture',
+        OPENAI_EMBED_MODEL: 'embed',
+        QDRANT_URL: 'http://qdrant.invalid',
+      },
+      { openai: embed },
+      new QdrantStore({ url: 'http://qdrant.invalid' }),
+    );
+    const pipelines = (['keyword', 'dense'] as const).map((mode) =>
+      stack.pipelines.create({
+        name: mode,
+        config: {
+          retriever: { mode, topK: 3, deduplicate: false },
+          embedding: { model: 'embed' },
+        },
+      }),
+    );
+    const { run, job, work } = oneTaskRun(
+      stack,
+      pipelines.map((p) => p.id),
+    );
+    await work();
+    expect(embed).toHaveBeenCalledTimes(1);
+    expect(
+      db
+        .prepare(
+          'SELECT operation, status, error_code FROM provider_calls WHERE job_id=?',
+        )
+        .all(job.id),
+    ).toEqual([
+      { operation: 'corpus_embed', status: 'ambiguous', error_code: 'timeout' },
+    ]);
+    expect(
+      stack.runs.listRunTasks(run.id, 10, 0, pipelines[0].id).items[0].state,
+    ).toBe('succeeded');
+    expect(
+      stack.runs.listRunTasks(run.id, 10, 0, pipelines[1].id).items[0],
+    ).toMatchObject({ state: 'failed', errorCode: 'ambiguous_outcome' });
+    expect(stack.runs.getRun(run.id).errorMessage).toMatch(/explicit retry/i);
+    expect(stack.jobs.get(job.id).state).toBe('failed');
+    expect(stack.jobs.retry(job.id).parentId).toBe(job.id);
+  });
+
+  it('upgrades a Phase 5 (version 3) database cleanly and enforces null-observation and unknown-cost DB invariants', () => {
+    const oldPath = join(dir, 'v3.db');
+    const v3 = openDatabase(oldPath, 3);
+    try {
+      const ds = new Datasets(v3).sample().value;
+      expect(ds.tasks.length).toBe(10);
+    } finally {
+      v3.close();
+    }
+    const upgraded = openDatabase(oldPath);
+    try {
+      expect(ready(upgraded)).toBe(true);
+      const ds = new Datasets(upgraded).list(10).items;
+      expect(ds).toHaveLength(1);
+
+      // Verify CHECK constraint: non-scored metric observation CANNOT store a numeric value.
+      expect(() =>
+        upgraded
+          .prepare(
+            `INSERT INTO metric_observations(
+              id, run_id, pipeline_id, task_version_id, run_task_id,
+              metric_id, metric_version, cutoff, evaluation_unit, status, value
+            ) VALUES ('o1','r','p','tv','rt','faithfulness','v1',0,'answer','judge_malformed',0)`,
+          )
+          .run(),
+      ).toThrow();
+
+      // Verify CHECK constraint: unknown cost_status CANNOT store a numeric cost_usd.
+      expect(() =>
+        upgraded
+          .prepare(
+            `INSERT INTO provider_calls(
+              id, stage_key, operation, provider, model, attempt_number, is_retry,
+              status, latency_ms, usage_status, price_version, cost_status, cost_usd, created_at
+            ) VALUES ('c1','sk1','generate','openai','m',1,0,'succeeded',10,'known','v1','unknown',0.01,'2026-01-01T00:00:00Z')`,
+          )
+          .run(),
+      ).toThrow();
+    } finally {
+      upgraded.close();
+    }
+  });
+
+  it('runs retrieval-only mode offline with zero credentials, freezes snapshots against subsequent edits, and yields identical deterministic metrics and evidence order across repeated runs', async () => {
+    const {
+      app,
+      jobs,
+      datasets,
+      pipelines,
+      indexes,
+      indexBuilder,
+      runs,
+      evaluationRunner,
+    } = setupStack();
+
+    const sample = datasets.sample().value;
+    const p1 = pipelines.create({
+      name: 'Keyword top-3',
+      config: {
+        chunking: { strategy: 'character-window', chunkSize: 300, overlap: 20 },
+        retriever: { mode: 'keyword', topK: 3, deduplicate: false },
+      },
+    });
+    const p2 = pipelines.create({
+      name: 'Keyword top-5',
+      config: {
+        chunking: { strategy: 'sentence-packed', chunkSize: 300, overlap: 20 },
+        retriever: { mode: 'keyword', topK: 5, deduplicate: false },
+      },
+    });
+
+    const expRes = await send(app, 'POST', '/api/v1/experiments', {
+      name: 'Offline retrieval comparison',
+      datasetId: sample.id,
+      baselinePipelineId: p1.id,
+      pipelineIds: [p1.id, p2.id],
+      mode: 'retrieval_only',
+    });
+    expect(expRes.status).toBe(201);
+    const exp = c.experiment.parse(expRes.body);
+
+    // Enqueue Run 1 with idempotency key
+    const run1Res = await send(
+      app,
+      'POST',
+      `/api/v1/experiments/${exp.id}/runs`,
+      { cutoffs: [1, 3, 5] },
+      { 'idempotency-key': 'run-key-1' },
+    );
+    expect(run1Res.status).toBe(202);
+    const run1Created = c.createRunResult.parse(run1Res.body);
+    expect(run1Res.headers.location).toBe(`/api/v1/jobs/${run1Created.job.id}`);
+
+    // Idempotent replay returns same run & job (200)
+    const replayRes = await send(
+      app,
+      'POST',
+      `/api/v1/experiments/${exp.id}/runs`,
+      { cutoffs: [1, 3, 5] },
+      { 'idempotency-key': 'run-key-1' },
+    );
+    expect(replayRes.status).toBe(200);
+    expect(c.createRunResult.parse(replayRes.body)).toMatchObject({
+      reused: true,
+      run: { id: run1Created.run.id },
+      job: { id: run1Created.job.id },
+    });
+
+    // Reusing key with different body -> 409 conflict
+    const conflictRes = await send(
+      app,
+      'POST',
+      `/api/v1/experiments/${exp.id}/runs`,
+      { cutoffs: [1, 5] },
+      { 'idempotency-key': 'run-key-1' },
+    );
+    expect(conflictRes.status).toBe(409);
+
+    // Mutate dataset and pipeline AFTER enqueueing Run 1 to prove snapshot freezing!
+    datasets.rename(sample.id, 1, 'Mutated after freeze');
+    pipelines.edit(p1.id, 1, {
+      name: 'Mutated pipeline',
+      config: { ...p1.config, retriever: { ...p1.config.retriever, topK: 1 } },
+    });
+
+    // Enqueue Run 2 pinned to dataset revision 1 using frozen pipeline 2 + a copy of original p1
+    const p1OrigCopy = pipelines.create({
+      name: 'Keyword top-3',
+      config: p1.config,
+    });
+    const exp2 = runs.createExperiment({
+      name: 'Repeat fixture',
+      datasetId: sample.id,
+      baselinePipelineId: p1OrigCopy.id,
+      pipelineIds: [p1OrigCopy.id, p2.id],
+      mode: 'retrieval_only',
+    });
+    const run2Created = runs.createRun(
+      exp2.id,
+      { datasetRevision: 1, cutoffs: [1, 3, 5] },
+      {
+        capabilities: readConfig({}).capabilities,
+        pricing: readConfig({}).pricing,
+        budgets: { maxTokens: null, maxCostUsd: null },
+      },
+    );
+
+    const workerOpts = {
+      directory: join(dir, 'blobs'),
+      cloud: new CloudParser('', undefined),
+      indexes,
+      indexBuilder,
+      runs,
+      evaluationRunner,
+    };
+    while (await runOne(jobs, workerOpts)) {
+      clock += 10;
+    }
+
+    const r1 = c.runDetail.parse(
+      (await send(app, 'GET', `/api/v1/runs/${run1Created.run.id}`)).body,
+    );
+    const r2 = c.runDetail.parse(
+      (await send(app, 'GET', `/api/v1/runs/${run2Created.run.id}`)).body,
+    );
+
+    expect(r1.state).toBe('succeeded');
+    expect(r2.state).toBe('succeeded');
+    // Snapshot preserved frozen revision 1 and original pipeline name/topK!
+    expect(r1.datasetRevision).toBe(1);
+    expect(r1.datasetName).toBe('RAG fundamentals');
+    expect(r1.pipelines[0]?.pipelineName).toBe('Keyword top-3');
+    expect(r1.pipelines[0]?.config.retriever.topK).toBe(3);
+
+    // Run 2 reused already-built index generations!
+    expect(r2.pipelines[0]?.indexReused).toBe(true);
+    expect(r2.pipelines[1]?.indexReused).toBe(true);
+
+    // Sample has 9 answerable tasks and 1 unanswerable task -> 9 eligible, 1 excluded (unanswerable).
+    const r1Hit3 = r1.pipelines[0]?.retrievalMetrics.find(
+      (m) => m.metricId === 'hit_at_k' && m.cutoff === 3,
+    );
+    expect(r1Hit3).toMatchObject({
+      eligibleCount: 9,
+      totalCount: 10,
+      excludedCount: 1,
+      exclusionBreakdown: { unanswerable: 1 },
+    });
+    expect(r1Hit3?.mean).toBeGreaterThan(0.5);
+
+    // Running the same fixture twice yields BIT-FOR-BIT identical metrics and evidence order!
+    expect(r2.pipelines[0]?.retrievalMetrics).toEqual(
+      r1.pipelines[0]?.retrievalMetrics,
+    );
+    expect(r2.pipelines[1]?.retrievalMetrics).toEqual(
+      r1.pipelines[1]?.retrievalMetrics,
+    );
+
+    const tasks1 = c
+      .page(c.runTaskDetail)
+      .parse(
+        (
+          await send(
+            app,
+            'GET',
+            `/api/v1/runs/${r1.id}/tasks?pipelineId=${p1.id}`,
+          )
+        ).body,
+      ).items;
+    const tasks2 = c
+      .page(c.runTaskDetail)
+      .parse(
+        (
+          await send(
+            app,
+            'GET',
+            `/api/v1/runs/${r2.id}/tasks?pipelineId=${p1OrigCopy.id}`,
+          )
+        ).body,
+      ).items;
+
+    expect(tasks1.map((t) => t.retrievedItems.map((i) => i.chunkId))).toEqual(
+      tasks2.map((t) => t.retrievedItems.map((i) => i.chunkId)),
+    );
+  });
+
+  it('reuses identical retrieval and answer stages across pipelines, records retry spend separately, leaves missing prices unknown, and keeps failed/refused judge observations null', async () => {
+    let chatCalls = 0;
+    let firstAnswerFailedOnce = false;
+    let faithfulnessMalformedOnce = false;
+    let refusedRelevanceOnce = false;
+
+    const fakeOpenAI: typeof fetch = vi.fn(async (_url, init) => {
+      chatCalls += 1;
+      const body = JSON.parse(String(init?.body ?? '{}')) as {
+        model: string;
+        messages: Array<{ role: string; content: string }>;
+        response_format?: { json_schema?: { name?: string } };
+      };
+      const schemaName = body.response_format?.json_schema?.name ?? '';
+
+      if (schemaName === 'grounded_answer') {
+        if (!firstAnswerFailedOnce) {
+          firstAnswerFailedOnce = true;
+          return new Response('Transient overload', { status: 503 });
+        }
+        const userText = body.messages[1]?.content ?? '';
+        const chunkMatch = userText.match(/\(id=([a-f0-9-]{36})/);
+        const chunkId = chunkMatch?.[1];
+        if (userText.includes('numeric chunk size')) {
+          return openaiChatResponse(
+            JSON.stringify({
+              answer: 'The context does not specify a numeric chunk size.',
+              citations: [],
+              abstained: true,
+            }),
+            body.model,
+            { prompt_tokens: 200, completion_tokens: 40, total_tokens: 240 },
+          );
+        }
+        return openaiChatResponse(
+          JSON.stringify({
+            answer: 'text-embedding-3-small balances cost and performance.',
+            citations: chunkId ? [chunkId] : [],
+            abstained: false,
+          }),
+          body.model,
+          { prompt_tokens: 200, completion_tokens: 50, total_tokens: 250 },
+        );
+      }
+
+      if (schemaName === 'judge_faithfulness') {
+        if (!faithfulnessMalformedOnce) {
+          faithfulnessMalformedOnce = true;
+          return openaiChatResponse('not valid json', body.model, {
+            prompt_tokens: 100,
+            completion_tokens: 20,
+            total_tokens: 120,
+          });
+        }
+        const chunkMatch = (body.messages[1]?.content ?? '').match(
+          /chunkId=([a-f0-9-]{36})/,
+        );
+        return openaiChatResponse(
+          JSON.stringify({
+            refused: false,
+            reason: '',
+            claims: [
+              {
+                claim: 'text-embedding-3-small balances cost and performance',
+                verdict: 'supported',
+                evidenceChunkIds: chunkMatch ? [chunkMatch[1]] : [],
+                quote: '',
+              },
+            ],
+          }),
+          body.model,
+          { prompt_tokens: 120, completion_tokens: 30, total_tokens: 150 },
+        );
+      }
+
+      if (schemaName === 'judge_answer_relevance') {
+        if (!refusedRelevanceOnce) {
+          refusedRelevanceOnce = true;
+          return openaiChatResponse(
+            JSON.stringify({
+              refused: true,
+              grade: 0,
+              rationale: 'Refused in fixture.',
+            }),
+            body.model,
+            { prompt_tokens: 80, completion_tokens: 20, total_tokens: 100 },
+          );
+        }
+        return openaiChatResponse(
+          JSON.stringify({
+            refused: false,
+            grade: 4,
+            rationale: 'Fully responsive.',
+          }),
+          body.model,
+        );
+      }
+
+      if (schemaName === 'judge_context_precision') {
+        const ids = Array.from(
+          (body.messages[1]?.content ?? '').matchAll(
+            /chunkId=([a-f0-9-]{36})/g,
+          ),
+        ).map((m) => m[1]);
+        return openaiChatResponse(
+          JSON.stringify({
+            refused: false,
+            reason: '',
+            passages: ids.map((chunkId) => ({
+              chunkId,
+              useful: true,
+              rationale: 'Relevant.',
+            })),
+          }),
+          body.model,
+        );
+      }
+
+      if (schemaName === 'judge_context_recall') {
+        const chunkMatch = (body.messages[1]?.content ?? '').match(
+          /chunkId=([a-f0-9-]{36})/,
+        );
+        return openaiChatResponse(
+          JSON.stringify({
+            refused: false,
+            reason: '',
+            facts: [
+              {
+                factIndex: 1,
+                supported: true,
+                evidenceChunkIds: chunkMatch ? [chunkMatch[1]] : [],
+                rationale: 'Supported.',
+              },
+            ],
+          }),
+          body.model,
+        );
+      }
+
+      // judge_answer_correctness
+      return openaiChatResponse(
+        JSON.stringify({
+          refused: false,
+          facts: [{ factIndex: 1, status: 'satisfied', rationale: 'Matched.' }],
+          criticalContradiction: false,
+          acceptanceCriteriaMet: true,
+          rationale: 'Correct.',
+        }),
+        body.model,
+      );
+    });
+
+    // Price ONLY the chat model; leave the judge model UNPRICED!
+    const priceSchedule = JSON.stringify({
+      version: 'partial-price-v1',
+      currency: 'USD',
+      entries: [
+        {
+          model: 'priced-chat',
+          provider: 'openai',
+          unit: 'per_1m_tokens',
+          inputUsd: 2.0,
+          outputUsd: 8.0,
+        },
+      ],
+    });
+
+    const stack = setupStack(
+      {
+        OPENAI_API_KEY: 'fixture-key',
+        OPENAI_CHAT_MODEL: 'priced-chat',
+        OPENAI_JUDGE_MODEL: 'unpriced-judge',
+        PRICE_SCHEDULE_JSON: priceSchedule,
+      },
+      { openai: fakeOpenAI },
+    );
+
+    // Deterministically keep the 1 unanswerable task and 1 single-fact answerable task
+    const sample = stack.datasets.sample().value;
+    const keepUnanswerable = sample.tasks.find((t) => !t.answerable);
+    const keepAnswerable = sample.tasks.find(
+      (t) =>
+        t.answerable &&
+        t.referenceFacts.length === 1 &&
+        t.question.includes('balances cost and performance'),
+    );
+    if (!keepUnanswerable || !keepAnswerable) {
+      throw new Error('Missing expected sample fixture tasks.');
+    }
+    const keepIds = new Set([keepUnanswerable.id, keepAnswerable.id]);
+    let rev = sample.revision;
+    for (const extra of sample.tasks) {
+      if (!keepIds.has(extra.id)) {
+        rev = stack.datasets.editTask(
+          sample.id,
+          rev,
+          extra.id,
+          undefined,
+        ).revision;
+      }
+    }
+
+    // Two pipelines with IDENTICAL chunking/retrieval/chat config -> pipeline 2 must reuse index, retrieval, AND answer!
+    const pA = stack.pipelines.create({
+      name: 'Pipeline A',
+      config: {
+        retriever: { mode: 'keyword', topK: 3, deduplicate: false },
+        llm: { model: 'priced-chat', temperature: 0.2, maxTokens: 300 },
+        judge: { model: 'unpriced-judge' },
+      },
+    });
+    const pB = stack.pipelines.copy(pA.id, 1, 'Pipeline B');
+
+    const searchSpy = vi.spyOn(stack.retrieval, 'search');
+
+    const exp = stack.runs.createExperiment({
+      name: 'Full RAG test',
+      datasetId: sample.id,
+      baselinePipelineId: pA.id,
+      pipelineIds: [pA.id, pB.id],
+      mode: 'full_rag',
+    });
+
+    const created = stack.runs.createRun(
+      exp.id,
+      { datasetRevision: rev, mode: 'full_rag', judgeEnabled: true },
+      {
+        capabilities: stack.config.capabilities,
+        pricing: stack.config.pricing,
+        budgets: stack.config.budgets,
+      },
+    );
+
+    const workerOpts = {
+      directory: join(dir, 'blobs'),
+      cloud: new CloudParser('', undefined),
+      indexes: stack.indexes,
+      indexBuilder: stack.indexBuilder,
+      runs: stack.runs,
+      evaluationRunner: stack.evaluationRunner,
+    };
+    while (await runOne(stack.jobs, workerOpts)) {
+      clock += 25;
+    }
+
+    const detail = stack.runs.getRun(created.run.id);
+    expect(detail.state).toBe('succeeded');
+
+    // Stage reuse: 2 tasks across 2 identical pipelines -> search executed ONCE per task (2 calls, not 4!)
+    expect(searchSpy).toHaveBeenCalledTimes(2);
+    expect(detail.pipelines[1]?.indexReused).toBe(true);
+    const pBTasks = stack.runs.listRunTasks(detail.id, 10, 0, pB.id).items;
+    expect(pBTasks.every((t) => t.answer?.reusedFromRunTaskId !== null)).toBe(
+      true,
+    );
+
+    // Retry spend is recorded and visible separately!
+    expect(detail.cost.retry.totalCalls).toBeGreaterThanOrEqual(2); // 1 chat 503 retry + 1 judge repair
+    expect(detail.cost.retry.knownUsd).toBeGreaterThan(0);
+    expect(detail.tokens.retryTokens).toBeGreaterThan(0);
+
+    // Unpriced judge model remains UNKNOWN (never estimated!), making total run spend PARTIAL.
+    expect(detail.cost.judging.status).toBe('unknown');
+    expect(detail.cost.judging.totalUsd).toBeNull();
+    expect(detail.cost.judging.unpricedModels).toContain('unpriced-judge');
+    expect(detail.cost.total.status).toBe('partial');
+    expect(detail.cost.total.totalUsd).toBeNull();
+    expect(detail.cost.total.knownUsd).toBeGreaterThan(0);
+
+    // Refused answer_relevance yielded a NULL observation with recorded reason, never 0!
+    const pATasks = stack.runs.listRunTasks(detail.id, 10, 0, pA.id).items;
+    const answerableTask = pATasks.find((t) => t.answerable);
+    const unanswerableTask = pATasks.find((t) => !t.answerable);
+    const relObs = answerableTask?.observations.find(
+      (o) => o.metricId === 'answer_relevance',
+    );
+    expect(relObs).toMatchObject({
+      status: 'judge_refused',
+      value: null,
+      reason: 'Refused in fixture.',
+    });
+    expect(relObs?.metadata?.rawResponseHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(relObs?.metadata?.rubricVersion).toBe('answer-relevance-v1');
+    expect(relObs?.metadata?.judgeModel).toBe('unpriced-judge');
+
+    // Faithfulness repair kept BOTH attempts in judge_attempts!
+    const faithAttempts = answerableTask?.judgeAttempts.filter(
+      (a) => a.metricId === 'faithfulness',
+    );
+    expect(faithAttempts).toHaveLength(2);
+    expect(faithAttempts?.[0]?.status).toBe('malformed');
+    expect(faithAttempts?.[1]?.status).toBe('succeeded');
+    expect(faithAttempts?.[1]?.isRepair).toBe(true);
+
+    // Abstention metrics reported separately for answerable vs unanswerable!
+    expect(
+      unanswerableTask?.observations.find(
+        (o) => o.metricId === 'abstention_unanswerable',
+      ),
+    ).toMatchObject({ status: 'scored', value: 1 });
+    expect(
+      answerableTask?.observations.find(
+        (o) => o.metricId === 'abstention_answerable',
+      ),
+    ).toMatchObject({ status: 'scored', value: 1 });
+
+    // Task cross-pipeline endpoint returns both pipelines for a given taskId
+    const crossRes = await send(
+      stack.app,
+      'GET',
+      `/api/v1/runs/${detail.id}/tasks/${answerableTask?.taskId}`,
+    );
+    expect(crossRes.status).toBe(200);
+    expect((crossRes.body as { items: unknown[] }).items).toHaveLength(2);
+    expect(chatCalls).toBeGreaterThan(0);
+  });
+
+  it('checkpoints per pipeline/task so a worker restart resumes without redoing completed work', async () => {
+    const stack = setupStack();
+    const sample = stack.datasets.sample().value;
+    // Keep 3 tasks for a crisp checkpoint test
+    let rev = sample.revision;
+    for (const extra of sample.tasks.slice(3)) {
+      rev = stack.datasets.editTask(
+        sample.id,
+        rev,
+        extra.id,
+        undefined,
+      ).revision;
+    }
+    const p1 = stack.pipelines.create({
+      name: 'Keyword resume',
+      config: { retriever: { mode: 'keyword', topK: 3, deduplicate: false } },
+    });
+    const exp = stack.runs.createExperiment({
+      name: 'Resume fixture',
+      datasetId: sample.id,
+      baselinePipelineId: p1.id,
+      pipelineIds: [p1.id],
+      mode: 'retrieval_only',
+    });
+    const created = stack.runs.createRun(
+      exp.id,
+      { datasetRevision: rev },
+      {
+        capabilities: stack.config.capabilities,
+        pricing: stack.config.pricing,
+        budgets: stack.config.budgets,
+      },
+    );
+
+    // Abort the first worker right after task 1's retrieval completes & checkpoints!
+    const crashController = new AbortController();
+    const queriedQuestions: string[] = [];
+    const origSearch = stack.retrieval.search.bind(stack.retrieval);
+    vi.spyOn(stack.retrieval, 'search').mockImplementation(
+      async (genId, req, sig, audit) => {
+        queriedQuestions.push(req.query);
+        const res = await origSearch(genId, req, sig, audit);
+        if (queriedQuestions.length === 1) {
+          // Allow task 1 to save & checkpoint, then crash before task 2 starts
+          queueMicrotask(() => crashController.abort());
+        }
+        return res;
+      },
+    );
+
+    const workerOpts = {
+      directory: join(dir, 'blobs'),
+      cloud: new CloudParser('', undefined),
+      indexes: stack.indexes,
+      indexBuilder: stack.indexBuilder,
+      runs: stack.runs,
+      evaluationRunner: stack.evaluationRunner,
+    };
+
+    await runOne(stack.jobs, { ...workerOpts, signal: crashController.signal });
+
+    // Worker 1 completed task 1 and stopped without releasing lease (simulated crash).
+    const midRun = stack.runs.getRun(created.run.id);
+    expect(midRun.completedUnits).toBe(1);
+    expect(midRun.totalUnits).toBe(3);
+    expect(queriedQuestions).toHaveLength(1);
+
+    // Advance clock past lease expiry so Worker 2 reclaims the run and resumes from task 2!
+    clock += 10_000;
+    await runOne(stack.jobs, workerOpts);
+
+    const finished = stack.runs.getRun(created.run.id);
+    expect(finished.state).toBe('succeeded');
+    expect(finished.completedUnits).toBe(3);
+    // Total search calls across BOTH workers is 3 (task 1 was NEVER redone!).
+    expect(queriedQuestions).toHaveLength(3);
+    expect(new Set(queriedQuestions).size).toBe(3);
+  });
+
+  it('validates capabilities before enqueue and enforces same-origin and cross-origin rules on new endpoints', async () => {
+    const stack = setupStack({ CORS_ORIGINS: 'https://allowed.example' });
+    const sample = stack.datasets.sample().value;
+    const p1 = stack.pipelines.create({
+      name: 'Keyword',
+      config: { retriever: { mode: 'keyword', topK: 3, deduplicate: false } },
+    });
+
+    // Missing chat capability rejects full_rag BEFORE enqueueing
+    const exp = stack.runs.createExperiment({
+      name: 'CORS test',
+      datasetId: sample.id,
+      baselinePipelineId: p1.id,
+      pipelineIds: [p1.id],
+      mode: 'full_rag',
+    });
+    const missingCap = await send(
+      stack.app,
+      'POST',
+      `/api/v1/experiments/${exp.id}/runs`,
+      { mode: 'full_rag' },
+    );
+    expect(missingCap.status).toBe(422);
+    expect(c.errorEnvelope.parse(missingCap.body).error.code).toBe(
+      'missing_capability',
+    );
+    expect(stack.runs.listRuns(10).items).toHaveLength(0);
+
+    // Same-origin allowed for experiment creation, run submission, and run reads
+    const sameOriginCreate = await send(
+      stack.app,
+      'POST',
+      '/api/v1/experiments',
+      {
+        name: 'Same origin exp',
+        datasetId: sample.id,
+        baselinePipelineId: p1.id,
+        pipelineIds: [p1.id],
+        mode: 'retrieval_only',
+      },
+      { origin: 'http://localhost' },
+    );
+    expect(sameOriginCreate.status).toBe(201);
+    expect(sameOriginCreate.headers['access-control-allow-origin']).toBe(
+      'http://localhost',
+    );
+    const createdExp = c.experiment.parse(sameOriginCreate.body);
+
+    // Explicit allowed cross-origin (preflight OPTIONS + POST run + GET runs)
+    const allowedPreflight = await send(
+      stack.app,
+      'OPTIONS',
+      `/api/v1/experiments/${createdExp.id}/runs`,
+      undefined,
+      { origin: 'https://allowed.example' },
+    );
+    expect(allowedPreflight.status).toBe(204);
+    expect(allowedPreflight.headers['access-control-allow-origin']).toBe(
+      'https://allowed.example',
+    );
+
+    const allowedRun = await send(
+      stack.app,
+      'POST',
+      `/api/v1/experiments/${createdExp.id}/runs`,
+      {},
+      { origin: 'https://allowed.example' },
+    );
+    expect(allowedRun.status).toBe(202);
+    expect(allowedRun.headers['access-control-allow-origin']).toBe(
+      'https://allowed.example',
+    );
+    const submitted = c.createRunResult.parse(allowedRun.body);
+
+    const allowedGet = await send(
+      stack.app,
+      'GET',
+      `/api/v1/runs/${submitted.run.id}`,
+      undefined,
+      { origin: 'https://allowed.example' },
+    );
+    expect(allowedGet.status).toBe(200);
+    expect(allowedGet.headers['access-control-allow-origin']).toBe(
+      'https://allowed.example',
+    );
+
+    // Disallowed foreign cross-origin rejected across all new endpoints!
+    for (const [method, path, body] of [
+      [
+        'POST',
+        '/api/v1/experiments',
+        {
+          name: 'Blocked',
+          datasetId: sample.id,
+          baselinePipelineId: p1.id,
+          pipelineIds: [p1.id],
+          mode: 'retrieval_only',
+        },
+      ],
+      ['OPTIONS', `/api/v1/experiments/${createdExp.id}/runs`, undefined],
+      ['POST', `/api/v1/experiments/${createdExp.id}/runs`, {}],
+      ['GET', '/api/v1/runs', undefined],
+      ['GET', `/api/v1/runs/${submitted.run.id}`, undefined],
+      ['GET', `/api/v1/runs/${submitted.run.id}/tasks`, undefined],
+    ] as const) {
+      const blocked = await send(stack.app, method, path, body, {
+        origin: 'https://evil.example',
+      });
+      expect(blocked.status).toBe(403);
+      expect(blocked.headers['access-control-allow-origin']).toBeUndefined();
+      expect(c.errorEnvelope.parse(blocked.body).error.code).toBe(
+        'origin_denied',
+      );
+    }
+
+    // Cancel queued run and verify explicit retry works
+    const cancelled = await send(
+      stack.app,
+      'POST',
+      `/api/v1/jobs/${submitted.job.id}/cancel`,
+      {},
+    );
+    expect(cancelled.status).toBe(200);
+    expect(c.job.parse(cancelled.body).state).toBe('cancelled');
+    expect(stack.runs.getRun(submitted.run.id).state).toBe('cancelled');
+
+    const retried = await send(
+      stack.app,
+      'POST',
+      `/api/v1/jobs/${submitted.job.id}/retry`,
+      {},
+    );
+    expect(retried.status).toBe(202);
+    const retryJob = c.job.parse(retried.body);
+    expect(retryJob.parentId).toBe(submitted.job.id);
+    expect(retryJob.runId).toBe(submitted.run.id);
+  });
+
+  it('freezes document-version parse artifacts at run submission so reparsing before execution does not alter evaluated text', async () => {
+    const stack = setupStack({ LLAMA_CLOUD_API_KEY: 'fixture-llama-key' });
+    const ds = stack.datasets.create('Run Artifact Freeze');
+    const up = c.uploadResult.parse(
+      (
+        await send(
+          stack.app,
+          'POST',
+          `/api/v1/datasets/${ds.id}/documents?name=spec.txt`,
+          undefined,
+          { 'if-match': '"1"', 'content-type': 'text/plain' },
+          'Frozen local text mentioning albatross calibration.',
+        )
+      ).body,
+    );
+    expect(
+      await runOne(stack.jobs, {
+        directory: join(dir, 'blobs'),
+        cloud: new CloudParser('', undefined),
+      }),
+    ).toBe(true);
+
+    const dsWithTask = stack.datasets.addTask(
+      ds.id,
+      up.dataset.revision,
+      c.taskInput.parse({
+        question: 'What mentions albatross calibration?',
+        expectedAnswer: 'The frozen local text.',
+        answerable: true,
+        qrels: [{ documentId: up.documentId, grade: 3 }],
+      }),
+    );
+
+    const p1 = stack.pipelines.create({
+      name: 'Keyword',
+      config: { retriever: { mode: 'keyword', topK: 3, deduplicate: false } },
+    });
+    const exp = stack.runs.createExperiment({
+      name: 'Artifact Freeze Exp',
+      datasetId: ds.id,
+      baselinePipelineId: p1.id,
+      pipelineIds: [p1.id],
+      mode: 'retrieval_only',
+    });
+    const submitted = stack.runs.createRun(
+      exp.id,
+      { datasetRevision: dsWithTask.revision, cutoffs: [1] },
+      {
+        capabilities: stack.config.capabilities,
+        pricing: stack.config.pricing,
+        budgets: stack.config.budgets,
+      },
+    );
+
+    // Reparse the SAME document version with LlamaParse AFTER run enqueue, BEFORE run execution!
+    const reparseRes = await send(
+      stack.app,
+      'POST',
+      `/api/v1/documents/${up.documentId}/parses`,
+      { parser: 'llama-parse' },
+      { 'if-match': `"${dsWithTask.revision}"` },
+    );
+    expect(reparseRes.status).toBe(202);
+    const fakeCloud = {
+      upload: async () => 'remote-run-reparse',
+      poll: async () => true,
+      download: async () => ({
+        text: 'Reparsed cloud text mentioning pelican only.',
+        pages: [{ page: 1, start: 0, end: 44 }],
+      }),
+    } as unknown as CloudParser;
+    expect(
+      await runOne(stack.jobs, {
+        directory: join(dir, 'blobs'),
+        cloud: fakeCloud,
+      }),
+    ).toBe(true);
+
+    // Execute the queued run; it must evaluate the artifact frozen at submission ("albatross").
+    const workerOpts = {
+      directory: join(dir, 'blobs'),
+      cloud: fakeCloud,
+      indexes: stack.indexes,
+      indexBuilder: stack.indexBuilder,
+      runs: stack.runs,
+      evaluationRunner: stack.evaluationRunner,
+    };
+    while (await runOne(stack.jobs, workerOpts)) {
+      clock += 10;
+    }
+
+    const detail = stack.runs.getRun(submitted.run.id);
+    expect(detail.state).toBe('succeeded');
+    const hit1 = detail.pipelines[0]?.retrievalMetrics.find(
+      (m) => m.metricId === 'hit_at_k' && m.cutoff === 1,
+    );
+    expect(hit1?.mean).toBe(1);
+    const taskDetail = stack.runs.listRunTasks(detail.id, 10, 0, p1.id)
+      .items[0];
+    expect(taskDetail?.retrievedItems[0]?.content).toContain('albatross');
+    expect(taskDetail?.retrievedItems[0]?.content).not.toContain('pelican');
+  });
+
+  it('fails before sending data when frozen chat, judge, or embedding provider identity changes after worker restart', async () => {
+    // 1. Freeze a full_rag run against local OpenAI-compatible chat & judge profiles.
+    const submitStack = setupStack({
+      LOCAL_CHAT_BASE_URL: 'http://127.0.0.1:11434/v1',
+      LOCAL_CHAT_MODEL: 'shared-chat-model',
+      LOCAL_JUDGE_MODEL: 'shared-judge-model',
+      LOCAL_CHAT_SUPPORTS_STRUCTURED_OUTPUT: 'true',
+    });
+    const sample = submitStack.datasets.sample().value;
+    let rev = sample.revision;
+    for (const extra of sample.tasks.slice(1)) {
+      rev = submitStack.datasets.editTask(
+        sample.id,
+        rev,
+        extra.id,
+        undefined,
+      ).revision;
+    }
+    const p1 = submitStack.pipelines.create({
+      name: 'Local Full RAG',
+      config: {
+        retriever: { mode: 'keyword', topK: 3, deduplicate: false },
+        llm: { model: 'shared-chat-model', temperature: 0.2, maxTokens: 200 },
+        judge: { model: 'shared-judge-model' },
+      },
+    });
+    const exp = submitStack.runs.createExperiment({
+      name: 'Provider Pin Exp',
+      datasetId: sample.id,
+      baselinePipelineId: p1.id,
+      pipelineIds: [p1.id],
+      mode: 'full_rag',
+    });
+    const created = submitStack.runs.createRun(
+      exp.id,
+      { datasetRevision: rev, mode: 'full_rag', judgeEnabled: true },
+      {
+        capabilities: submitStack.config.capabilities,
+        pricing: submitStack.config.pricing,
+        budgets: submitStack.config.budgets,
+      },
+    );
+
+    // Worker restarts with the SAME model names mapped to cloud OpenAI instead of local!
+    const cloudOpenAIFetch = vi.fn<typeof fetch>(async () =>
+      openaiChatResponse(
+        JSON.stringify({ answer: 'LEAKED', citations: [], abstained: false }),
+        'shared-chat-model',
+      ),
+    );
+    const restartedStack = setupStack(
+      {
+        OPENAI_API_KEY: 'cloud-secret-key',
+        OPENAI_CHAT_MODEL: 'shared-chat-model',
+        OPENAI_JUDGE_MODEL: 'shared-judge-model',
+      },
+      { openai: cloudOpenAIFetch },
+    );
+
+    await runOne(restartedStack.jobs, {
+      directory: join(dir, 'blobs'),
+      cloud: new CloudParser('', undefined),
+      indexes: restartedStack.indexes,
+      indexBuilder: restartedStack.indexBuilder,
+      runs: restartedStack.runs,
+      evaluationRunner: restartedStack.evaluationRunner,
+    });
+
+    // ZERO requests may be sent to cloud OpenAI!
+    expect(cloudOpenAIFetch).not.toHaveBeenCalled();
+    const runAfter = restartedStack.runs.getRun(created.run.id);
+    expect(runAfter.state).toBe('failed');
+    expect(restartedStack.jobs.get(created.job.id).state).toBe('failed');
+
+    // 2. Also verify frozen embedding provider identity cannot silently switch local -> cloud OpenAI.
+    const embedSubmitStack = setupStack({
+      QDRANT_URL: 'http://qdrant.invalid',
+      LOCAL_EMBED_BASE_URL: 'http://127.0.0.1:11434/v1',
+      LOCAL_EMBED_MODEL: 'shared-embed-model',
+    });
+    const pDense = embedSubmitStack.pipelines.create({
+      name: 'Local Dense',
+      config: {
+        embedding: { model: 'shared-embed-model' },
+        retriever: { mode: 'dense', topK: 3, deduplicate: false },
+      },
+    });
+    const expDense = embedSubmitStack.runs.createExperiment({
+      name: 'Embed Provider Pin Exp',
+      datasetId: sample.id,
+      baselinePipelineId: pDense.id,
+      pipelineIds: [pDense.id],
+      mode: 'retrieval_only',
+    });
+    const createdDense = embedSubmitStack.runs.createRun(
+      expDense.id,
+      { datasetRevision: rev },
+      {
+        capabilities: embedSubmitStack.config.capabilities,
+        pricing: embedSubmitStack.config.pricing,
+        budgets: embedSubmitStack.config.budgets,
+      },
+    );
+
+    const cloudEmbedFetch = vi.fn<typeof fetch>(async () =>
+      Response.json({
+        object: 'list',
+        model: 'shared-embed-model',
+        data: [{ object: 'embedding', index: 0, embedding: [1, 0, 0] }],
+      }),
+    );
+    const restartedEmbedConfig = readConfig({
+      BLOB_DIRECTORY: join(dir, 'blobs'),
+      QDRANT_URL: 'http://qdrant.invalid',
+      OPENAI_API_KEY: 'cloud-secret-key',
+      OPENAI_EMBED_MODEL: 'shared-embed-model',
+    });
+    const restartedEmbedProviders = new ProviderRegistry(restartedEmbedConfig, {
+      openai: cloudEmbedFetch,
+    });
+    const fakeQdrant: QdrantClientLike = {
+      collectionExists: async () => ({ exists: false }),
+      getCollection: async () => ({}),
+      createCollection: async () => ({}),
+      createPayloadIndex: async () => ({}),
+      upsert: async () => ({}),
+      query: async () => ({ points: [] }),
+      count: async () => ({ count: 0 }),
+      delete: async () => ({}),
+      deleteCollection: async () => ({}),
+    };
+    const qdrantStore = new QdrantStore({
+      url: 'http://qdrant.invalid',
+      client: fakeQdrant,
+    });
+    const jobs2 = new Jobs(db, () => clock, 5000);
+    const datasets2 = new Datasets(db, jobs2);
+    const pipelines2 = new Pipelines(db);
+    const indexes2 = new Indexes(db, jobs2, () => clock);
+    const runs2 = new Runs(
+      db,
+      datasets2,
+      pipelines2,
+      indexes2,
+      jobs2,
+      () => clock,
+    );
+    const indexBuilder2 = new IndexBuilder({
+      indexes: indexes2,
+      providers: restartedEmbedProviders,
+      qdrant: qdrantStore,
+      now: () => clock,
+    });
+    const retrieval2 = new RetrievalService({
+      indexes: indexes2,
+      providers: restartedEmbedProviders,
+      qdrant: qdrantStore,
+      now: () => clock,
+    });
+    const runner2 = new EvaluationRunner({
+      runs: runs2,
+      indexes: indexes2,
+      indexBuilder: indexBuilder2,
+      retrieval: retrieval2,
+      providers: restartedEmbedProviders,
+      now: () => clock,
+      retryDelayMs: 1,
+    });
+    await runOne(jobs2, {
+      directory: join(dir, 'blobs'),
+      cloud: new CloudParser('', undefined),
+      indexes: indexes2,
+      indexBuilder: indexBuilder2,
+      runs: runs2,
+      evaluationRunner: runner2,
+    });
+    expect(cloudEmbedFetch).not.toHaveBeenCalled();
+    expect(runs2.getRun(createdDense.run.id).state).toBe('failed');
+    expect(jobs2.get(createdDense.job.id).state).toBe('failed');
+  });
+
+  it('marks both run and job failed when every task fails retrieval so the retry endpoint accepts it', async () => {
+    const stack = setupStack();
+    const sample = stack.datasets.sample().value;
+    const p1 = stack.pipelines.create({
+      name: 'Failing Retrieval Pipeline',
+      config: { retriever: { mode: 'keyword', topK: 3, deduplicate: false } },
+    });
+    const exp = stack.runs.createExperiment({
+      name: 'All Tasks Fail',
+      datasetId: sample.id,
+      baselinePipelineId: p1.id,
+      pipelineIds: [p1.id],
+      mode: 'retrieval_only',
+    });
+    const created = stack.runs.createRun(
+      exp.id,
+      {},
+      {
+        capabilities: stack.config.capabilities,
+        pricing: stack.config.pricing,
+        budgets: stack.config.budgets,
+      },
+    );
+
+    // Index builds and becomes ready, then every single retrieval fails.
+    vi.spyOn(stack.retrieval, 'search').mockRejectedValue(
+      new ApiError(
+        500,
+        'internal_error',
+        'Simulated permanent search failure.',
+      ),
+    );
+
+    await runOne(stack.jobs, {
+      directory: join(dir, 'blobs'),
+      cloud: new CloudParser('', undefined),
+      indexes: stack.indexes,
+      indexBuilder: stack.indexBuilder,
+      runs: stack.runs,
+      evaluationRunner: stack.evaluationRunner,
+    });
+
+    const finished = stack.runs.getRun(created.run.id);
+    expect(finished.pipelines[0]?.state).toBe('failed');
+    expect(finished.failedUnits).toBe(finished.totalUnits);
+    expect(finished.completedUnits).toBe(0);
+    expect(finished.state).toBe('failed');
+    expect(stack.jobs.get(created.job.id).state).toBe('failed');
+
+    // Retry endpoint MUST accept the failed job!
+    const retryRes = await send(
+      stack.app,
+      'POST',
+      `/api/v1/jobs/${created.job.id}/retry`,
+      {},
+    );
+    expect(retryRes.status).toBe(202);
+    expect(c.job.parse(retryRes.body).parentId).toBe(created.job.id);
+  });
+
+  it('persists unique physical provider-call attempts before dispatch, requires explicit retry after interruption, and preserves both billing records', async () => {
+    let chatCallCount = 0;
+    const fakeOpenAI = vi.fn<typeof fetch>(async (_url, init) => {
+      chatCallCount += 1;
+      const body = JSON.parse(String(init?.body ?? '{}')) as { model: string };
+      return openaiChatResponse(
+        JSON.stringify({
+          answer: `Paid answer attempt ${chatCallCount}.`,
+          citations: [],
+          abstained: false,
+        }),
+        body.model,
+        { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 },
+      );
+    });
+
+    const pricingJson = JSON.stringify({
+      version: 'attempt-price-v1',
+      currency: 'USD',
+      entries: [
+        {
+          model: 'priced-chat',
+          provider: 'openai',
+          unit: 'per_request',
+          requestUsd: 0.25,
+        },
+      ],
+    });
+    const stack = setupStack(
+      {
+        OPENAI_API_KEY: 'fixture-key',
+        OPENAI_CHAT_MODEL: 'priced-chat',
+        PRICE_SCHEDULE_JSON: pricingJson,
+      },
+      { openai: fakeOpenAI },
+    );
+
+    const sample = stack.datasets.sample().value;
+    let rev = sample.revision;
+    for (const extra of sample.tasks.slice(1)) {
+      rev = stack.datasets.editTask(
+        sample.id,
+        rev,
+        extra.id,
+        undefined,
+      ).revision;
+    }
+    const p1 = stack.pipelines.create({
+      name: 'Priced Chat',
+      config: {
+        retriever: { mode: 'keyword', topK: 3, deduplicate: false },
+        llm: { model: 'priced-chat', temperature: 0.2, maxTokens: 200 },
+      },
+    });
+    const exp = stack.runs.createExperiment({
+      name: 'Attempt Durability',
+      datasetId: sample.id,
+      baselinePipelineId: p1.id,
+      pipelineIds: [p1.id],
+      mode: 'full_rag',
+    });
+    const created = stack.runs.createRun(
+      exp.id,
+      { datasetRevision: rev, mode: 'full_rag', judgeEnabled: false },
+      {
+        capabilities: stack.config.capabilities,
+        pricing: stack.config.pricing,
+        budgets: stack.config.budgets,
+      },
+    );
+
+    // Worker 1 dies right AFTER the paid chat provider call completes and is recorded,
+    // BEFORE saveTaskAnswer commits!
+    const worker1Crash = new AbortController();
+    const origSaveAnswer = stack.runs.saveTaskAnswer.bind(stack.runs);
+    const saveAnswerSpy = vi
+      .spyOn(stack.runs, 'saveTaskAnswer')
+      .mockImplementationOnce(() => {
+        worker1Crash.abort();
+        throw new Error('Simulated worker crash before saving answer.');
+      })
+      .mockImplementation((input, guard) => origSaveAnswer(input, guard));
+
+    const workerOpts = {
+      directory: join(dir, 'blobs'),
+      cloud: new CloudParser('', undefined),
+      indexes: stack.indexes,
+      indexBuilder: stack.indexBuilder,
+      runs: stack.runs,
+      evaluationRunner: stack.evaluationRunner,
+    };
+
+    await runOne(stack.jobs, { ...workerOpts, signal: worker1Crash.signal });
+    expect(chatCallCount).toBe(1);
+    expect(saveAnswerSpy).toHaveBeenCalledTimes(1);
+
+    // Worker 2 reclaims the expired lease on the SAME job (automatic recovery, NOT explicit retry).
+    // It MUST NOT silently call the paid provider again; it must preserve the prior call and fail requiring explicit retry.
+    clock += 10_000;
+    await runOne(stack.jobs, workerOpts);
+    expect(chatCallCount).toBe(1);
+
+    const afterRecovery = stack.runs.getRun(created.run.id);
+    expect(afterRecovery.state).toBe('failed');
+    expect(stack.jobs.get(created.job.id).state).toBe('failed');
+
+    // Now operator explicitly retries the failed job -> linked retry job IS allowed to issue a 2nd paid call.
+    const retryRes = await send(
+      stack.app,
+      'POST',
+      `/api/v1/jobs/${created.job.id}/retry`,
+      {},
+    );
+    expect(retryRes.status).toBe(202);
+    await runOne(stack.jobs, workerOpts);
+
+    expect(chatCallCount).toBe(2);
+    const finished = stack.runs.getRun(created.run.id);
+    expect(finished.state).toBe('succeeded');
+
+    // BOTH physical billing records MUST be preserved in provider_calls (never dropped by INSERT OR IGNORE)!
+    const taskDetail = stack.runs.listRunTasks(finished.id, 10, 0, p1.id)
+      .items[0];
+    const generateCalls = taskDetail?.providerCalls.filter(
+      (call) => call.operation === 'generate',
+    );
+    expect(generateCalls).toHaveLength(2);
+    expect(generateCalls?.[0]?.isRetry).toBe(false);
+    expect(generateCalls?.[1]?.isRetry).toBe(true);
+    expect(finished.cost.total.totalCalls).toBe(2);
+    expect(finished.cost.total.knownUsd).toBeCloseTo(0.5, 6);
+  });
+
+  it('audits and prices each corpus embedding HTTP batch, preserves partial-failure usage and unknown usage, and enforces run budgets between batches', async () => {
+    const createBatchStack = (
+      env: NodeJS.ProcessEnv,
+      embedFetch: typeof fetch,
+    ) => {
+      const config = readConfig({
+        BLOB_DIRECTORY: join(dir, 'blobs'),
+        QDRANT_URL: 'http://qdrant.invalid',
+        LOCAL_EMBED_BASE_URL: 'http://local-embed.invalid/v1',
+        LOCAL_EMBED_MODEL: 'batched-embed',
+        EMBED_BATCH_SIZE: '2',
+        ...env,
+      });
+      const jobs = new Jobs(db, () => clock, 5000);
+      const datasets = new Datasets(db, jobs);
+      const pipelines = new Pipelines(db);
+      const indexes = new Indexes(db, jobs, () => clock);
+      const runs = new Runs(
+        db,
+        datasets,
+        pipelines,
+        indexes,
+        jobs,
+        () => clock,
+      );
+      const providers = new ProviderRegistry(config, {
+        openaiCompatible: embedFetch,
+      });
+      const points = new Map<
+        string,
+        { vector: number[]; payload: Record<string, unknown> }
+      >();
+      const fakeQdrant: QdrantClientLike = {
+        collectionExists: async () => ({ exists: true }),
+        getCollection: async () => ({
+          config: { params: { vectors: { size: 3 } } },
+        }),
+        createCollection: async () => ({}),
+        createPayloadIndex: async () => ({}),
+        upsert: async (_col, args) => {
+          for (const p of args.points) {
+            points.set(p.id, { vector: p.vector, payload: p.payload });
+          }
+        },
+        query: async (_col, args) => {
+          const genFilter = args.filter.must.find(
+            (m) => m.key === 'generationId',
+          );
+          const targetGen =
+            genFilter && 'match' in genFilter && 'value' in genFilter.match
+              ? genFilter.match.value
+              : undefined;
+          return {
+            points: Array.from(points.entries())
+              .filter(([, p]) => p.payload.generationId === targetGen)
+              .slice(0, args.limit)
+              .map(([id, p]) => ({ id, score: 0.9, payload: p.payload })),
+          };
+        },
+        count: async (_col, args) => {
+          const genFilter = args.filter.must.find(
+            (m) => m.key === 'generationId',
+          );
+          const targetGen =
+            genFilter && 'match' in genFilter && 'value' in genFilter.match
+              ? genFilter.match.value
+              : undefined;
+          let count = 0;
+          for (const p of points.values()) {
+            if (p.payload.generationId === targetGen) count += 1;
+          }
+          return { count };
+        },
+        delete: async () => ({}),
+        deleteCollection: async () => ({}),
+      };
+      const qdrant = new QdrantStore({
+        url: 'http://qdrant.invalid',
+        client: fakeQdrant,
+      });
+      const indexBuilder = new IndexBuilder({
+        indexes,
+        providers,
+        qdrant,
+        embedBatchSize: 2,
+        now: () => clock,
+      });
+      const retrieval = new RetrievalService({
+        indexes,
+        providers,
+        qdrant,
+        now: () => clock,
+      });
+      const evaluationRunner = new EvaluationRunner({
+        runs,
+        indexes,
+        indexBuilder,
+        retrieval,
+        providers,
+        now: () => clock,
+        maxTransientRetries: 0,
+        retryDelayMs: 1,
+      });
+      return {
+        config,
+        jobs,
+        datasets,
+        pipelines,
+        indexes,
+        runs,
+        indexBuilder,
+        evaluationRunner,
+      };
+    };
+
+    const perRequestPrice = JSON.stringify({
+      version: 'batch-price-v1',
+      currency: 'USD',
+      entries: [
+        {
+          model: 'batched-embed',
+          provider: 'openai-compatible',
+          unit: 'per_request',
+          requestUsd: 0.1,
+        },
+      ],
+    });
+
+    // Build a dataset with 5 distinct 1-chunk documents -> 3 HTTP embedding batches (2 + 2 + 1).
+    let batchCalls = 0;
+    const threeBatchFetch = vi.fn<typeof fetch>(async (_url, init) => {
+      batchCalls += 1;
+      const body = JSON.parse(String(init?.body ?? '{}')) as {
+        input: string[];
+      };
+      // Omit usage on batch 2 to prove missing usage is preserved as missing/unknown.
+      return Response.json({
+        object: 'list',
+        model: 'batched-embed',
+        data: body.input.map((_t, idx) => ({
+          object: 'embedding',
+          index: idx,
+          embedding: [0.5, 0.5, 0.5],
+        })),
+        ...(batchCalls === 2
+          ? {}
+          : {
+              usage: {
+                prompt_tokens: body.input.length * 5,
+                total_tokens: body.input.length * 5,
+              },
+            }),
+      });
+    });
+
+    const s1 = createBatchStack(
+      { PRICE_SCHEDULE_JSON: perRequestPrice },
+      threeBatchFetch,
+    );
+    const ds = s1.datasets.create('Five Doc Corpus');
+    const app1 = createApp({
+      config: s1.config,
+      datasets: s1.datasets,
+      pipelines: s1.pipelines,
+      indexes: s1.indexes,
+      runs: s1.runs,
+      logger: createLogger({ write: () => {} }),
+      ready: () => true,
+    });
+    let rev = ds.revision;
+    let firstDocId = '';
+    for (let i = 0; i < 5; i++) {
+      const res = c.uploadResult.parse(
+        (
+          await send(
+            app1,
+            'POST',
+            `/api/v1/datasets/${ds.id}/documents?name=d${i}.txt`,
+            undefined,
+            { 'if-match': `"${rev}"`, 'content-type': 'text/plain' },
+            `Unique corpus document number ${i} about embedding batches.`,
+          )
+        ).body,
+      );
+      if (!firstDocId) firstDocId = res.documentId;
+      rev = res.dataset.revision;
+      expect(
+        await runOne(s1.jobs, {
+          directory: join(dir, 'blobs'),
+          cloud: new CloudParser('', undefined),
+        }),
+      ).toBe(true);
+    }
+    rev = s1.datasets.addTask(
+      ds.id,
+      rev,
+      c.taskInput.parse({
+        question: 'embedding batches',
+        answerable: true,
+        qrels: [{ documentId: firstDocId, grade: 3 }],
+      }),
+    ).revision;
+
+    const pDense = s1.pipelines.create({
+      name: 'Batched Dense',
+      config: {
+        embedding: { model: 'batched-embed' },
+        retriever: { mode: 'dense', topK: 3, deduplicate: false },
+      },
+    });
+    const exp1 = s1.runs.createExperiment({
+      name: 'Per-Batch Audit',
+      datasetId: ds.id,
+      baselinePipelineId: pDense.id,
+      pipelineIds: [pDense.id],
+      mode: 'retrieval_only',
+    });
+    const r1 = s1.runs.createRun(
+      exp1.id,
+      { datasetRevision: rev },
+      {
+        capabilities: s1.config.capabilities,
+        pricing: s1.config.pricing,
+        budgets: s1.config.budgets,
+      },
+    );
+    await s1.evaluationRunner.execute(r1.run.id);
+
+    const detail1 = s1.runs.getRun(r1.run.id);
+    expect(detail1.state).toBe('succeeded');
+    // 3 HTTP corpus_embed batches -> 3 separate charges ($0.30, NOT $0.10)!
+    expect(detail1.cost.indexing.totalCalls).toBe(3);
+    expect(detail1.cost.indexing.knownUsd).toBeCloseTo(0.3, 6);
+    // Batch 2 omitted usage -> 2 of 3 corpus batches + 1 query embed had known usage (not all 4).
+    const corpusRows1 = db
+      .prepare(
+        "SELECT usage_status AS usageStatus FROM provider_calls WHERE run_id = ? AND operation = 'corpus_embed' ORDER BY rowid ASC",
+      )
+      .all(r1.run.id);
+    expect(corpusRows1.map((row) => row.usageStatus)).toEqual([
+      'known',
+      'missing',
+      'known',
+    ]);
+
+    // Sub-case B: Batch 2 fails -> Batch 1's usage & cost MUST still be preserved in SQLite!
+    let failCall = 0;
+    const failOnSecondBatch = vi.fn<typeof fetch>(async (_url, init) => {
+      failCall += 1;
+      if (failCall === 2) {
+        return new Response('Hard failure', { status: 400 });
+      }
+      const body = JSON.parse(String(init?.body ?? '{}')) as {
+        input: string[];
+      };
+      return Response.json({
+        object: 'list',
+        model: 'batched-embed',
+        data: body.input.map((_t, idx) => ({
+          object: 'embedding',
+          index: idx,
+          embedding: [0.5, 0.5, 0.5],
+        })),
+        usage: { prompt_tokens: 10, total_tokens: 10 },
+      });
+    });
+    const s2 = createBatchStack(
+      { PRICE_SCHEDULE_JSON: perRequestPrice },
+      failOnSecondBatch,
+    );
+    // Distinct chunking config forces a brand new index generation (no reuse of r1's generation).
+    const pDense2 = s2.pipelines.create({
+      name: 'Batched Dense Fail',
+      config: {
+        chunking: { strategy: 'character-window', chunkSize: 250, overlap: 10 },
+        embedding: { model: 'batched-embed' },
+        retriever: { mode: 'dense', topK: 3, deduplicate: false },
+      },
+    });
+    const exp2 = s2.runs.createExperiment({
+      name: 'Mid-Batch Failure',
+      datasetId: ds.id,
+      baselinePipelineId: pDense2.id,
+      pipelineIds: [pDense2.id],
+      mode: 'retrieval_only',
+    });
+    const r2 = s2.runs.createRun(
+      exp2.id,
+      { datasetRevision: rev },
+      {
+        capabilities: s2.config.capabilities,
+        pricing: s2.config.pricing,
+        budgets: s2.config.budgets,
+      },
+    );
+    await s2.evaluationRunner.execute(r2.run.id);
+    const detail2 = s2.runs.getRun(r2.run.id);
+    expect(detail2.state).toBe('failed');
+    expect(detail2.tokens.totalTokens).toBe(10);
+    expect(detail2.cost.indexing.totalCalls).toBe(2);
+
+    // Sub-case C: Run budget checked between batches -> stops before dispatching batch 2!
+    let budgetCalls = 0;
+    const budgetFetch = vi.fn<typeof fetch>(async (_url, init) => {
+      budgetCalls += 1;
+      const body = JSON.parse(String(init?.body ?? '{}')) as {
+        input: string[];
+      };
+      return Response.json({
+        object: 'list',
+        model: 'batched-embed',
+        data: body.input.map((_t, idx) => ({
+          object: 'embedding',
+          index: idx,
+          embedding: [0.5, 0.5, 0.5],
+        })),
+        usage: { prompt_tokens: 12, total_tokens: 12 },
+      });
+    });
+    const s3 = createBatchStack(
+      {
+        PRICE_SCHEDULE_JSON: perRequestPrice,
+        RUN_MAX_COST_USD: '0.1',
+      },
+      budgetFetch,
+    );
+    const pDense3 = s3.pipelines.create({
+      name: 'Batched Dense Budget',
+      config: {
+        chunking: { strategy: 'character-window', chunkSize: 220, overlap: 10 },
+        embedding: { model: 'batched-embed' },
+        retriever: { mode: 'dense', topK: 3, deduplicate: false },
+      },
+    });
+    const exp3 = s3.runs.createExperiment({
+      name: 'Budget Between Batches',
+      datasetId: ds.id,
+      baselinePipelineId: pDense3.id,
+      pipelineIds: [pDense3.id],
+      mode: 'retrieval_only',
+    });
+    const r3 = s3.runs.createRun(
+      exp3.id,
+      { datasetRevision: rev },
+      {
+        capabilities: s3.config.capabilities,
+        pricing: s3.config.pricing,
+        budgets: s3.config.budgets,
+      },
+    );
+    await s3.evaluationRunner.execute(r3.run.id);
+    // Batch 1 hit $0.10 budget -> batch 2 and batch 3 MUST NOT be dispatched!
+    expect(budgetCalls).toBe(1);
+    const detail3 = s3.runs.getRun(r3.run.id);
+    expect(detail3.state).toBe('failed');
+    expect(detail3.pipelines[0]?.errorMessage).toMatch(/budget/i);
+  });
+
+  it('records failed generation and null abstention score when structured answer output is malformed on empty retrieval', async () => {
+    const fakeOpenAI = vi.fn<typeof fetch>(async (_url, init) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as { model: string };
+      // Returns raw non-JSON "Mars." despite structured output schema!
+      return openaiChatResponse('Mars.', body.model, {
+        prompt_tokens: 50,
+        completion_tokens: 2,
+        total_tokens: 52,
+      });
+    });
+
+    const stack = setupStack(
+      {
+        OPENAI_API_KEY: 'fixture-key',
+        OPENAI_CHAT_MODEL: 'strict-chat',
+      },
+      { openai: fakeOpenAI },
+    );
+    const ds = stack.datasets.create('Empty Retrieval Abstention');
+    const up = c.uploadResult.parse(
+      (
+        await send(
+          stack.app,
+          'POST',
+          `/api/v1/datasets/${ds.id}/documents?name=notes.txt`,
+          undefined,
+          { 'if-match': '"1"', 'content-type': 'text/plain' },
+          'Database indexing and query optimization notes.',
+        )
+      ).body,
+    );
+    expect(
+      await runOne(stack.jobs, {
+        directory: join(dir, 'blobs'),
+        cloud: new CloudParser('', undefined),
+      }),
+    ).toBe(true);
+    const dsWithTask = stack.datasets.addTask(
+      ds.id,
+      up.dataset.revision,
+      c.taskInput.parse({
+        question: 'Which celestial planet orbits fourth from Sol?',
+        answerable: false,
+        qrels: [{ documentId: up.documentId, grade: 0 }],
+      }),
+    );
+
+    const p1 = stack.pipelines.create({
+      name: 'Strict Chat',
+      config: {
+        retriever: { mode: 'keyword', topK: 3, deduplicate: false },
+        llm: { model: 'strict-chat', temperature: 0.2, maxTokens: 100 },
+      },
+    });
+    const exp = stack.runs.createExperiment({
+      name: 'Malformed Structured Answer',
+      datasetId: ds.id,
+      baselinePipelineId: p1.id,
+      pipelineIds: [p1.id],
+      mode: 'full_rag',
+    });
+    const created = stack.runs.createRun(
+      exp.id,
+      {
+        datasetRevision: dsWithTask.revision,
+        mode: 'full_rag',
+        judgeEnabled: false,
+      },
+      {
+        capabilities: stack.config.capabilities,
+        pricing: stack.config.pricing,
+        budgets: stack.config.budgets,
+      },
+    );
+    await stack.evaluationRunner.execute(created.run.id);
+
+    const taskDetail = stack.runs.listRunTasks(created.run.id, 10, 0, p1.id)
+      .items[0];
+    expect(taskDetail?.retrievedItems).toHaveLength(0);
+    expect(taskDetail?.answerState).toBe('failed');
+    expect(taskDetail?.answer).toBeNull();
+    const absObs = taskDetail?.observations.find(
+      (o) => o.metricId === 'abstention_unanswerable',
+    );
+    expect(absObs).toMatchObject({
+      status: 'generation_failed',
+      value: null,
+    });
+    // Provider usage from the malformed response is still billed/recorded!
+    expect(taskDetail?.providerCalls[0]?.totalTokens).toBe(52);
+
+    // Structured JSON missing the required `citations` field MUST also fail with null abstention score!
+    const missingCitationsOpenAI = vi.fn<typeof fetch>(async (_url, init) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as { model: string };
+      return openaiChatResponse(
+        JSON.stringify({ answer: 'Mars.', abstained: true }),
+        body.model,
+        { prompt_tokens: 40, completion_tokens: 8, total_tokens: 48 },
+      );
+    });
+    const stack2 = setupStack(
+      {
+        OPENAI_API_KEY: 'fixture-key',
+        OPENAI_CHAT_MODEL: 'strict-chat',
+      },
+      { openai: missingCitationsOpenAI },
+    );
+    const created2 = stack2.runs.createRun(
+      exp.id,
+      {
+        datasetRevision: dsWithTask.revision,
+        mode: 'full_rag',
+        judgeEnabled: false,
+      },
+      {
+        capabilities: stack2.config.capabilities,
+        pricing: stack2.config.pricing,
+        budgets: stack2.config.budgets,
+      },
+    );
+    await stack2.evaluationRunner.execute(created2.run.id);
+    const taskDetail2 = stack2.runs.listRunTasks(created2.run.id, 10, 0, p1.id)
+      .items[0];
+    expect(taskDetail2?.answerState).toBe('failed');
+    expect(taskDetail2?.answer).toBeNull();
+    expect(
+      taskDetail2?.observations.find(
+        (o) => o.metricId === 'abstention_unanswerable',
+      ),
+    ).toMatchObject({
+      status: 'generation_failed',
+      value: null,
+    });
+    expect(taskDetail2?.providerCalls[0]?.totalTokens).toBe(48);
+  });
+
+  it('guards per-job provider attempts on retry-child reclaim and treats post-dispatch timeouts as ambiguous without auto-retry', async () => {
+    // Sub-case A: Interrupt original job, explicitly retry once, interrupt retry child, reclaim child -> MUST NOT issue call #3!
+    let chatCalls = 0;
+    const fakeOpenAI = vi.fn<typeof fetch>(async (_url, init) => {
+      chatCalls += 1;
+      const body = JSON.parse(String(init?.body ?? '{}')) as { model: string };
+      return openaiChatResponse(
+        JSON.stringify({
+          answer: `Paid answer ${chatCalls}.`,
+          citations: [],
+          abstained: false,
+        }),
+        body.model,
+        { prompt_tokens: 20, completion_tokens: 10, total_tokens: 30 },
+      );
+    });
+
+    const stack = setupStack(
+      {
+        OPENAI_API_KEY: 'fixture-key',
+        OPENAI_CHAT_MODEL: 'retry-guard-chat',
+      },
+      { openai: fakeOpenAI },
+    );
+
+    const sample = stack.datasets.sample().value;
+    let rev = sample.revision;
+    for (const extra of sample.tasks.slice(1)) {
+      rev = stack.datasets.editTask(
+        sample.id,
+        rev,
+        extra.id,
+        undefined,
+      ).revision;
+    }
+    const p1 = stack.pipelines.create({
+      name: 'Retry Guard Pipeline',
+      config: {
+        retriever: { mode: 'keyword', topK: 3, deduplicate: false },
+        llm: { model: 'retry-guard-chat', temperature: 0.2, maxTokens: 200 },
+      },
+    });
+    const exp = stack.runs.createExperiment({
+      name: 'Retry Child Guard',
+      datasetId: sample.id,
+      baselinePipelineId: p1.id,
+      pipelineIds: [p1.id],
+      mode: 'full_rag',
+    });
+    const created = stack.runs.createRun(
+      exp.id,
+      { datasetRevision: rev, mode: 'full_rag', judgeEnabled: false },
+      {
+        capabilities: stack.config.capabilities,
+        pricing: stack.config.pricing,
+        budgets: stack.config.budgets,
+      },
+    );
+
+    const origSaveAnswer = stack.runs.saveTaskAnswer.bind(stack.runs);
+    const workerOpts = {
+      directory: join(dir, 'blobs'),
+      cloud: new CloudParser('', undefined),
+      indexes: stack.indexes,
+      indexBuilder: stack.indexBuilder,
+      runs: stack.runs,
+      evaluationRunner: stack.evaluationRunner,
+    };
+
+    // 1. Original job dispatches call #1 and crashes before saveTaskAnswer.
+    const crash1 = new AbortController();
+    const saveSpy = vi
+      .spyOn(stack.runs, 'saveTaskAnswer')
+      .mockImplementationOnce(() => {
+        crash1.abort();
+        throw new Error('Crash 1 before answer checkpoint.');
+      })
+      .mockImplementation((input, guard) => origSaveAnswer(input, guard));
+
+    await runOne(stack.jobs, { ...workerOpts, signal: crash1.signal });
+    expect(chatCalls).toBe(1);
+
+    // 2. Reclaim original job -> blocked, fails requiring explicit retry.
+    clock += 10_000;
+    await runOne(stack.jobs, workerOpts);
+    expect(chatCalls).toBe(1);
+    expect(stack.jobs.get(created.job.id).state).toBe('failed');
+
+    // 3. Explicit retry creates retry child job2; interrupt child job2 right after call #2!
+    const retry1Res = await send(
+      stack.app,
+      'POST',
+      `/api/v1/jobs/${created.job.id}/retry`,
+      {},
+    );
+    expect(retry1Res.status).toBe(202);
+    const job2 = c.job.parse(retry1Res.body);
+
+    const crash2 = new AbortController();
+    saveSpy.mockImplementationOnce(() => {
+      crash2.abort();
+      throw new Error('Crash 2 on retry child before answer checkpoint.');
+    });
+    await runOne(stack.jobs, { ...workerOpts, signal: crash2.signal });
+    expect(chatCalls).toBe(2);
+
+    // 4. Reclaim retry child job2 -> MUST NOT issue call #3!
+    clock += 10_000;
+    await runOne(stack.jobs, workerOpts);
+    expect(chatCalls).toBe(2);
+    expect(stack.jobs.get(job2.id).state).toBe('failed');
+    expect(stack.runs.getRun(created.run.id).state).toBe('failed');
+
+    // 5. Explicit retry of job2 (job3) IS permitted to issue call #3 and succeed.
+    saveSpy.mockRestore();
+    const retry2Res = await send(
+      stack.app,
+      'POST',
+      `/api/v1/jobs/${job2.id}/retry`,
+      {},
+    );
+    expect(retry2Res.status).toBe(202);
+    await runOne(stack.jobs, workerOpts);
+    expect(chatCalls).toBe(3);
+    expect(stack.runs.getRun(created.run.id).state).toBe('succeeded');
+
+    // Sub-case B: Post-dispatch answer timeout MUST be classified as ambiguous and MUST NOT auto-retry!
+    let timeoutCalls = 0;
+    const timeoutOpenAI = vi.fn<typeof fetch>(async () => {
+      timeoutCalls += 1;
+      const err = new Error('Simulated post-dispatch timeout');
+      err.name = 'TimeoutError';
+      throw err;
+    });
+    const timeoutStack = setupStack(
+      {
+        OPENAI_API_KEY: 'fixture-key',
+        OPENAI_CHAT_MODEL: 'timeout-chat',
+      },
+      { openai: timeoutOpenAI },
+    );
+    const pTimeout = timeoutStack.pipelines.create({
+      name: 'Timeout Chat Pipeline',
+      config: {
+        retriever: { mode: 'keyword', topK: 3, deduplicate: false },
+        llm: { model: 'timeout-chat', temperature: 0.2, maxTokens: 200 },
+      },
+    });
+    const expTimeout = timeoutStack.runs.createExperiment({
+      name: 'Post-Dispatch Timeout Exp',
+      datasetId: sample.id,
+      baselinePipelineId: pTimeout.id,
+      pipelineIds: [pTimeout.id],
+      mode: 'full_rag',
+    });
+    const createdTimeout = timeoutStack.runs.createRun(
+      expTimeout.id,
+      { datasetRevision: rev, mode: 'full_rag', judgeEnabled: false },
+      {
+        capabilities: timeoutStack.config.capabilities,
+        pricing: timeoutStack.config.pricing,
+        budgets: timeoutStack.config.budgets,
+      },
+    );
+
+    await runOne(timeoutStack.jobs, {
+      directory: join(dir, 'blobs'),
+      cloud: new CloudParser('', undefined),
+      indexes: timeoutStack.indexes,
+      indexBuilder: timeoutStack.indexBuilder,
+      runs: timeoutStack.runs,
+      evaluationRunner: timeoutStack.evaluationRunner,
+    });
+
+    // Must NOT automatically re-dispatch after post-dispatch timeout!
+    expect(timeoutCalls).toBe(1);
+    const timedOutTask = timeoutStack.runs.listRunTasks(
+      createdTimeout.run.id,
+      10,
+      0,
+      pTimeout.id,
+    ).items[0];
+    expect(timedOutTask?.providerCalls).toHaveLength(1);
+    expect(timedOutTask?.providerCalls[0]).toMatchObject({
+      operation: 'generate',
+      status: 'ambiguous',
+      errorCode: 'timeout',
+      costStatus: 'unknown',
+      costUsd: null,
+    });
+    expect(timeoutStack.runs.getRun(createdTimeout.run.id).state).toBe(
+      'failed',
+    );
+    expect(timeoutStack.jobs.get(createdTimeout.job.id).state).toBe('failed');
+  });
+
+  it('finalizes runs with outstanding ambiguous answer or judge stages as retryable while preserving completed work', async () => {
+    // Build a 2-task dataset revision from the sample dataset.
+    let answerDispatchCount = 0;
+    let judgeDispatchCount = 0;
+    const fakeOpenAI = vi.fn<typeof fetch>(async (_url, init) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as {
+        model: string;
+        response_format?: { json_schema?: { name?: string } };
+        messages: Array<{ role: string; content: string }>;
+      };
+      const schemaName = body.response_format?.json_schema?.name ?? '';
+      if (schemaName.startsWith('judge_')) {
+        judgeDispatchCount += 1;
+        const metric = schemaName.slice('judge_'.length);
+        const userText = body.messages[1]?.content ?? '';
+        const chunkIds = Array.from(
+          userText.matchAll(/chunkId=([0-9a-f-]{36})/gi),
+        ).map((m) => m[1]);
+        if (metric === 'faithfulness') {
+          return openaiChatResponse(
+            JSON.stringify({
+              refused: false,
+              reason: '',
+              claims: [
+                {
+                  claim: 'Chunking improves retrieval.',
+                  verdict: 'supported',
+                  evidenceChunkIds: chunkIds.slice(0, 1),
+                  quote: '',
+                },
+              ],
+            }),
+            body.model,
+          );
+        }
+        if (metric === 'answer_relevance') {
+          return openaiChatResponse(
+            JSON.stringify({
+              refused: false,
+              grade: 4,
+              rationale: 'Directly answers the question.',
+            }),
+            body.model,
+          );
+        }
+        if (metric === 'context_precision') {
+          return openaiChatResponse(
+            JSON.stringify({
+              refused: false,
+              reason: '',
+              passages: chunkIds.map((chunkId) => ({
+                chunkId,
+                useful: true,
+                rationale: 'Useful.',
+              })),
+            }),
+            body.model,
+          );
+        }
+        if (metric === 'context_recall') {
+          const factNums = Array.from(
+            userText.matchAll(/^(\d+)\.\s+"""/gm),
+          ).map((m) => Number(m[1]));
+          return openaiChatResponse(
+            JSON.stringify({
+              refused: false,
+              reason: '',
+              facts: factNums.map((factIndex) => ({
+                factIndex,
+                supported: true,
+                evidenceChunkIds: chunkIds.slice(0, 1),
+                rationale: 'Supported.',
+              })),
+            }),
+            body.model,
+          );
+        }
+        const factNums = Array.from(userText.matchAll(/^(\d+)\.\s+"""/gm)).map(
+          (m) => Number(m[1]),
+        );
+        return openaiChatResponse(
+          JSON.stringify({
+            refused: false,
+            facts: factNums.map((factIndex) => ({
+              factIndex,
+              status: 'satisfied',
+              rationale: 'Satisfied.',
+            })),
+            criticalContradiction: false,
+            acceptanceCriteriaMet: true,
+            rationale: 'Accurate.',
+          }),
+          body.model,
+        );
+      }
+
+      answerDispatchCount += 1;
+      return openaiChatResponse(
+        JSON.stringify({
+          answer: `Grounded answer #${answerDispatchCount}.`,
+          citations: [],
+          abstained: false,
+        }),
+        body.model,
+        { prompt_tokens: 30, completion_tokens: 10, total_tokens: 40 },
+      );
+    });
+
+    const stack = setupStack(
+      {
+        OPENAI_API_KEY: 'fixture-key',
+        OPENAI_CHAT_MODEL: 'two-task-chat',
+        OPENAI_JUDGE_MODEL: 'two-task-judge',
+      },
+      { openai: fakeOpenAI },
+    );
+
+    const sample = stack.datasets.sample().value;
+    // Keep exactly 2 answerable tasks.
+    const answerableTasks = sample.tasks.filter((t) => t.answerable);
+    const keepIds = new Set(answerableTasks.slice(0, 2).map((t) => t.id));
+    let rev = sample.revision;
+    for (const t of sample.tasks) {
+      if (!keepIds.has(t.id)) {
+        rev = stack.datasets.editTask(sample.id, rev, t.id, undefined).revision;
+      }
+    }
+
+    const p1 = stack.pipelines.create({
+      name: 'Two-Task Pipeline',
+      config: {
+        retriever: { mode: 'keyword', topK: 2, deduplicate: false },
+        llm: { model: 'two-task-chat', temperature: 0.2, maxTokens: 200 },
+        judge: { model: 'two-task-judge' },
+      },
+    });
+    const exp = stack.runs.createExperiment({
+      name: 'Partial Ambiguous Recovery',
+      datasetId: sample.id,
+      baselinePipelineId: p1.id,
+      pipelineIds: [p1.id],
+      mode: 'full_rag',
+    });
+
+    const workerOpts = {
+      directory: join(dir, 'blobs'),
+      cloud: new CloudParser('', undefined),
+      indexes: stack.indexes,
+      indexBuilder: stack.indexBuilder,
+      runs: stack.runs,
+      evaluationRunner: stack.evaluationRunner,
+    };
+
+    // --- Sub-case 1: Two-task run, Task 1 answer interrupted before checkpoint, Task 2 completes ---
+    const run1 = stack.runs.createRun(
+      exp.id,
+      { datasetRevision: rev, mode: 'full_rag', judgeEnabled: false },
+      {
+        capabilities: stack.config.capabilities,
+        pricing: stack.config.pricing,
+        budgets: stack.config.budgets,
+      },
+    );
+
+    const origSaveAnswer = stack.runs.saveTaskAnswer.bind(stack.runs);
+    const crashAns = new AbortController();
+    const ansSpy = vi
+      .spyOn(stack.runs, 'saveTaskAnswer')
+      .mockImplementationOnce(() => {
+        crashAns.abort();
+        throw new Error('Interrupted before Task 1 answer checkpoint.');
+      })
+      .mockImplementation((input, guard) => origSaveAnswer(input, guard));
+
+    await runOne(stack.jobs, { ...workerOpts, signal: crashAns.signal });
+    expect(answerDispatchCount).toBe(1);
+
+    // Reclaim job: Task 1 gets "Explicit retry is required", Task 2 succeeds!
+    clock += 10_000;
+    await runOne(stack.jobs, workerOpts);
+    ansSpy.mockRestore();
+
+    // Task 2 succeeded, Task 1 failed ambiguously -> Run & Job MUST be 'failed' so Retry API accepts!
+    expect(answerDispatchCount).toBe(2); // Task 1 (interrupted) + Task 2 (succeeded)
+    const tasksAfterRecovery = stack.runs.listRunTasks(
+      run1.run.id,
+      10,
+      0,
+      p1.id,
+    ).items;
+    expect(tasksAfterRecovery[0]?.state).toBe('failed');
+    expect(tasksAfterRecovery[0]?.errorMessage).toMatch(/Explicit retry/i);
+    expect(tasksAfterRecovery[1]?.state).toBe('succeeded');
+    expect(stack.runs.getRun(run1.run.id).state).toBe('failed');
+    expect(stack.jobs.get(run1.job.id).state).toBe('failed');
+
+    // Retry endpoint MUST accept (202) and preserve Task 2 without re-calling chat for Task 2!
+    const retryRes = await send(
+      stack.app,
+      'POST',
+      `/api/v1/jobs/${run1.job.id}/retry`,
+      {},
+    );
+    expect(retryRes.status).toBe(202);
+    await runOne(stack.jobs, workerOpts);
+    expect(answerDispatchCount).toBe(3); // Only Task 1 retried; Task 2 preserved!
+    expect(stack.runs.getRun(run1.run.id).state).toBe('succeeded');
+
+    // --- Sub-case 2: Ambiguous judge metric on a partial task ---
+    answerDispatchCount = 0;
+    judgeDispatchCount = 0;
+    const run2 = stack.runs.createRun(
+      exp.id,
+      { datasetRevision: rev, mode: 'full_rag', judgeEnabled: true },
+      {
+        capabilities: stack.config.capabilities,
+        pricing: stack.config.pricing,
+        budgets: stack.config.budgets,
+      },
+    );
+
+    const origSaveJudge = stack.runs.saveTaskJudgeMetric.bind(stack.runs);
+    const crashJudge = new AbortController();
+    const judgeSpy = vi
+      .spyOn(stack.runs, 'saveTaskJudgeMetric')
+      .mockImplementationOnce(() => {
+        crashJudge.abort();
+        throw new Error('Interrupted before first judge metric checkpoint.');
+      })
+      .mockImplementation((input, guard) => origSaveJudge(input, guard));
+
+    await runOne(stack.jobs, { ...workerOpts, signal: crashJudge.signal });
+    expect(answerDispatchCount).toBe(1);
+    expect(judgeDispatchCount).toBe(1);
+
+    // Reclaim job: Task 1's first judge metric hits ambiguous guard, remaining metrics & Task 2 succeed.
+    clock += 10_000;
+    await runOne(stack.jobs, workerOpts);
+    judgeSpy.mockRestore();
+
+    const judgeTasksAfterRecovery = stack.runs.listRunTasks(
+      run2.run.id,
+      10,
+      0,
+      p1.id,
+    ).items;
+    expect(judgeTasksAfterRecovery[0]?.state).toBe('partial');
+    expect(judgeTasksAfterRecovery[1]?.state).toBe('succeeded');
+    // Outstanding ambiguous judge metric MUST make the run & job failed/retryable!
+    expect(stack.runs.getRun(run2.run.id).state).toBe('failed');
+    expect(stack.jobs.get(run2.job.id).state).toBe('failed');
+
+    const answersBeforeJudgeRetry = answerDispatchCount;
+    const judgesBeforeJudgeRetry = judgeDispatchCount;
+
+    const retryJudgeRes = await send(
+      stack.app,
+      'POST',
+      `/api/v1/jobs/${run2.job.id}/retry`,
+      {},
+    );
+    expect(retryJudgeRes.status).toBe(202);
+    await runOne(stack.jobs, workerOpts);
+
+    // Completed answers and already-scored judge metrics MUST be preserved!
+    expect(answerDispatchCount).toBe(answersBeforeJudgeRetry);
+    expect(judgeDispatchCount).toBe(judgesBeforeJudgeRetry + 1);
+    expect(stack.runs.getRun(run2.run.id).state).toBe('succeeded');
+  });
+
+  it('preserves completed provider receipts on checkpoint errors, completes query-embedding validation errors once, and retains failed embedding batch metadata', async () => {
+    // --- Sub-case 1: Checkpoint/DB error after successful answer MUST NOT overwrite completed receipt ---
+    const pricingJson = JSON.stringify({
+      version: 'receipt-price-v1',
+      currency: 'USD',
+      entries: [
+        {
+          model: 'receipt-chat',
+          provider: 'openai',
+          unit: 'per_1k_tokens',
+          inputUsd: 1.0,
+          outputUsd: 2.0,
+        },
+        {
+          model: 'receipt-embed',
+          provider: 'openai-compatible',
+          unit: 'per_1k_tokens',
+          inputUsd: 0.5,
+        },
+      ],
+    });
+
+    const chatFetch = vi.fn<typeof fetch>(async (_url, init) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as { model: string };
+      return new Response(
+        JSON.stringify({
+          id: 'chatcmpl-receipt',
+          object: 'chat.completion',
+          created: 1,
+          model: body.model,
+          choices: [
+            {
+              index: 0,
+              finish_reason: 'stop',
+              message: {
+                role: 'assistant',
+                content: JSON.stringify({
+                  answer: 'Verified answer.',
+                  citations: [],
+                  abstained: false,
+                }),
+              },
+            },
+          ],
+          usage: {
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            total_tokens: 15,
+          },
+        }),
+        {
+          status: 200,
+          headers: {
+            'content-type': 'application/json',
+            'x-request-id': 'req-receipt-keep',
+          },
+        },
+      );
+    });
+
+    const stack = setupStack(
+      {
+        OPENAI_API_KEY: 'fixture-key',
+        OPENAI_CHAT_MODEL: 'receipt-chat',
+        PRICE_SCHEDULE_JSON: pricingJson,
+      },
+      { openai: chatFetch },
+    );
+
+    const sample = stack.datasets.sample().value;
+    let rev = sample.revision;
+    for (const extra of sample.tasks.slice(1)) {
+      rev = stack.datasets.editTask(
+        sample.id,
+        rev,
+        extra.id,
+        undefined,
+      ).revision;
+    }
+    const pChat = stack.pipelines.create({
+      name: 'Receipt Chat Pipeline',
+      config: {
+        retriever: { mode: 'keyword', topK: 3, deduplicate: false },
+        llm: { model: 'receipt-chat', temperature: 0.2, maxTokens: 100 },
+      },
+    });
+    const expChat = stack.runs.createExperiment({
+      name: 'Receipt Durability',
+      datasetId: sample.id,
+      baselinePipelineId: pChat.id,
+      pipelineIds: [pChat.id],
+      mode: 'full_rag',
+    });
+    const runChat = stack.runs.createRun(
+      expChat.id,
+      { datasetRevision: rev, mode: 'full_rag', judgeEnabled: false },
+      {
+        capabilities: stack.config.capabilities,
+        pricing: stack.config.pricing,
+        budgets: stack.config.budgets,
+      },
+    );
+
+    // Inject a SQLite error during saveTaskAnswer WITHOUT aborting the signal.
+    const saveSpy = vi
+      .spyOn(stack.runs, 'saveTaskAnswer')
+      .mockImplementationOnce(() => {
+        throw new Error('SQLITE_IOERR simulated during answer insert');
+      });
+
+    await expect(
+      stack.evaluationRunner.execute(runChat.run.id),
+    ).rejects.toThrow(/SQLITE_IOERR/i);
+    saveSpy.mockRestore();
+
+    const chatCallsAfterErr = db
+      .prepare(
+        "SELECT id, status, error_code AS errorCode, request_id AS requestId, total_tokens AS totalTokens, cost_status AS costStatus, cost_usd AS costUsd FROM provider_calls WHERE run_id = ? AND operation = 'generate'",
+      )
+      .all(runChat.run.id);
+    expect(chatCallsAfterErr).toHaveLength(1);
+    expect(chatCallsAfterErr[0]).toMatchObject({
+      status: 'succeeded',
+      errorCode: null,
+      requestId: 'req-receipt-keep',
+      totalTokens: 15,
+      costStatus: 'known',
+    });
+    expect(Number(chatCallsAfterErr[0]?.costUsd)).toBeCloseTo(0.02, 6);
+
+    // Direct call to completeProviderCall on an already-completed row MUST be a no-op!
+    stack.runs.completeProviderCall(String(chatCallsAfterErr[0]?.id), {
+      provider: 'openai',
+      model: 'receipt-chat',
+      requestId: null,
+      status: 'failed',
+      errorCode: 'upstream_failure',
+      latencyMs: 999,
+      priceSchedule: stack.config.pricing,
+    });
+    const chatCallRecheck = db
+      .prepare(
+        'SELECT status, request_id AS requestId, total_tokens AS totalTokens, cost_usd AS costUsd FROM provider_calls WHERE id = ?',
+      )
+      .get(String(chatCallsAfterErr[0]?.id));
+    expect(chatCallRecheck).toMatchObject({
+      status: 'succeeded',
+      requestId: 'req-receipt-keep',
+      totalTokens: 15,
+    });
+    expect(Number(chatCallRecheck?.costUsd)).toBeCloseTo(0.02, 6);
+
+    // --- Sub-case 2 & 3: Failed corpus embedding batch keeps usage+requestId, AND malformed query embedding completes once (never stuck dispatch_in_flight) ---
+    const points = new Map<
+      string,
+      { vector: number[]; payload: Record<string, unknown> }
+    >();
+    const fakeQdrant: QdrantClientLike = {
+      collectionExists: async () => ({ exists: true }),
+      getCollection: async () => ({
+        config: { params: { vectors: { size: 3 } } },
+      }),
+      createCollection: async () => ({}),
+      createPayloadIndex: async () => ({}),
+      upsert: async (_col, args) => {
+        for (const p of args.points) {
+          points.set(p.id, { vector: p.vector, payload: p.payload });
+        }
+      },
+      query: async () => ({ points: [] }),
+      count: async (_col, args) => {
+        const genFilter = args.filter.must.find(
+          (m) => m.key === 'generationId',
+        );
+        const targetGen =
+          genFilter && 'match' in genFilter && 'value' in genFilter.match
+            ? genFilter.match.value
+            : undefined;
+        let count = 0;
+        for (const p of points.values()) {
+          if (p.payload.generationId === targetGen) count += 1;
+        }
+        return { count };
+      },
+      delete: async () => ({}),
+      deleteCollection: async () => ({}),
+    };
+    const qdrant = new QdrantStore({
+      url: 'http://qdrant.invalid',
+      client: fakeQdrant,
+    });
+
+    const buildDenseStack = (embedFetch: typeof fetch) => {
+      const cfg = readConfig({
+        BLOB_DIRECTORY: join(dir, 'blobs'),
+        QDRANT_URL: 'http://qdrant.invalid',
+        LOCAL_EMBED_BASE_URL: 'http://local-embed.invalid/v1',
+        LOCAL_EMBED_MODEL: 'receipt-embed',
+        EMBED_BATCH_SIZE: '2',
+        PRICE_SCHEDULE_JSON: pricingJson,
+      });
+      const jobs = new Jobs(db, () => clock, 5000);
+      const datasets = new Datasets(db, jobs);
+      const pipelines = new Pipelines(db);
+      const indexes = new Indexes(db, jobs, () => clock);
+      const runs = new Runs(
+        db,
+        datasets,
+        pipelines,
+        indexes,
+        jobs,
+        () => clock,
+      );
+      const providers = new ProviderRegistry(cfg, {
+        openaiCompatible: embedFetch,
+      });
+      const indexBuilder = new IndexBuilder({
+        indexes,
+        providers,
+        qdrant,
+        embedBatchSize: 2,
+        now: () => clock,
+      });
+      const retrieval = new RetrievalService({
+        indexes,
+        providers,
+        qdrant,
+        now: () => clock,
+      });
+      const runner = new EvaluationRunner({
+        runs,
+        indexes,
+        indexBuilder,
+        retrieval,
+        providers,
+        now: () => clock,
+        maxTransientRetries: 0,
+        retryDelayMs: 1,
+      });
+      return { cfg, datasets, pipelines, indexes, runs, retrieval, runner };
+    };
+
+    // Sub-case 2: Corpus embedding batch 2 returns wrong dimensions WITH billed usage + request ID!
+    let corpusBatch = 0;
+    const dimMismatchFetch = vi.fn<typeof fetch>(async (_url, init) => {
+      corpusBatch += 1;
+      const body = JSON.parse(String(init?.body ?? '{}')) as {
+        input: string[];
+      };
+      const vec = corpusBatch === 1 ? [0.5, 0.5, 0.5] : [0.5, 0.5]; // batch 2 wrong dim!
+      return new Response(
+        JSON.stringify({
+          object: 'list',
+          model: 'receipt-embed',
+          data: body.input.map((_t, idx) => ({
+            object: 'embedding',
+            index: idx,
+            embedding: vec,
+          })),
+          usage: {
+            prompt_tokens: corpusBatch === 1 ? 10 : 14,
+            total_tokens: corpusBatch === 1 ? 10 : 14,
+          },
+        }),
+        {
+          status: 200,
+          headers: {
+            'content-type': 'application/json',
+            'x-request-id': `req-corpus-${corpusBatch}`,
+          },
+        },
+      );
+    });
+
+    const dStack1 = buildDenseStack(dimMismatchFetch);
+    const pDim = dStack1.pipelines.create({
+      name: 'Receipt Dim Mismatch',
+      config: {
+        chunking: { strategy: 'character-window', chunkSize: 120, overlap: 10 },
+        embedding: { model: 'receipt-embed' },
+        retriever: { mode: 'dense', topK: 3, deduplicate: false },
+      },
+    });
+    const expDim = dStack1.runs.createExperiment({
+      name: 'Failed Batch Receipt',
+      datasetId: sample.id,
+      baselinePipelineId: pDim.id,
+      pipelineIds: [pDim.id],
+      mode: 'retrieval_only',
+    });
+    const runDim = dStack1.runs.createRun(
+      expDim.id,
+      { datasetRevision: rev },
+      {
+        capabilities: dStack1.cfg.capabilities,
+        pricing: dStack1.cfg.pricing,
+        budgets: dStack1.cfg.budgets,
+      },
+    );
+    await dStack1.runner.execute(runDim.run.id);
+
+    const failedBatchRows = db
+      .prepare(
+        "SELECT status, error_code AS errorCode, request_id AS requestId, total_tokens AS totalTokens, cost_status AS costStatus FROM provider_calls WHERE run_id = ? AND operation = 'corpus_embed' ORDER BY rowid ASC",
+      )
+      .all(runDim.run.id);
+    expect(failedBatchRows).toHaveLength(2);
+    expect(failedBatchRows[0]).toMatchObject({
+      status: 'succeeded',
+      requestId: 'req-corpus-1',
+      totalTokens: 10,
+      costStatus: 'known',
+    });
+    expect(failedBatchRows[1]).toMatchObject({
+      status: 'failed',
+      errorCode: 'dimension_mismatch',
+      requestId: 'req-corpus-2',
+      totalTokens: 14,
+      costStatus: 'known',
+    });
+
+    // Sub-case 3: Malformed query-embedding response (wrong count -> adapter throws partial_batch)
+    // MUST complete the query_embed row once as 'failed' with its receipt (never stuck dispatch_in_flight)!
+    let queryEmbedPhase = false;
+    const badQueryEmbedFetch = vi.fn<typeof fetch>(async (_url, init) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as {
+        input: string[];
+      };
+      if (queryEmbedPhase) {
+        return new Response(
+          JSON.stringify({
+            object: 'list',
+            model: 'receipt-embed',
+            data: [], // 0 vectors for 1 query -> OpenAIProvider throws partial_batch!
+            usage: { prompt_tokens: 9, total_tokens: 9 },
+          }),
+          {
+            status: 200,
+            headers: {
+              'content-type': 'application/json',
+              'x-request-id': 'req-qembed-partial',
+            },
+          },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          object: 'list',
+          model: 'receipt-embed',
+          data: body.input.map((_t, idx) => ({
+            object: 'embedding',
+            index: idx,
+            embedding: [0.3, 0.3, 0.3],
+          })),
+          usage: { prompt_tokens: 8, total_tokens: 8 },
+        }),
+        {
+          status: 200,
+          headers: {
+            'content-type': 'application/json',
+            'x-request-id': 'req-corpus-ok',
+          },
+        },
+      );
+    });
+
+    const dStack2 = buildDenseStack(badQueryEmbedFetch);
+    const pQEmbed = dStack2.pipelines.create({
+      name: 'Query Embed Partial Batch',
+      config: {
+        chunking: { strategy: 'character-window', chunkSize: 300, overlap: 20 },
+        embedding: { model: 'receipt-embed' },
+        retriever: { mode: 'dense', topK: 3, deduplicate: false },
+      },
+    });
+    // Pre-build a ready index generation so only query_embed runs in queryEmbedPhase.
+    const planOk = dStack2.indexes.planOrReuse(
+      c.createIndexRequest.parse({
+        datasetId: sample.id,
+        datasetRevision: rev,
+        mode: 'dense',
+        chunking: { strategy: 'character-window', chunkSize: 300, overlap: 20 },
+        embeddingModel: 'receipt-embed',
+      }),
+      {
+        provider: 'openai-compatible',
+        model: 'receipt-embed',
+        endpoint:
+          dStack2.cfg.providerProfiles.find((p) => p.role === 'embedding')
+            ?.endpointIdentity ?? null,
+      },
+      null,
+      false,
+    );
+    await new IndexBuilder({
+      indexes: dStack2.indexes,
+      providers: new ProviderRegistry(dStack2.cfg, {
+        openaiCompatible: badQueryEmbedFetch,
+      }),
+      qdrant,
+    }).build(planOk.index.id);
+
+    queryEmbedPhase = true;
+    const expQEmbed = dStack2.runs.createExperiment({
+      name: 'Query Embed Validation Receipt',
+      datasetId: sample.id,
+      baselinePipelineId: pQEmbed.id,
+      pipelineIds: [pQEmbed.id],
+      mode: 'retrieval_only',
+    });
+    const runQEmbed = dStack2.runs.createRun(
+      expQEmbed.id,
+      { datasetRevision: rev },
+      {
+        capabilities: dStack2.cfg.capabilities,
+        pricing: dStack2.cfg.pricing,
+        budgets: dStack2.cfg.budgets,
+      },
+    );
+    await dStack2.runner.execute(runQEmbed.run.id);
+
+    const qEmbedRows = db
+      .prepare(
+        "SELECT status, error_code AS errorCode, request_id AS requestId, total_tokens AS totalTokens FROM provider_calls WHERE run_id = ? AND operation = 'query_embed'",
+      )
+      .all(runQEmbed.run.id);
+    expect(qEmbedRows).toHaveLength(1);
+    expect(qEmbedRows[0]).toMatchObject({
+      status: 'failed',
+      errorCode: 'partial_batch',
+      requestId: 'req-qembed-partial',
+      totalTokens: 9,
+    });
+
+    // Also verify service-level query-embedding vector-count mismatch calls onProviderCall exactly once.
+    const svcAuditCalls: Array<{
+      status: string;
+      errorCode: string | null;
+      requestId: string | null;
+      usage?: c.ProviderUsage;
+    }> = [];
+    const customEmbedProviders = new ProviderRegistry(dStack2.cfg);
+    vi.spyOn(customEmbedProviders, 'resolveEmbedding').mockReturnValue({
+      profile: dStack2.cfg.providerProfiles[0],
+      provider: {
+        kind: 'openai-compatible',
+        capabilities: dStack2.cfg.providerProfiles[0].capabilities,
+        embed: async () => ({
+          vectors: [],
+          dimensions: 3,
+          model: 'receipt-embed',
+          provider: 'openai-compatible',
+          requestIds: ['req-svc-partial'],
+          usage: { inputTokens: 6, outputTokens: 0, totalTokens: 6 },
+        }),
+      },
+    });
+    const svcRetrieval = new RetrievalService({
+      indexes: dStack2.indexes,
+      providers: customEmbedProviders,
+      qdrant,
+    });
+    await expect(
+      svcRetrieval.search(
+        planOk.index.id,
+        c.indexSearchRequest.parse({
+          query: 'chunking',
+          mode: 'dense',
+          topK: 3,
+        }),
+        undefined,
+        {
+          onProviderCall: (audit) => svcAuditCalls.push(audit),
+        },
+      ),
+    ).rejects.toThrow(/one vector/i);
+    expect(svcAuditCalls).toHaveLength(1);
+    expect(svcAuditCalls[0]).toMatchObject({
+      status: 'failed',
+      errorCode: 'partial_batch',
+      requestId: 'req-svc-partial',
+      usage: { inputTokens: 6, outputTokens: 0, totalTokens: 6 },
+    });
+  });
+
+  it('freezes credential-free endpoint identity for chat/judge/embedding/rerank, scopes dense-index reuse by endpoint, and pins default reranker model', async () => {
+    // 1. Changing LOCAL_CHAT_BASE_URL while retaining provider kind and model MUST fail before sending data!
+    const submitChat = setupStack({
+      LOCAL_CHAT_BASE_URL: 'http://127.0.0.1:11434/v1',
+      LOCAL_CHAT_API_KEY: 'local-secret-1',
+      LOCAL_CHAT_MODEL: 'local-model-x',
+      LOCAL_JUDGE_MODEL: 'local-judge-x',
+      LOCAL_CHAT_SUPPORTS_STRUCTURED_OUTPUT: 'true',
+    });
+    const sample = submitChat.datasets.sample().value;
+    let rev = sample.revision;
+    for (const extra of sample.tasks.slice(1)) {
+      rev = submitChat.datasets.editTask(
+        sample.id,
+        rev,
+        extra.id,
+        undefined,
+      ).revision;
+    }
+
+    // Capabilities API must NOT leak base URLs or keys.
+    const capRes = await send(submitChat.app, 'GET', '/api/v1/capabilities');
+    expect(JSON.stringify(capRes.body)).not.toContain('11434');
+    expect(JSON.stringify(capRes.body)).not.toContain('local-secret-1');
+
+    const pChat = submitChat.pipelines.create({
+      name: 'Local Endpoint Pin',
+      config: {
+        retriever: { mode: 'keyword', topK: 3, deduplicate: false },
+        llm: { model: 'local-model-x', temperature: 0.2, maxTokens: 150 },
+        judge: { model: 'local-judge-x' },
+      },
+    });
+    const expChat = submitChat.runs.createExperiment({
+      name: 'Endpoint Pin Chat',
+      datasetId: sample.id,
+      baselinePipelineId: pChat.id,
+      pipelineIds: [pChat.id],
+      mode: 'full_rag',
+    });
+    const createdChat = submitChat.runs.createRun(
+      expChat.id,
+      { datasetRevision: rev, mode: 'full_rag', judgeEnabled: true },
+      {
+        capabilities: submitChat.config.capabilities,
+        pricing: submitChat.config.pricing,
+        budgets: submitChat.config.budgets,
+      },
+    );
+    // Run detail API must NOT leak internal endpoint URLs or keys.
+    expect(JSON.stringify(createdChat.run)).not.toContain('11434');
+    expect(JSON.stringify(createdChat.run)).not.toContain('local-secret-1');
+
+    // Restart worker with replacement LOCAL_CHAT_BASE_URL (same kind & model!) -> ZERO requests sent!
+    const replacementChatFetch = vi.fn<typeof fetch>(async () =>
+      openaiChatResponse(
+        JSON.stringify({
+          answer: 'WRONG ENDPOINT',
+          citations: [],
+          abstained: false,
+        }),
+        'local-model-x',
+      ),
+    );
+    const movedChat = setupStack(
+      {
+        LOCAL_CHAT_BASE_URL: 'http://127.0.0.1:19999/v1',
+        LOCAL_CHAT_API_KEY: 'local-secret-2',
+        LOCAL_CHAT_MODEL: 'local-model-x',
+        LOCAL_JUDGE_MODEL: 'local-judge-x',
+        LOCAL_CHAT_SUPPORTS_STRUCTURED_OUTPUT: 'true',
+      },
+      { openaiCompatible: replacementChatFetch },
+    );
+    await runOne(movedChat.jobs, {
+      directory: join(dir, 'blobs'),
+      cloud: new CloudParser('', undefined),
+      indexes: movedChat.indexes,
+      indexBuilder: movedChat.indexBuilder,
+      runs: movedChat.runs,
+      evaluationRunner: movedChat.evaluationRunner,
+    });
+    expect(replacementChatFetch).not.toHaveBeenCalled();
+    expect(movedChat.runs.getRun(createdChat.run.id).state).toBe('failed');
+    expect(movedChat.jobs.get(createdChat.job.id).state).toBe('failed');
+
+    // Same normalized endpoint (trailing slash + rotated API key) DOES match and succeed!
+    const sameEndpointFetch = vi.fn<typeof fetch>(async (_url, init) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as { model: string };
+      return openaiChatResponse(
+        JSON.stringify({
+          answer: 'Allowed same endpoint.',
+          citations: [],
+          abstained: false,
+        }),
+        body.model,
+      );
+    });
+    const createdChat2 = submitChat.runs.createRun(
+      expChat.id,
+      { datasetRevision: rev, mode: 'full_rag', judgeEnabled: false },
+      {
+        capabilities: submitChat.config.capabilities,
+        pricing: submitChat.config.pricing,
+        budgets: submitChat.config.budgets,
+      },
+    );
+    const rotatedKeySameEndpoint = setupStack(
+      {
+        LOCAL_CHAT_BASE_URL: 'http://127.0.0.1:11434/v1/',
+        LOCAL_CHAT_API_KEY: 'rotated-secret-key',
+        LOCAL_CHAT_MODEL: 'local-model-x',
+        LOCAL_JUDGE_MODEL: 'local-judge-x',
+        LOCAL_CHAT_SUPPORTS_STRUCTURED_OUTPUT: 'true',
+      },
+      { openaiCompatible: sameEndpointFetch },
+    );
+    await runOne(rotatedKeySameEndpoint.jobs, {
+      directory: join(dir, 'blobs'),
+      cloud: new CloudParser('', undefined),
+      indexes: rotatedKeySameEndpoint.indexes,
+      indexBuilder: rotatedKeySameEndpoint.indexBuilder,
+      runs: rotatedKeySameEndpoint.runs,
+      evaluationRunner: rotatedKeySameEndpoint.evaluationRunner,
+    });
+    expect(sameEndpointFetch).toHaveBeenCalledTimes(1);
+    expect(rotatedKeySameEndpoint.runs.getRun(createdChat2.run.id).state).toBe(
+      'succeeded',
+    );
+
+    // 2. Default reranker (empty configured model) resolved at freeze time MUST reject changed RERANK_MODEL AND changed RERANK_BASE_URL before sending data!
+    const submitRerank = setupStack({
+      RERANK_BASE_URL: 'http://rerank-a.invalid/rerank',
+      RERANK_MODEL: 'reranker-v1',
+    });
+    const pRerank = submitRerank.pipelines.create({
+      name: 'Default Reranker Pipeline',
+      config: {
+        retriever: { mode: 'keyword', topK: 3, deduplicate: false },
+        reranker: { enabled: true, model: '', failurePolicy: 'fail' },
+      },
+    });
+    const expRerank = submitRerank.runs.createExperiment({
+      name: 'Reranker Pin Exp',
+      datasetId: sample.id,
+      baselinePipelineId: pRerank.id,
+      pipelineIds: [pRerank.id],
+      mode: 'retrieval_only',
+    });
+    const createdRerankModel = submitRerank.runs.createRun(
+      expRerank.id,
+      { datasetRevision: rev },
+      {
+        capabilities: submitRerank.config.capabilities,
+        pricing: submitRerank.config.pricing,
+        budgets: submitRerank.config.budgets,
+      },
+    );
+    expect(createdRerankModel.run.pipelines[0]?.resolvedModels.rerank).toEqual({
+      provider: 'http',
+      model: 'reranker-v1',
+    });
+
+    // Worker restarts with RERANK_MODEL changed to 'reranker-v2' -> MUST fail without calling rerankFetch!
+    const rerankFetchWrongModel = vi.fn<typeof fetch>(async () =>
+      Response.json({ results: [{ index: 0, relevance_score: 0.9 }] }),
+    );
+    const movedRerankModel = setupStack(
+      {
+        RERANK_BASE_URL: 'http://rerank-a.invalid/rerank',
+        RERANK_MODEL: 'reranker-v2',
+      },
+      { rerank: rerankFetchWrongModel },
+    );
+    await runOne(movedRerankModel.jobs, {
+      directory: join(dir, 'blobs'),
+      cloud: new CloudParser('', undefined),
+      indexes: movedRerankModel.indexes,
+      indexBuilder: movedRerankModel.indexBuilder,
+      runs: movedRerankModel.runs,
+      evaluationRunner: movedRerankModel.evaluationRunner,
+    });
+    expect(rerankFetchWrongModel).not.toHaveBeenCalled();
+    expect(movedRerankModel.runs.getRun(createdRerankModel.run.id).state).toBe(
+      'failed',
+    );
+
+    // Worker restarts with RERANK_BASE_URL changed (same RERANK_MODEL) -> MUST fail without calling rerankFetch!
+    const createdRerankUrl = submitRerank.runs.createRun(
+      expRerank.id,
+      { datasetRevision: rev },
+      {
+        capabilities: submitRerank.config.capabilities,
+        pricing: submitRerank.config.pricing,
+        budgets: submitRerank.config.budgets,
+      },
+    );
+    const rerankFetchWrongUrl = vi.fn<typeof fetch>(async () =>
+      Response.json({ results: [{ index: 0, relevance_score: 0.9 }] }),
+    );
+    const movedRerankUrl = setupStack(
+      {
+        RERANK_BASE_URL: 'http://rerank-b.invalid/rerank',
+        RERANK_MODEL: 'reranker-v1',
+      },
+      { rerank: rerankFetchWrongUrl },
+    );
+    await runOne(movedRerankUrl.jobs, {
+      directory: join(dir, 'blobs'),
+      cloud: new CloudParser('', undefined),
+      indexes: movedRerankUrl.indexes,
+      indexBuilder: movedRerankUrl.indexBuilder,
+      runs: movedRerankUrl.runs,
+      evaluationRunner: movedRerankUrl.evaluationRunner,
+    });
+    expect(rerankFetchWrongUrl).not.toHaveBeenCalled();
+    expect(movedRerankUrl.runs.getRun(createdRerankUrl.run.id).state).toBe(
+      'failed',
+    );
+
+    // 3. Dense-index reuse MUST include embedding endpoint identity, AND frozen dense runs MUST reject changed LOCAL_EMBED_BASE_URL before sending data!
+    const points = new Map<
+      string,
+      { vector: number[]; payload: Record<string, unknown> }
+    >();
+    const fakeQdrant: QdrantClientLike = {
+      collectionExists: async () => ({ exists: true }),
+      getCollection: async () => ({
+        config: { params: { vectors: { size: 3 } } },
+      }),
+      createCollection: async () => ({}),
+      createPayloadIndex: async () => ({}),
+      upsert: async (_col, args) => {
+        for (const p of args.points) {
+          points.set(p.id, { vector: p.vector, payload: p.payload });
+        }
+      },
+      query: async () => ({ points: [] }),
+      count: async (_col, args) => {
+        const genFilter = args.filter.must.find(
+          (m) => m.key === 'generationId',
+        );
+        const targetGen =
+          genFilter && 'match' in genFilter && 'value' in genFilter.match
+            ? genFilter.match.value
+            : undefined;
+        let count = 0;
+        for (const p of points.values()) {
+          if (p.payload.generationId === targetGen) count += 1;
+        }
+        return { count };
+      },
+      delete: async () => ({}),
+      deleteCollection: async () => ({}),
+    };
+    const qdrant = new QdrantStore({
+      url: 'http://qdrant.invalid',
+      client: fakeQdrant,
+    });
+
+    const embedFetchA = vi.fn<typeof fetch>(async (_url, init) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as {
+        input: string[];
+      };
+      return Response.json({
+        object: 'list',
+        model: 'shared-embed-ep',
+        data: body.input.map((_t, idx) => ({
+          object: 'embedding',
+          index: idx,
+          embedding: [0.4, 0.5, 0.6],
+        })),
+      });
+    });
+
+    const cfgEmbedA = readConfig({
+      BLOB_DIRECTORY: join(dir, 'blobs'),
+      QDRANT_URL: 'http://qdrant.invalid',
+      LOCAL_EMBED_BASE_URL: 'http://127.0.0.1:11434/v1',
+      LOCAL_EMBED_MODEL: 'shared-embed-ep',
+    });
+    const jobsA = new Jobs(db, () => clock, 5000);
+    const datasetsA = new Datasets(db, jobsA);
+    const pipelinesA = new Pipelines(db);
+    const indexesA = new Indexes(db, jobsA, () => clock);
+    const runsA = new Runs(
+      db,
+      datasetsA,
+      pipelinesA,
+      indexesA,
+      jobsA,
+      () => clock,
+    );
+    const providersA = new ProviderRegistry(cfgEmbedA, {
+      openaiCompatible: embedFetchA,
+    });
+    const appEmbedA = createApp({
+      config: cfgEmbedA,
+      datasets: datasetsA,
+      pipelines: pipelinesA,
+      indexes: indexesA,
+      runs: runsA,
+      providers: providersA,
+      qdrant,
+      logger: createLogger({ write: () => {} }),
+      ready: () => true,
+    });
+
+    // Build ready dense index against endpoint A via HTTP API.
+    const idxResA = await send(appEmbedA, 'POST', '/api/v1/indexes', {
+      datasetId: sample.id,
+      datasetRevision: rev,
+      mode: 'dense',
+      embeddingModel: 'shared-embed-ep',
+    });
+    expect(idxResA.status).toBe(202);
+    const idxA = c.createIndexResult.parse(idxResA.body);
+    await new IndexBuilder({
+      indexes: indexesA,
+      providers: providersA,
+      qdrant,
+    }).build(idxA.index.id);
+
+    // Same model & mode against endpoint B MUST NOT reuse endpoint A's dense index!
+    const embedFetchB = vi.fn<typeof fetch>(async () =>
+      Response.json({
+        object: 'list',
+        model: 'shared-embed-ep',
+        data: [{ object: 'embedding', index: 0, embedding: [0.1, 0.2, 0.3] }],
+      }),
+    );
+    const cfgEmbedB = readConfig({
+      BLOB_DIRECTORY: join(dir, 'blobs'),
+      QDRANT_URL: 'http://qdrant.invalid',
+      LOCAL_EMBED_BASE_URL: 'http://127.0.0.1:22434/v1',
+      LOCAL_EMBED_MODEL: 'shared-embed-ep',
+    });
+    const providersB = new ProviderRegistry(cfgEmbedB, {
+      openaiCompatible: embedFetchB,
+    });
+    const appEmbedB = createApp({
+      config: cfgEmbedB,
+      datasets: datasetsA,
+      pipelines: pipelinesA,
+      indexes: indexesA,
+      runs: runsA,
+      providers: providersB,
+      qdrant,
+      logger: createLogger({ write: () => {} }),
+      ready: () => true,
+    });
+    const idxResB = await send(appEmbedB, 'POST', '/api/v1/indexes', {
+      datasetId: sample.id,
+      datasetRevision: rev,
+      mode: 'dense',
+      embeddingModel: 'shared-embed-ep',
+    });
+    const idxB = c.createIndexResult.parse(idxResB.body);
+    expect(idxB.reused).toBe(false);
+    expect(idxB.index.id).not.toBe(idxA.index.id);
+
+    // Freeze a dense run against endpoint A, then execute worker pointed at endpoint B -> ZERO calls to endpoint B!
+    const pDenseEp = pipelinesA.create({
+      name: 'Dense Endpoint Pin',
+      config: {
+        embedding: { model: 'shared-embed-ep' },
+        retriever: { mode: 'dense', topK: 3, deduplicate: false },
+      },
+    });
+    const expDenseEp = runsA.createExperiment({
+      name: 'Dense Endpoint Pin Exp',
+      datasetId: sample.id,
+      baselinePipelineId: pDenseEp.id,
+      pipelineIds: [pDenseEp.id],
+      mode: 'retrieval_only',
+    });
+    const createdDenseEp = runsA.createRun(
+      expDenseEp.id,
+      { datasetRevision: rev },
+      {
+        capabilities: cfgEmbedA.capabilities,
+        pricing: cfgEmbedA.pricing,
+        budgets: cfgEmbedA.budgets,
+      },
+    );
+    const runnerB = new EvaluationRunner({
+      runs: runsA,
+      indexes: indexesA,
+      indexBuilder: new IndexBuilder({
+        indexes: indexesA,
+        providers: providersB,
+        qdrant,
+      }),
+      retrieval: new RetrievalService({
+        indexes: indexesA,
+        providers: providersB,
+        qdrant,
+      }),
+      providers: providersB,
+      now: () => clock,
+    });
+    await runnerB.execute(createdDenseEp.run.id);
+    expect(embedFetchB).not.toHaveBeenCalled();
+    expect(runsA.getRun(createdDenseEp.run.id).state).toBe('failed');
+  });
+});

@@ -1,16 +1,27 @@
+import * as c from '@rag-eval/contracts';
+import {
+  useMutation,
+  useQueries,
+  useQuery,
+  useQueryClient,
+} from '@tanstack/react-query';
+import { FileText, Play, RefreshCw, RotateCcw, Square } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
-import { Play, FileText } from 'lucide-react';
+import { Link, useSearchParams } from 'react-router';
+import {
+  pipelineQuery,
+  request,
+  useCapabilities,
+  useDatasetSelection,
+  useList,
+  useSelection,
+} from '../data/workspace';
+import { reportPath } from './HistoryPage';
+import { Badge } from './ui/badge';
 import { Button } from './ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from './ui/card';
+import { Input } from './ui/input';
 import { Progress } from './ui/progress';
-import { Badge } from './ui/badge';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from './ui/select';
 import {
   Table,
   TableBody,
@@ -19,1020 +30,879 @@ import {
   TableHeader,
   TableRow,
 } from './ui/table';
-import { useDataset } from '../state/dataset';
-import { usePipelines } from '../state/pipelines';
-import { useExperimentResults } from '../state/experimentResults';
-import {
-  chunkDocumentsWithConfig,
-  summarizeChunkGroups,
-  type ParsedDocument,
-  type DocumentChunkGroup,
-  type DocumentChunk,
-} from '../lib/chunking';
-import { upsertChunks, answerQuestion, judgeAnswers, parseDocument } from '../lib/backend';
-import type { DatasetDocument, DatasetTask } from '../types/dataset';
-import type { Pipeline } from '../types/pipeline';
-import type {
-  AnswerDetail,
-  ExperimentPipelineResult,
-  ExperimentRun,
-  PipelineMetrics,
-  JudgingSummary,
-  RetrievedChunk,
-} from '../types/experiment';
-import { METRIC_DEFINITIONS } from '../types/experiment';
 
-interface ExperimentsPageProps {
-  onNext: () => void;
+const ACTIVE_STATES = new Set<c.JobState>([
+  'queued',
+  'running',
+  'cancellation_requested',
+]);
+
+function formatMetric(value: number | null) {
+  return value === null ? 'Unavailable' : value.toFixed(3);
 }
 
-type Stage = 'idle' | 'parsing' | 'chunking' | 'answering' | 'judging' | 'complete';
+function formatMs(value: number | null) {
+  return value === null ? '—' : `${Math.round(value)} ms`;
+}
 
-const CHAT_COST_PER_1K_TOKENS: Record<string, { input: number; output: number }> = {
-  // Rates reflect the Standard tier prices (per 1M tokens) normalized to a 1K token basis.
-  'gpt-5': { input: 0.00125, output: 0.0100 },
-  'gpt-5-chat-latest': { input: 0.00125, output: 0.0100 },
-  'gpt-5-codex': { input: 0.00125, output: 0.0100 },
-  'gpt-5-mini': { input: 0.00025, output: 0.0020 },
-  'gpt-5-nano': { input: 0.00005, output: 0.0004 },
-  'gpt-5-pro': { input: 0.0150, output: 0.1200 },
-  'gpt-4.1': { input: 0.0020, output: 0.0080 },
-  'gpt-4.1-mini': { input: 0.0004, output: 0.0016 },
-  'gpt-4.1-nano': { input: 0.0001, output: 0.0004 },
-  'gpt-4o': { input: 0.0025, output: 0.0100 },
-  'gpt-4o-2024-05-13': { input: 0.0050, output: 0.0150 },
-  'gpt-4o-mini': { input: 0.00015, output: 0.00060 },
-  'gpt-4o-mini-2024-07-18': { input: 0.00015, output: 0.00060 },
-  'gpt-4-turbo': { input: 0.0100, output: 0.0300 },
-  'gpt-3.5-turbo': { input: 0.0005, output: 0.0015 },
-};
+function formatCostBucket(bucket: c.CostBucket) {
+  if (bucket.status === 'zero') return '$0.0000';
+  if (bucket.status === 'known' && bucket.totalUsd !== null) {
+    return `$${bucket.totalUsd.toFixed(4)}`;
+  }
+  if (bucket.status === 'partial') {
+    return `$${bucket.knownUsd.toFixed(4)} partial (${bucket.pricedCalls}/${bucket.totalCalls} priced)`;
+  }
+  return `Unknown (${bucket.totalCalls} unpriced)`;
+}
 
-const DEFAULT_CHAT_PRICING = { input: 0.0025, output: 0.0100 };
+function stateBadgeVariant(
+  state: string,
+): 'default' | 'secondary' | 'outline' | 'destructive' {
+  if (state === 'succeeded') return 'default';
+  if (state === 'failed') return 'destructive';
+  if (state === 'cancelled') return 'outline';
+  return 'secondary';
+}
 
-const normalizeModelKey = (model?: string) => model?.toLowerCase().trim() ?? '';
-
-const estimateChatCost = (
-  model: string,
-  usage: { promptTokens: number; completionTokens: number }
-) => {
-  const pricing =
-    CHAT_COST_PER_1K_TOKENS[normalizeModelKey(model)] ?? DEFAULT_CHAT_PRICING;
-  return (
-    (usage.promptTokens / 1000) * pricing.input +
-    (usage.completionTokens / 1000) * pricing.output
+export function ExperimentsPage() {
+  const cache = useQueryClient();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const { detail: datasetDetail, list: datasetList } = useDatasetSelection();
+  const pipelineList = useList('pipelines');
+  const capabilities = useCapabilities();
+  const [baselineId, setBaselineId] = useSelection(
+    'rag-eval.baseline',
+    pipelineList.data,
   );
-};
 
-const computePercentile = (values: number[], percentile: number) => {
-  if (!values.length) {
-    return 0;
-  }
-  const sorted = [...values].sort((a, b) => a - b);
-  const rank = Math.ceil(percentile * sorted.length) - 1;
-  const index = Math.min(sorted.length - 1, Math.max(0, rank));
-  return sorted[index];
-};
-
-interface TaskResult {
-  taskId: string;
-  question: string;
-  expectedAnswer: string;
-  answer: string;
-  matches: Array<{
-    id: string;
-    score: number;
-    text: string;
-    documentName?: string;
-  }>;
-  latencyMs?: number;
-  usage?: {
-    promptTokens: number;
-    completionTokens: number;
-    totalTokens: number;
-  };
-}
-
-const formatTimestamp = () =>
-  new Date().toLocaleString(undefined, {
-    dateStyle: 'medium',
-    timeStyle: 'short',
+  const pipelineDetails = useQueries({
+    queries: (pipelineList.data ?? []).map((p) => pipelineQuery(p.id)),
   });
+  const savedPipelines = useMemo(
+    () => pipelineDetails.flatMap((q) => (q.data ? [q.data] : [])),
+    [pipelineDetails],
+  );
 
-const DEFAULT_PIPELINE: Pipeline = {
-  id: 'default-pipeline',
-  name: 'Default Pipeline',
-  chunking: {
-    strategy: 'recursive',
-    chunkSize: 500,
-    overlap: 50,
-  },
-  embedding: { model: 'text-embedding-3-small' },
-  retriever: { topK: 5, deduplicate: true },
-  reranker: { enabled: false, model: 'cohere-rerank' },
-  llm: { model: 'gpt-4o-mini', temperature: 0.3, maxTokens: 512 },
-  judge: { model: 'gpt-4o-mini' },
-};
-
-const getEmbeddingVectorDim = (model: string) => {
-  const normalized = model.toLowerCase();
-  if (normalized.includes('large')) {
-    return 3072;
-  }
-  if (normalized.includes('small')) {
-    return 1536;
-  }
-  return 1536;
-};
-
-export function ExperimentsPage({ onNext }: ExperimentsPageProps) {
-  const { documents, setDocuments, tasks } = useDataset();
-  const { pipelines } = usePipelines();
-  const { latestRun, setLatestRun } = useExperimentResults();
-
-  const [stage, setStage] = useState<Stage>('idle');
-  const [statusLog, setStatusLog] = useState<string[]>([]);
-  const [taskResults, setTaskResults] = useState<TaskResult[]>([]);
-  const [isRunning, setIsRunning] = useState(false);
-  const [progress, setProgress] = useState(0);
-  const [error, setError] = useState<string | null>(null);
-
-  const experimentPipelines = pipelines.length ? pipelines : [DEFAULT_PIPELINE];
-  const baselinePipelineId =
-    pipelines.find((pipeline) => pipeline.isBaseline)?.id ?? experimentPipelines[0].id;
-  const baselinePipeline =
-    pipelines.find((pipeline) => pipeline.id === baselinePipelineId) ?? experimentPipelines[0];
-
-  const [selectedPipelineId, setSelectedPipelineId] = useState(baselinePipelineId);
-  const [taskResultsByPipeline, setTaskResultsByPipeline] = useState<
-    Record<string, TaskResult[]>
-  >({});
+  const [selectedPipelineIds, setSelectedPipelineIds] = useState<string[]>([]);
+  const [mode, setMode] = useState<c.RunMode>('retrieval_only');
+  const [judgeEnabled, setJudgeEnabled] = useState(true);
+  const [runName, setRunName] = useState('');
+  const [inspectedPipelineId, setInspectedPipelineId] = useState('');
 
   useEffect(() => {
-    setSelectedPipelineId((prev) => {
-      if (pipelines.some((pipeline) => pipeline.id === prev)) {
-        return prev;
-      }
-      return baselinePipelineId;
+    const allIds = (pipelineList.data ?? []).map((p) => p.id);
+    if (!allIds.length) return;
+    setSelectedPipelineIds((prev) => {
+      const kept = prev.filter((id) => allIds.includes(id));
+      return kept.length ? kept : allIds;
     });
-  }, [baselinePipelineId, pipelines]);
+  }, [pipelineList.data]);
 
-  const readyDocuments = useMemo(
-    () =>
-      documents.filter((doc) => {
-        if (doc.status !== 'complete') {
-          return false;
-        }
-        const hasContent = typeof doc.content === 'string' && doc.content.trim().length > 0;
-        const hasFile =
-          typeof doc.fileBase64 === 'string' && doc.fileBase64.trim().length > 0;
-        return hasContent || hasFile;
-      }),
-    [documents]
-  );
+  const effectiveBaseline =
+    baselineId && selectedPipelineIds.includes(baselineId)
+      ? baselineId
+      : (selectedPipelineIds[0] ?? '');
 
-  const readyTasks = useMemo(
-    () => tasks.filter((task) => task.question.trim()),
-    [tasks]
-  );
+  const runsList = useQuery({
+    queryKey: ['runs', 'list'],
+    queryFn: () => request(c.page(c.runSummary), 'runs?limit=20'),
+  });
 
-  const pipelineOptions = useMemo(
-    () =>
-      experimentPipelines.map((pipeline, index) => ({
-        id: pipeline.id ?? `pipeline-${index}`,
-        name: pipeline.name ?? `Pipeline ${index + 1}`,
-      })),
-    [experimentPipelines]
-  );
+  const requestedRunId = searchParams.get('run') ?? '';
+  const activeRunId = requestedRunId || runsList.data?.items[0]?.id || '';
 
-  const pipelineNameLookup = useMemo(
-    () =>
-      pipelineOptions.reduce<Record<string, string>>((acc, option) => {
-        acc[option.id] = option.name;
-        return acc;
-      }, {}),
-    [pipelineOptions]
-  );
+  const runDetailQuery = useQuery({
+    queryKey: ['runs', activeRunId],
+    queryFn: () => request(c.runDetail, `runs/${activeRunId}`),
+    enabled: Boolean(activeRunId),
+    refetchInterval: (q) =>
+      q.state.data && ACTIVE_STATES.has(q.state.data.state) ? 1500 : false,
+  });
 
-  const previousRunTaskResults = useMemo(() => {
-    if (!latestRun) {
-      return {};
-    }
+  const activeRun = runDetailQuery.data;
 
-    return latestRun.pipelines.reduce<Record<string, TaskResult[]>>((acc, pipeline) => {
-      const answeringSummary = pipeline.answeringSummary;
-      if (!answeringSummary) {
-        return acc;
-      }
+  const jobQuery = useQuery({
+    queryKey: ['jobs', activeRun?.jobId ?? ''],
+    queryFn: () => request(c.job, `jobs/${activeRun?.jobId}`),
+    enabled: Boolean(activeRun?.jobId),
+    refetchInterval: (q) =>
+      q.state.data && ACTIVE_STATES.has(q.state.data.state) ? 1500 : false,
+  });
 
-      const chunkLookup = new Map(
-        (answeringSummary.sources ?? []).map((chunk) => [chunk.id, chunk])
-      );
-
-      const convertedResults = (answeringSummary.details ?? []).map((detail) => {
-        const matches = detail.citedChunkIds
-          .map((chunkId) => {
-            const chunk = chunkLookup.get(chunkId);
-            if (!chunk) {
-              return null;
-            }
-            return {
-              id: chunk.id,
-              score: chunk.score,
-              text: chunk.content,
-              documentName: chunk.documentName,
-            };
-          })
-          .filter((match): match is TaskResult['matches'][number] => Boolean(match));
-
-        return {
-          taskId: detail.taskId,
-          question: detail.question,
-          expectedAnswer: detail.expectedAnswer ?? '',
-          answer: detail.response,
-          matches,
-          latencyMs: detail.latencyMs,
-          usage: detail.usage,
-        };
-      });
-
-      acc[pipeline.pipelineId] = convertedResults;
-      return acc;
-    }, {});
-  }, [latestRun]);
-
-  const activePipelineId =
-    selectedPipelineId && pipelineNameLookup[selectedPipelineId]
-      ? selectedPipelineId
-      : pipelineOptions[0]?.id ?? '';
-
-  const localTaskResults =
-    taskResultsByPipeline[activePipelineId] ??
-    (activePipelineId === baselinePipelineId ? taskResults : undefined);
-
-  const displayedTaskResults =
-    localTaskResults && localTaskResults.length > 0
-      ? localTaskResults
-      : previousRunTaskResults[activePipelineId] ?? [];
-
-  const canViewReport =
-    !isRunning && Boolean(latestRun && latestRun.pipelines && latestRun.pipelines.length > 0);
-
-  const buildSnippet = (text: string) => {
-    const normalized = text.replace(/\s+/g, ' ').trim();
-    if (!normalized) {
-      return 'Parsed document is empty.';
-    }
-    return normalized.length > 200 ? `${normalized.slice(0, 200)}…` : normalized;
-  };
-
-  const resetState = () => {
-    setStatusLog([]);
-    setTaskResults([]);
-    setTaskResultsByPipeline({});
-    setProgress(0);
-    setError(null);
-    setSelectedPipelineId(baselinePipelineId);
-  };
-
-  const runExperiment = async () => {
-    if (isRunning) {
-      return;
-    }
-
-    if (!readyDocuments.length) {
-      setError('Upload at least one document with parsed content before running an experiment.');
-      return;
-    }
-
-    if (!readyTasks.length) {
-      setError('Add at least one evaluation question before running an experiment.');
-      return;
-    }
-
-    resetState();
-    setIsRunning(true);
-    setStage('chunking');
-
-    const localLog: string[] = [];
-    const appendLog = (message: string) => {
-      localLog.push(message);
-      setStatusLog((prev) => [...prev, message]);
-    };
-
-    const startedAt = new Date().toISOString();
-
-    const pipelineOverview = experimentPipelines.map((pipeline, index) => ({
-      pipeline,
-      id: pipeline.id ?? `pipeline-${index}`,
-      name: pipeline.name ?? `Pipeline ${index + 1}`,
-    }));
-
-    const pipelineNames = pipelineOverview.map((entry) => entry.name);
-
-    let latestDocuments: DatasetDocument[] = documents;
-    const applyDocuments = (updater: (prev: DatasetDocument[]) => DatasetDocument[]) => {
-      latestDocuments = updater(latestDocuments);
-      setDocuments(latestDocuments);
-    };
-
-    appendLog(`Experiment started at ${formatTimestamp()}.`);
-    if (pipelineNames.length === 1) {
-      appendLog(`Running pipeline: ${pipelineNames[0]}.`);
-    } else {
-      appendLog(`Running ${pipelineNames.length} pipelines: ${pipelineNames.join(', ')}.`);
-    }
-    appendLog(
-      `Preparing ${readyDocuments.length} document${readyDocuments.length === 1 ? '' : 's'} for chunking.`
+  useEffect(() => {
+    if (!activeRun?.pipelines.length) return;
+    setInspectedPipelineId((prev) =>
+      activeRun.pipelines.some((p) => p.pipelineId === prev)
+        ? prev
+        : activeRun.pipelines[0].pipelineId,
     );
+  }, [activeRun]);
 
-    try {
-      const taskById = new Map(readyTasks.map((task) => [task.id, task]));
+  const tasksQuery = useQuery({
+    queryKey: ['runs', activeRunId, 'tasks', inspectedPipelineId],
+    queryFn: () =>
+      request(
+        c.page(c.runTaskDetail),
+        `runs/${activeRunId}/tasks?limit=100${inspectedPipelineId ? `&pipelineId=${inspectedPipelineId}` : ''}`,
+      ),
+    enabled: Boolean(activeRunId && inspectedPipelineId),
+    refetchInterval: () =>
+      activeRun && ACTIVE_STATES.has(activeRun.state) ? 2000 : false,
+  });
 
-      const documentsNeedingParse = latestDocuments.filter(
-        (doc) =>
-          doc.status === 'complete' &&
-          (!doc.content || !doc.content.trim()) &&
-          typeof doc.fileBase64 === 'string' &&
-          doc.fileBase64.trim()
+  // Polling stops when the run finishes, so fetch the task list once more to
+  // pick up the final per-task states instead of the last in-flight snapshot.
+  const activeRunState = activeRun?.state;
+  useEffect(() => {
+    if (!activeRunId || !activeRunState || ACTIVE_STATES.has(activeRunState))
+      return;
+    void cache.invalidateQueries({ queryKey: ['runs', activeRunId, 'tasks'] });
+  }, [cache, activeRunId, activeRunState]);
+
+  const startRun = useMutation({
+    mutationFn: async () => {
+      const ds = datasetDetail.data;
+      if (!ds) throw new Error('Select a dataset before starting a run.');
+      if (!selectedPipelineIds.length)
+        throw new Error('Select at least one pipeline.');
+      if (!effectiveBaseline) throw new Error('Choose a baseline pipeline.');
+
+      const expName =
+        runName.trim() ||
+        `${ds.name} (${mode === 'retrieval_only' ? 'Retrieval' : 'Full RAG'})`;
+      const createdExp = await request(c.experiment, 'experiments', 'POST', {
+        name: expName,
+        datasetId: ds.id,
+        baselinePipelineId: effectiveBaseline,
+        pipelineIds: selectedPipelineIds,
+        mode,
+        config: {
+          judgeEnabled: mode === 'full_rag' ? judgeEnabled : false,
+        },
+      });
+      return request(
+        c.createRunResult,
+        `experiments/${createdExp.id}/runs`,
+        'POST',
+        {
+          name: runName.trim() || undefined,
+          mode,
+          judgeEnabled: mode === 'full_rag' ? judgeEnabled : false,
+        },
+        undefined,
+        crypto.randomUUID(),
       );
+    },
+    onSuccess: async (res) => {
+      setSearchParams({ run: res.run.id });
+      cache.setQueryData(['runs', res.run.id], res.run);
+      cache.setQueryData(['jobs', res.job.id], res.job);
+      await cache.invalidateQueries({ queryKey: ['runs', 'list'] });
+    },
+  });
 
-      if (documentsNeedingParse.length > 0) {
-        setStage('parsing');
-        appendLog(
-          `Parsing ${documentsNeedingParse.length} document${documentsNeedingParse.length === 1 ? '' : 's'} using ${baselinePipeline.parsing.strategy}…`
-        );
+  const cancelRun = useMutation({
+    mutationFn: async (jobId: string) =>
+      request(c.job, `jobs/${jobId}/cancel`, 'POST', {}),
+    onSuccess: async (updatedJob) => {
+      cache.setQueryData(['jobs', updatedJob.id], updatedJob);
+      await cache.invalidateQueries({ queryKey: ['runs', activeRunId] });
+      await cache.invalidateQueries({ queryKey: ['runs', 'list'] });
+    },
+  });
 
-        let parsedCount = 0;
-        for (const doc of documentsNeedingParse) {
-          appendLog(`→ Parsing "${doc.name}"`);
-          applyDocuments((prev) =>
-            prev.map((item) =>
-              item.id === doc.id
-                ? {
-                    ...item,
-                    status: 'processing',
-                    statusMessage: 'Parsing document…',
-                    error: undefined,
-                  }
-                : item
-            )
-          );
+  const retryRun = useMutation({
+    mutationFn: async (jobId: string) =>
+      request(c.job, `jobs/${jobId}/retry`, 'POST', {}),
+    onSuccess: async (nextJob) => {
+      cache.setQueryData(['jobs', nextJob.id], nextJob);
+      await cache.invalidateQueries({ queryKey: ['runs', activeRunId] });
+      await cache.invalidateQueries({ queryKey: ['runs', 'list'] });
+    },
+  });
 
-          try {
-            const response = await parseDocument({
-              filename: doc.name ?? 'Document',
-              mimeType: doc.mimeType,
-              contentBase64: doc.fileBase64 ?? '',
-            });
+  const profiles = capabilities.data?.profiles ?? [];
+  const hasChat = profiles.some((p) => p.role === 'chat');
+  const hasJudge = profiles.some((p) => p.role === 'judge');
 
-            const trimmedText = (response.text ?? '').trim();
-            if (!trimmedText) {
-              const message = 'Parsing completed, but no text could be extracted.';
-              applyDocuments((prev) =>
-                prev.map((item) =>
-                  item.id === doc.id
-                    ? {
-                        ...item,
-                        status: 'error',
-                        statusMessage: message,
-                        snippet: 'No text available from this document.',
-                        error: message,
-                      }
-                    : item
-                )
-              );
-              appendLog(`✗ Failed to extract text from "${doc.name}".`);
-            } else {
-              const snippet = buildSnippet(trimmedText);
-              applyDocuments((prev) =>
-                prev.map((item) =>
-                  item.id === doc.id
-                    ? {
-                        ...item,
-                        status: 'complete',
-                        statusMessage: 'Parsed for experiment run.',
-                        content: trimmedText,
-                        snippet,
-                        pageCount: response.pageCount,
-                        parserJobId: response.jobId,
-                      }
-                    : item
-                )
-              );
-              appendLog(
-                `✓ Parsed "${doc.name}"${
-                  response.pageCount
-                    ? ` (${response.pageCount} page${response.pageCount === 1 ? '' : 's'})`
-                    : ''
-                }`
-              );
-            }
-          } catch (error) {
-            let message =
-              error instanceof Error ? error.message : 'Unknown error while parsing document.';
-            if (
-              typeof message === 'string' &&
-              (message.includes('LlamaParse API key is not configured') ||
-                message.includes('Document parsing is not configured'))
-            ) {
-              message =
-                'LlamaParse requires an API key. Set LLAMA_CLOUD_API_KEY in your backend environment before running experiments.';
-            }
-            applyDocuments((prev) =>
-              prev.map((item) =>
-                item.id === doc.id
-                  ? {
-                      ...item,
-                      status: 'error',
-                      statusMessage: message,
-                      error: message,
-                    }
-                  : item
-              )
-            );
-            appendLog(`✗ Failed to parse "${doc.name}": ${message}`);
-            setError(`Failed to parse document "${doc.name}". ${message}`);
-            setIsRunning(false);
-            setStage('idle');
-            return;
-          }
+  const isRunActive = Boolean(activeRun && ACTIVE_STATES.has(activeRun.state));
+  const progressPct =
+    activeRun && activeRun.totalUnits > 0
+      ? Math.round(
+          ((activeRun.completedUnits + activeRun.failedUnits) /
+            activeRun.totalUnits) *
+            100,
+        )
+      : 0;
 
-          parsedCount += 1;
-          const parseProgress =
-            10 + Math.round((parsedCount / documentsNeedingParse.length) * 20);
-          setProgress(Math.min(30, parseProgress));
-        }
-      }
+  const submissionError =
+    startRun.error?.message ??
+    cancelRun.error?.message ??
+    retryRun.error?.message ??
+    runDetailQuery.error?.message ??
+    null;
 
-      const readyDocs = latestDocuments.filter(
-        (doc) =>
-          doc.status === 'complete' &&
-          typeof doc.content === 'string' &&
-          doc.content.trim().length > 0
-      );
-
-      if (!readyDocs.length) {
-        const message =
-          'Document parsing produced no usable text. Try re-uploading the file or selecting a different parser.';
-        appendLog(`✗ ${message}`);
-        setError(message);
-        setIsRunning(false);
-        setStage('idle');
-        return;
-      }
-
-      const parsedDocuments: ParsedDocument[] = readyDocs.map((doc) => ({
-        id: doc.id,
-        name: doc.name,
-        source: doc.source,
-        content: doc.content ?? '',
-      }));
-
-      const pipelineCount = pipelineOverview.length || 1;
-      const computePipelineProgress = (index: number, fraction: number) => {
-        const clamped = Math.min(1, Math.max(0, fraction));
-        const value = Math.round(30 + ((index + clamped) / pipelineCount) * 70);
-        setProgress(Math.min(99, value));
-      };
-      const updatePipelineProgress = (
-        index: number,
-        startFraction: number,
-        endFraction: number,
-        portion: number
-      ) => {
-        const clampedPortion = Math.min(1, Math.max(0, portion));
-        const fraction = startFraction + (endFraction - startFraction) * clampedPortion;
-        computePipelineProgress(index, fraction);
-      };
-
-      const pipelineResults: ExperimentPipelineResult[] = [];
-      let completedAt: string | undefined;
-
-      for (const [index, entry] of pipelineOverview.entries()) {
-        const { pipeline: currentPipeline, id: pipelineId, name: pipelineName } = entry;
-        const chunkConfig = currentPipeline.chunking ?? DEFAULT_PIPELINE.chunking;
-        const retrieverK = currentPipeline.retriever?.topK ?? DEFAULT_PIPELINE.retriever.topK;
-        const isBaselinePipeline = pipelineId === baselinePipelineId;
-        const pipelineEmbeddingModel = currentPipeline.embedding?.model;
-
-        setStage('chunking');
-        computePipelineProgress(index, 0);
-        appendLog(
-          `[${pipelineName}] Chunking documents with strategy "${chunkConfig.strategy}".`
-        );
-
-        const chunkGroups: DocumentChunkGroup[] = chunkDocumentsWithConfig(parsedDocuments, chunkConfig);
-        const chunkSummary = summarizeChunkGroups(chunkGroups);
-        const chunks: DocumentChunk[] = chunkGroups.flatMap((group) => group.chunks);
-        const chunkCount = chunks.length;
-
-        if (!chunkCount) {
-          throw new Error(`No chunks were generated for pipeline "${pipelineName}".`);
-        }
-
-        appendLog(
-          `[${pipelineName}] Generated ${chunkSummary.totalChunks} chunk${chunkSummary.totalChunks === 1 ? '' : 's'} (avg ${chunkSummary.averageChars} chars). Uploading to Qdrant…`
-        );
-
-        const chunkLookup = new Map<string, DocumentChunk>();
-        chunkGroups.forEach((group) => {
-          group.chunks.forEach((chunk) => {
-            chunkLookup.set(chunk.id, chunk);
-          });
-        });
-
-        const upsertResponse = await upsertChunks({
-          pipelineId,
-          resetCollection: true,
-          embeddingModel: pipelineEmbeddingModel,
-          chunks: chunks.map((chunk) => ({
-            id: chunk.id,
-            text: chunk.content,
-            metadata: {
-              documentId: chunk.documentId,
-              documentName: chunk.documentName,
-              documentSource: chunk.documentSource,
-              charCount: chunk.charCount,
-              tokenEstimate: chunk.tokenEstimate,
-              strategy: chunk.strategy,
-              chunkIndex: chunk.index,
-            },
-          })),
-        });
-
-        const targetCollectionName = upsertResponse.collection;
-        const vectorSize = upsertResponse.vectorSize;
-        appendLog(
-          `[${pipelineName}] Chunks embedded and stored in Qdrant${
-            targetCollectionName ? ` collection "${targetCollectionName}"` : ''
-          }${
-            vectorSize ? ` (vector size ${vectorSize})` : ''
-          } successfully.`
-        );
-        computePipelineProgress(index, 0.25);
-
-        setStage('answering');
-        appendLog(
-          `[${pipelineName}] Retrieving answers for ${readyTasks.length} task${readyTasks.length === 1 ? '' : 's'}…`
-        );
-
-        const results: TaskResult[] = [];
-        const answerDetails: AnswerDetail[] = [];
-        const aggregatedSources = new Map<string, RetrievedChunk>();
-        const uniqueChunkIds = new Set<string>();
-        const answerLatencyByTask = new Map<string, number>();
-        let totalAnswerPromptTokens = 0;
-        let totalAnswerCompletionTokens = 0;
-        let totalAnswerTokens = 0;
-        let completed = 0;
-
-        for (const task of readyTasks) {
-          appendLog(`[${pipelineName}] → Retrieving context for: "${task.question}"`);
-
-          const response = await answerQuestion({
-            pipelineId,
-            question: task.question,
-            topK: retrieverK,
-            model: currentPipeline.llm?.model,
-            collectionName: targetCollectionName,
-            embeddingModel: pipelineEmbeddingModel,
-          });
-
-          const matches = (response.matches ?? []).map((match) => {
-            const chunk = chunkLookup.get(match.id);
-            const payload = match.payload ?? {};
-            const payloadText = typeof payload.text === 'string' ? payload.text : '';
-            const payloadDocumentName =
-              typeof payload.documentName === 'string' ? payload.documentName : undefined;
-            const payloadDocumentId = payload.documentId;
-            const text = chunk?.content ?? payloadText;
-            const documentName = chunk?.documentName ?? payloadDocumentName;
-
-            const retrieved: RetrievedChunk = {
-              id: match.id,
-              documentId:
-                chunk?.documentId ??
-                (typeof payloadDocumentId === 'string'
-                  ? payloadDocumentId
-                  : payloadDocumentId !== undefined && payloadDocumentId !== null
-                  ? String(payloadDocumentId)
-                  : ''),
-              documentName,
-              documentSource: chunk?.documentSource,
-              content: text,
-              charCount: chunk?.charCount ?? text.length,
-              tokenEstimate: chunk?.tokenEstimate ?? Math.max(1, Math.round(text.length / 4)),
-              score: typeof match.score === 'number' ? match.score : 0,
-            };
-
-            aggregatedSources.set(retrieved.id, retrieved);
-            uniqueChunkIds.add(retrieved.id);
-
-            return {
-              id: retrieved.id,
-              score: retrieved.score,
-              text: retrieved.content,
-              documentName: retrieved.documentName,
-            };
-          });
-
-          answerDetails.push({
-            taskId: task.id,
-            question: task.question,
-            expectedAnswer: task.expectedAnswer,
-            acceptanceRule: task.acceptanceRule,
-            response: response.answer,
-            citedChunkIds: matches.map((match) => match.id),
-            latencyMs: response.latencyMs ?? 0,
-            usage: response.usage,
-          });
-
-          results.push({
-            taskId: task.id,
-            question: task.question,
-            expectedAnswer: task.expectedAnswer,
-            answer: response.answer,
-            matches,
-            latencyMs: response.latencyMs ?? 0,
-            usage: response.usage,
-          });
-
-          if (response.usage) {
-            totalAnswerPromptTokens += response.usage.promptTokens ?? 0;
-            totalAnswerCompletionTokens += response.usage.completionTokens ?? 0;
-            totalAnswerTokens += response.usage.totalTokens ?? 0;
-          }
-
-          answerLatencyByTask.set(task.id, response.latencyMs ?? 0);
-          completed += 1;
-          updatePipelineProgress(index, 0.25, 0.85, completed / readyTasks.length);
-          appendLog(`[${pipelineName}] ✓ Answer drafted for task "${task.question}"`);
-        }
-
-        setTaskResultsByPipeline((prev) => ({
-          ...prev,
-          [pipelineId]: results,
-        }));
-
-        if (isBaselinePipeline) {
-          setTaskResults(results);
-        }
-
-        setStage('judging');
-        appendLog(
-          `[${pipelineName}] Scoring answers with judge model for quality and groundedness…`
-        );
-        computePipelineProgress(index, 0.9);
-
-        const judgeResponse = await judgeAnswers({
-          pipelineId,
-          model: currentPipeline.judge?.model ?? currentPipeline.llm?.model,
-          evaluations: results.map((result) => {
-            const task = taskById.get(result.taskId);
-            return {
-              taskId: result.taskId,
-              question: result.question,
-              answer: result.answer,
-              expectedAnswer: task?.expectedAnswer,
-              acceptanceRule: task?.acceptanceRule,
-              context: result.matches.map((match) => match.text),
-            };
-          }),
-        });
-
-        appendLog(
-          `[${pipelineName}] Judge verdict: ${(judgeResponse.passRate * 100).toFixed(0)}% pass rate, ` +
-            `groundedness ${(judgeResponse.averageScores.groundedness * 100).toFixed(0)}%.`
-        );
-
-        const normalizedJudgeDetails: JudgingSummary['details'] = judgeResponse.details.map(
-          (detail) => ({
-            taskId: detail.taskId,
-            verdict: detail.verdict,
-            scores: {
-              relevance: Number(detail.scores.relevance.toFixed(2)),
-              contextPrecision: Number(detail.scores.contextPrecision.toFixed(2)),
-              groundedness: Number(detail.scores.groundedness.toFixed(2)),
-            },
-            rationale: detail.rationale,
-            missingCriteria: detail.missingCriteria ?? [],
-            latencyMs: detail.latencyMs,
-            usage: detail.usage,
-          })
-        );
-
-        const totalQuestions = readyTasks.length;
-        const embeddingModelName = pipelineEmbeddingModel ?? 'text-embedding-3-small';
-        const vectorDim = getEmbeddingVectorDim(embeddingModelName);
-        const totalEmbeddingTokens = chunks.reduce((sum, chunk) => sum + chunk.tokenEstimate, 0);
-
-        const judgePromptTokens = judgeResponse.details.reduce(
-          (sum, detail) => sum + (detail.usage?.promptTokens ?? 0),
-          0
-        );
-        const judgeCompletionTokens = judgeResponse.details.reduce(
-          (sum, detail) => sum + (detail.usage?.completionTokens ?? 0),
-          0
-        );
-        const judgeTotalTokens = judgeResponse.details.reduce(
-          (sum, detail) => sum + (detail.usage?.totalTokens ?? 0),
-          0
-        );
-
-        const answerLatencyP95Ms = computePercentile(Array.from(answerLatencyByTask.values()), 0.95);
-        const perTaskTotalLatencies = judgeResponse.details.map((detail) => {
-          const answerLatency = answerLatencyByTask.get(detail.taskId) ?? 0;
-          return answerLatency + detail.latencyMs;
-        });
-        const latencyP95Ms = computePercentile(perTaskTotalLatencies, 0.95);
-
-        const answerUsageTotals = {
-          promptTokens: totalAnswerPromptTokens,
-          completionTokens: totalAnswerCompletionTokens,
-        };
-        const judgeUsageTotals = {
-          promptTokens: judgePromptTokens,
-          completionTokens: judgeCompletionTokens,
-        };
-
-        const answerModel = currentPipeline.llm?.model ?? 'gpt-4o-mini';
-        const judgeModel = currentPipeline.judge?.model ?? answerModel;
-
-        const answerCost = estimateChatCost(answerModel, answerUsageTotals);
-        const judgeCost = estimateChatCost(judgeModel, judgeUsageTotals);
-
-        const tokensUsed = totalAnswerTokens + judgeTotalTokens;
-        const latencyP95Seconds = latencyP95Ms / 1000;
-        const costPerQuery = totalQuestions ? answerCost / totalQuestions : 0;
-
-        const pipelineMetrics: PipelineMetrics = {
-          precisionAt5: Number(judgeResponse.passRate.toFixed(2)),
-          recallAt5: Number(judgeResponse.averageScores.contextPrecision.toFixed(2)),
-          latencyP95: Number(latencyP95Seconds.toFixed(2)),
-          groundedness: Number(judgeResponse.averageScores.groundedness.toFixed(2)),
-          costPerQuery: Number(costPerQuery.toFixed(4)),
-          tokensUsed: Math.round(tokensUsed),
-        };
-
-        const judgingSummary: JudgingSummary = {
-          verdict: judgeResponse.verdict,
-          passRate: Number(judgeResponse.passRate.toFixed(2)),
-          averageScores: {
-            relevance: Number(judgeResponse.averageScores.relevance.toFixed(2)),
-            contextPrecision: Number(judgeResponse.averageScores.contextPrecision.toFixed(2)),
-            groundedness: Number(judgeResponse.averageScores.groundedness.toFixed(2)),
-          },
-          tokensUsed: Math.round(judgeTotalTokens),
-          latencyMs: judgeResponse.latencyMs,
-          costUsd: Number(judgeCost.toFixed(3)),
-          details: normalizedJudgeDetails,
-        };
-
-        const pipelineResult: ExperimentPipelineResult = {
-          pipelineId,
-          pipelineName,
-          pipelineSnapshot: currentPipeline,
-          metrics: pipelineMetrics,
-          chunkingSummary: chunkSummary,
-          embeddingSummary: {
-            model: embeddingModelName,
-            vectorDim,
-            totalChunks: chunkSummary.totalChunks,
-            totalTokens: totalEmbeddingTokens,
-          },
-          retrievalSummary: {
-            topK: retrieverK,
-            deduplicate: currentPipeline.retriever?.deduplicate ?? true,
-            candidatePool: chunkCount,
-            uniqueResults: uniqueChunkIds.size,
-          },
-          answeringSummary: {
-            answer: results
-              .map((result, answerIndex) => `Q${answerIndex + 1}: ${result.answer}`)
-              .join('\n\n'),
-            sources: Array.from(aggregatedSources.values()),
-            tokensUsed: Math.round(totalAnswerTokens),
-            latencyMs: Math.round(answerLatencyP95Ms),
-            costUsd: Number(answerCost.toFixed(3)),
-            details: answerDetails,
-          },
-          judgingSummary,
-        };
-
-        pipelineResults.push(pipelineResult);
-        completedAt = new Date().toISOString();
-
-        appendLog(
-          `[${pipelineName}] Evaluation complete. Pass rate ${(judgeResponse.passRate * 100).toFixed(0)}%.`
-        );
-        computePipelineProgress(index, 1);
-      }
-
-      setStage('complete');
-      setProgress(100);
-      appendLog('Experiment complete. Review the answers below.');
-
-      const bestByMetric =
-        pipelineResults.length > 0
-          ? METRIC_DEFINITIONS.reduce<ExperimentRun['bestByMetric']>((acc, metric) => {
-              let bestResult = pipelineResults[0];
-              for (let i = 1; i < pipelineResults.length; i += 1) {
-                const candidate = pipelineResults[i];
-                if (metric.better === 'higher') {
-                  if (candidate.metrics[metric.key] > bestResult.metrics[metric.key]) {
-                    bestResult = candidate;
-                  }
-                } else if (candidate.metrics[metric.key] < bestResult.metrics[metric.key]) {
-                  bestResult = candidate;
-                }
-              }
-              acc[metric.key] = bestResult.pipelineId;
-              return acc;
-            }, {})
-          : {};
-
-      const baselinePipelineIdForRun =
-        pipelineResults.find((result) => result.pipelineId === baselinePipelineId)?.pipelineId ??
-        pipelineResults[0]?.pipelineId;
-
-      const runSummary: ExperimentRun = {
-        id: `run-${Date.now()}`,
-        name: `Experiment ${formatTimestamp()}`,
-        startedAt,
-        completedAt,
-        statusLog: [...localLog],
-        pipelines: pipelineResults,
-        bestByMetric,
-        baselinePipelineId: baselinePipelineIdForRun,
-        tasksUsed: readyTasks,
-      };
-
-      setLatestRun(runSummary);
-    } catch (runError) {
-      const message = runError instanceof Error ? runError.message : 'Unexpected error during experiment.';
-      setError(message);
-      setStage('idle');
-      appendLog(`Error: ${message}`);
-    } finally {
-      setIsRunning(false);
-    }
-  };
+  const dataset = datasetDetail.data;
+  const canStart =
+    Boolean(dataset) &&
+    (dataset?.documents.length ?? 0) > 0 &&
+    (dataset?.tasks.length ?? 0) > 0 &&
+    selectedPipelineIds.length > 0 &&
+    !startRun.isPending;
 
   return (
-    <div className="p-8 bg-zinc-50">
+    <div className="px-4 py-6 sm:p-8 bg-background">
       <div className="max-w-7xl mx-auto space-y-6">
-        <div className="flex items-center justify-between">
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h2 className="text-zinc-900">Experiment Runner</h2>
-            <p className="text-zinc-600">
-              Upload documents, embed them with Qdrant, and evaluate answers with the LLM.
+            <h1>Experiment Runner</h1>
+            <p className="text-muted-foreground">
+              Freeze dataset and pipeline revisions into durable server-side
+              runs with auditable retrieval, generation, judge, and spend
+              tracking.
             </p>
           </div>
-          <Button onClick={runExperiment} size="lg" className="gap-2" disabled={isRunning}>
-            <Play size={20} />
-            {isRunning ? 'Running…' : 'Start Experiment'}
+          <Button
+            type="button"
+            size="lg"
+            className="gap-2"
+            disabled={!canStart}
+            onClick={() => startRun.mutate()}
+          >
+            <Play size={18} aria-hidden="true" />
+            {startRun.isPending ? 'Submitting run…' : 'Start Run'}
           </Button>
         </div>
 
-        {error && (
-          <Card className="border-red-300 bg-red-50 text-red-700">
-            <CardContent className="py-4 text-sm">{error}</CardContent>
+        {submissionError && (
+          <Card
+            role="alert"
+            className="border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950 text-red-700 dark:text-red-300"
+          >
+            <CardContent className="py-4 text-sm">
+              {submissionError}
+            </CardContent>
           </Card>
         )}
 
         <Card>
           <CardHeader>
-            <div className="flex items-center justify-between">
-              <CardTitle>Experiment Progress</CardTitle>
-              <Badge variant={stage === 'complete' ? 'default' : stage === 'idle' ? 'outline' : 'secondary'}>
-                {stage === 'idle' ? 'Not Started' : stage === 'complete' ? 'Complete' : 'In Progress'}
-              </Badge>
-            </div>
+            <CardTitle>Run Configuration</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div>
-              <div className="flex items-center justify-between mb-2">
-                <span>Overall Progress</span>
-                <span className="text-sm opacity-60">{progress}%</span>
+            <div className="grid gap-4 md:grid-cols-3">
+              <div>
+                <p className="text-sm font-medium">Dataset</p>
+                {datasetList.isPending ? (
+                  <p role="status" className="text-sm text-muted-foreground">
+                    Loading datasets…
+                  </p>
+                ) : dataset ? (
+                  <p className="text-sm text-muted-foreground">
+                    {dataset.name} · r{dataset.revision} ·{' '}
+                    {dataset.documents.length} docs · {dataset.tasks.length}{' '}
+                    tasks
+                  </p>
+                ) : (
+                  <p className="text-sm text-muted-foreground">
+                    No dataset selected.{' '}
+                    <Link to="/datasets" className="text-primary underline">
+                      Create or load sample dataset
+                    </Link>
+                  </p>
+                )}
               </div>
-              <Progress value={progress} />
+
+              <div>
+                <label
+                  htmlFor="experiment-execution-mode"
+                  className="block text-sm"
+                >
+                  Execution mode
+                </label>
+                <select
+                  id="experiment-execution-mode"
+                  className="mt-1 block w-full rounded border bg-background p-2 text-sm"
+                  value={mode}
+                  onChange={(e) => setMode(c.runMode.parse(e.target.value))}
+                >
+                  <option value="retrieval_only">
+                    Retrieval only (offline deterministic metrics)
+                  </option>
+                  <option value="full_rag" disabled={!hasChat}>
+                    Full RAG (retrieve, answer, judge)
+                    {!hasChat ? ' — configure chat profile' : ''}
+                  </option>
+                </select>
+              </div>
+
+              <div>
+                <label htmlFor="experiment-run-name" className="block text-sm">
+                  Run name (optional)
+                </label>
+                <Input
+                  id="experiment-run-name"
+                  className="mt-1"
+                  value={runName}
+                  onChange={(e) => setRunName(e.target.value)}
+                  placeholder="e.g. Keyword vs Hybrid baseline"
+                />
+              </div>
             </div>
 
-            <div className="flex items-center gap-2 text-sm">
-              <span className="opacity-60">Current Stage:</span>
-              <span className="capitalize">{stage}</span>
-            </div>
+            {mode === 'full_rag' && (
+              <div className="flex items-center gap-2 text-sm">
+                <input
+                  id="experiment-judge-enabled"
+                  type="checkbox"
+                  checked={judgeEnabled && hasJudge}
+                  disabled={!hasJudge}
+                  onChange={(e) => setJudgeEnabled(e.target.checked)}
+                />
+                <label htmlFor="experiment-judge-enabled">
+                  Run structured LLM-judge rubrics
+                  {!hasJudge && ' (configure a judge profile to enable)'}
+                </label>
+              </div>
+            )}
 
-            <div className="max-h-48 overflow-y-auto overflow-x-hidden text-sm pr-2 text-zinc-700">
-              {statusLog.length === 0 ? (
-                <p className="opacity-60">Status updates will appear here once the experiment starts.</p>
+            <div className="space-y-2">
+              <p className="text-sm font-medium">Pipelines to compare</p>
+              {pipelineList.isPending ? (
+                <p role="status" className="text-sm text-muted-foreground">
+                  Loading pipelines…
+                </p>
+              ) : savedPipelines.length === 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  No pipelines saved.{' '}
+                  <Link to="/pipelines" className="text-primary underline">
+                    Create a pipeline
+                  </Link>
+                </p>
               ) : (
-                statusLog.map((entry, index) => (
-                  <div key={index} className="flex items-start gap-2 py-1">
-                    <span className="opacity-40 flex-none">•</span>
-                    <span className="flex-1 min-w-0 break-words">{entry}</span>
-                  </div>
-                ))
+                <div className="grid gap-2 md:grid-cols-2">
+                  {savedPipelines.map((pl) => {
+                    const checked = selectedPipelineIds.includes(pl.id);
+                    const isBase = effectiveBaseline === pl.id;
+                    const checkboxId = `experiment-pipeline-${pl.id}`;
+                    return (
+                      <div
+                        key={pl.id}
+                        className="flex items-center justify-between gap-2 rounded border p-2.5 text-sm"
+                      >
+                        <div className="flex items-center gap-2">
+                          <input
+                            id={checkboxId}
+                            type="checkbox"
+                            checked={checked}
+                            onChange={(e) => {
+                              setSelectedPipelineIds((prev) =>
+                                e.target.checked
+                                  ? [...prev, pl.id]
+                                  : prev.filter((id) => id !== pl.id),
+                              );
+                            }}
+                          />
+                          <label
+                            htmlFor={checkboxId}
+                            className="cursor-pointer"
+                          >
+                            <strong>{pl.name}</strong> (r{pl.revision} ·{' '}
+                            {pl.config.retriever.mode} · topK{' '}
+                            {pl.config.retriever.topK})
+                          </label>
+                        </div>
+                        {checked && (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant={isBase ? 'default' : 'outline'}
+                            onClick={() => setBaselineId(pl.id)}
+                          >
+                            {isBase ? 'Baseline' : 'Set baseline'}
+                          </Button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
               )}
             </div>
           </CardContent>
         </Card>
 
         <Card>
-          <CardHeader className="space-y-3">
-            <div className="flex items-start justify-between gap-3">
-              <CardTitle>Question &amp; Answer Review</CardTitle>
-              {pipelineOptions.length > 1 ? (
-                <div className="flex items-center gap-2 text-sm">
-                  <span className="opacity-70">Pipeline</span>
-                  <Select
-                    value={activePipelineId}
-                    onValueChange={(value) => {
-                      setSelectedPipelineId(value);
-                    }}
-                  >
-                    <SelectTrigger className="w-48">
-                      <SelectValue placeholder="Choose pipeline">
-                        {pipelineNameLookup[activePipelineId] ?? 'Choose pipeline'}
-                      </SelectValue>
-                    </SelectTrigger>
-                    <SelectContent>
-                      {pipelineOptions.map((option) => (
-                        <SelectItem key={option.id} value={option.id}>
-                          {option.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-              ) : null}
+          <CardHeader>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <CardTitle>Experiment Progress</CardTitle>
+              <div className="flex flex-wrap items-center gap-2">
+                {activeRun ? (
+                  <>
+                    <Badge variant={stateBadgeVariant(activeRun.state)}>
+                      {activeRun.state}
+                    </Badge>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        void runDetailQuery.refetch();
+                        void jobQuery.refetch();
+                        void tasksQuery.refetch();
+                      }}
+                    >
+                      <RefreshCw size={14} aria-hidden="true" /> Refresh status
+                    </Button>
+                    {isRunActive && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={cancelRun.isPending}
+                        onClick={() => cancelRun.mutate(activeRun.jobId)}
+                      >
+                        <Square size={14} aria-hidden="true" /> Cancel run
+                      </Button>
+                    )}
+                    {['failed', 'cancelled'].includes(activeRun.state) && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={retryRun.isPending}
+                        onClick={() => retryRun.mutate(activeRun.jobId)}
+                      >
+                        <RotateCcw size={14} aria-hidden="true" /> Retry run
+                      </Button>
+                    )}
+                    {['succeeded', 'failed', 'cancelled'].includes(
+                      activeRun.state,
+                    ) && (
+                      <Button asChild size="sm" variant="outline">
+                        <Link to={reportPath(activeRun.id)} className="gap-1.5">
+                          <FileText size={14} aria-hidden="true" /> Open Report
+                        </Link>
+                      </Button>
+                    )}
+                  </>
+                ) : (
+                  <Badge variant="outline">Not Started</Badge>
+                )}
+              </div>
             </div>
           </CardHeader>
-          <CardContent>
-            {displayedTaskResults.length === 0 ? (
-              <p className="text-zinc-600">
-                Run an experiment to generate answers for your evaluation tasks.
-              </p>
+          <CardContent className="space-y-4">
+            {activeRun ? (
+              <>
+                <div className="flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
+                  <span className="font-medium text-foreground">
+                    {activeRun.name}
+                  </span>
+                  <span>
+                    Dataset {activeRun.datasetName} (r
+                    {activeRun.datasetRevision})
+                  </span>
+                  <span>Mode: {activeRun.mode}</span>
+                  <span>Stage: {activeRun.stage}</span>
+                  <span>
+                    Price table: {activeRun.snapshot.priceScheduleVersion}
+                  </span>
+                </div>
+
+                {isRunActive && !activeRun.workerOnline && (
+                  <p
+                    role="status"
+                    className="rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200"
+                  >
+                    No worker is running — start it with{' '}
+                    <code>npm run dev:worker</code>. Reloading this page keeps
+                    your queued run intact.
+                  </p>
+                )}
+
+                <div>
+                  <div className="flex items-center justify-between mb-2 text-sm">
+                    <span>
+                      Checkpointed units: {activeRun.completedUnits} completed,{' '}
+                      {activeRun.failedUnits} failed / {activeRun.totalUnits}{' '}
+                      total
+                    </span>
+                    <span className="text-muted-foreground">
+                      {progressPct}%
+                    </span>
+                  </div>
+                  <Progress
+                    aria-label="Overall experiment progress"
+                    value={progressPct}
+                  />
+                </div>
+
+                <div className="grid gap-3 text-xs sm:grid-cols-2 lg:grid-cols-5">
+                  <div className="rounded border p-2.5">
+                    <div className="text-muted-foreground">Indexing spend</div>
+                    <div className="font-medium">
+                      {formatCostBucket(activeRun.cost.indexing)}
+                    </div>
+                  </div>
+                  <div className="rounded border p-2.5">
+                    <div className="text-muted-foreground">Serving spend</div>
+                    <div className="font-medium">
+                      {formatCostBucket(activeRun.cost.serving)}
+                    </div>
+                  </div>
+                  <div className="rounded border p-2.5">
+                    <div className="text-muted-foreground">Judging spend</div>
+                    <div className="font-medium">
+                      {formatCostBucket(activeRun.cost.judging)}
+                    </div>
+                  </div>
+                  <div className="rounded border p-2.5">
+                    <div className="text-muted-foreground">Retry spend</div>
+                    <div className="font-medium">
+                      {formatCostBucket(activeRun.cost.retry)}
+                    </div>
+                    <div className="text-muted-foreground">
+                      {activeRun.tokens.retryTokens.toLocaleString()} retry
+                      tokens
+                    </div>
+                  </div>
+                  <div className="rounded border p-2.5">
+                    <div className="text-muted-foreground">Total spend</div>
+                    <div className="font-medium">
+                      {formatCostBucket(activeRun.cost.total)}
+                    </div>
+                    <div className="text-muted-foreground">
+                      {activeRun.tokens.totalTokens.toLocaleString()} tokens
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap gap-4 text-xs text-muted-foreground">
+                  <span>
+                    Queue wait: {formatMs(activeRun.latency.queueWaitMs)}
+                  </span>
+                  <span>
+                    Wall clock: {formatMs(activeRun.latency.wallClockMs)}
+                  </span>
+                  <span>
+                    Serving p50/p95: {formatMs(activeRun.latency.serving.p50Ms)}{' '}
+                    / {formatMs(activeRun.latency.serving.p95Ms)} (n=
+                    {activeRun.latency.serving.sampleSize})
+                  </span>
+                  <span>
+                    Evaluation p50/p95:{' '}
+                    {formatMs(activeRun.latency.evaluation.p50Ms)} /{' '}
+                    {formatMs(activeRun.latency.evaluation.p95Ms)} (n=
+                    {activeRun.latency.evaluation.sampleSize})
+                  </span>
+                </div>
+
+                {activeRun.errorMessage && (
+                  <p role="alert" className="text-sm text-red-600">
+                    {activeRun.errorMessage}
+                  </p>
+                )}
+              </>
             ) : (
+              <p className="text-sm text-muted-foreground">
+                No server run has been submitted yet. Configure your dataset and
+                pipelines above, then click <strong>Start Run</strong>.
+              </p>
+            )}
+          </CardContent>
+        </Card>
+
+        {activeRun && activeRun.pipelines.length > 0 && (
+          <Card>
+            <CardHeader>
+              <CardTitle>Pipeline Results</CardTitle>
+            </CardHeader>
+            <CardContent className="overflow-x-auto">
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead className="w-[22%]">Question</TableHead>
-                    <TableHead className="w-[15%]">Expected</TableHead>
-                    <TableHead className="w-[38%]">Model Answer</TableHead>
-                    <TableHead className="w-[25%]">Top Context</TableHead>
+                    <TableHead>Pipeline</TableHead>
+                    <TableHead>State</TableHead>
+                    <TableHead>Retrieval metrics</TableHead>
+                    {activeRun.mode === 'full_rag' && (
+                      <TableHead>Judge &amp; abstention</TableHead>
+                    )}
+                    <TableHead>Latency</TableHead>
+                    <TableHead>Spend</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {displayedTaskResults.map((result) => (
-                    <TableRow key={result.taskId}>
-                      <TableCell className="align-top w-[22%]">
-                        <div className="space-y-1">
-                          <div className="font-medium">{result.question}</div>
+                  {activeRun.pipelines.map((pl) => (
+                    <TableRow key={pl.pipelineId}>
+                      <TableCell>
+                        <div className="font-medium">
+                          {pl.pipelineName}{' '}
+                          {pl.isBaseline && (
+                            <Badge variant="outline">Baseline</Badge>
+                          )}
+                        </div>
+                        <div className="text-xs text-muted-foreground">
+                          r{pl.pipelineRevision} · {pl.config.retriever.mode} ·
+                          topK {pl.config.retriever.topK} ·{' '}
+                          {pl.indexReused ? 'Index reused' : 'Index built'}
                         </div>
                       </TableCell>
-                      <TableCell className="align-top w-[15%]">
-                        {result.expectedAnswer || '—'}
+                      <TableCell>
+                        <Badge variant={stateBadgeVariant(pl.state)}>
+                          {pl.state}
+                        </Badge>
+                        <div className="mt-1 text-xs text-muted-foreground">
+                          {pl.completedTasks}/{pl.totalTasks} done
+                          {pl.failedTasks > 0
+                            ? ` (${pl.failedTasks} failed)`
+                            : ''}
+                        </div>
                       </TableCell>
-                      <TableCell className="align-top w-[38%] whitespace-pre-wrap">
-                        {result.answer}
+                      <TableCell className="text-xs space-y-0.5">
+                        {pl.retrievalMetrics
+                          .filter(
+                            (m) =>
+                              m.cutoff === pl.config.retriever.topK ||
+                              m.metricId === 'mrr',
+                          )
+                          .map((m) => (
+                            <div key={`${m.metricId}-${m.cutoff}`}>
+                              <strong>{m.displayLabel}:</strong>{' '}
+                              {formatMetric(m.mean)} ({m.eligibleCount}/
+                              {m.totalCount}
+                              {m.hasPartialPool && m.meanJudgedCoverage !== null
+                                ? ` · pooled ${(m.meanJudgedCoverage * 100).toFixed(0)}% judged`
+                                : ''}
+                              )
+                            </div>
+                          ))}
                       </TableCell>
-                      <TableCell className="align-top w-[25%]">
-                        {result.matches.length === 0 ? (
-                          <span className="opacity-60">No context retrieved.</span>
-                        ) : (
-                          <div className="space-y-2">
-                            {result.matches.slice(0, 2).map((match) => (
-                              <div
-                                key={match.id}
-                                className="p-2 rounded border border-zinc-200"
-                              >
-                                <div className="flex items-center gap-2 text-xs uppercase tracking-wide opacity-60 mb-1">
-                                  <FileText size={12} />
-                                  <span>{match.documentName ?? 'Document'}</span>
-                                  <span>Score: {match.score.toFixed(3)}</span>
-                                </div>
-                                <div className="text-xs whitespace-pre-wrap">
-                                  {match.text.slice(0, 280)}
-                                  {match.text.length > 280 ? '…' : ''}
-                                </div>
+                      {activeRun.mode === 'full_rag' && (
+                        <TableCell className="text-xs space-y-0.5">
+                          {[...pl.judgeMetrics, ...pl.abstentionMetrics].map(
+                            (m) => (
+                              <div key={`${m.metricId}-${m.metricVersion}`}>
+                                <strong>{m.displayLabel}:</strong>{' '}
+                                {formatMetric(m.mean)} ({m.eligibleCount}/
+                                {m.totalCount}
+                                {m.failedCount > 0
+                                  ? ` · ${m.failedCount} failed`
+                                  : ''}
+                                )
                               </div>
-                            ))}
+                            ),
+                          )}
+                        </TableCell>
+                      )}
+                      <TableCell className="text-xs space-y-0.5 whitespace-nowrap">
+                        <div>
+                          Serving p50/p95: {formatMs(pl.latency.serving.p50Ms)}{' '}
+                          / {formatMs(pl.latency.serving.p95Ms)}
+                        </div>
+                        {activeRun.mode === 'full_rag' && (
+                          <div>
+                            Judge p50/p95:{' '}
+                            {formatMs(pl.latency.evaluation.p50Ms)} /{' '}
+                            {formatMs(pl.latency.evaluation.p95Ms)}
                           </div>
                         )}
+                        <div>Index: {formatMs(pl.latency.indexTimeMs)}</div>
+                      </TableCell>
+                      <TableCell className="text-xs space-y-0.5 whitespace-nowrap">
+                        <div>Total: {formatCostBucket(pl.cost.total)}</div>
+                        <div>Retry: {formatCostBucket(pl.cost.retry)}</div>
+                        <div>
+                          Tokens: {pl.tokens.totalTokens.toLocaleString()}
+                        </div>
                       </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
               </Table>
-            )}
-          </CardContent>
-        </Card>
+            </CardContent>
+          </Card>
+        )}
 
-        {canViewReport && (
-          <div className="flex justify-end">
-            <Button onClick={onNext}>View Report</Button>
-          </div>
+        {activeRun && (
+          <Card>
+            <CardHeader>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <CardTitle>Per-Task Evidence &amp; Observations</CardTitle>
+                <div className="flex items-center gap-2 text-sm">
+                  <label htmlFor="experiment-inspect-pipeline">Pipeline</label>
+                  <select
+                    id="experiment-inspect-pipeline"
+                    className="rounded border bg-background p-1.5 text-sm"
+                    value={inspectedPipelineId}
+                    onChange={(e) => setInspectedPipelineId(e.target.value)}
+                  >
+                    {activeRun.pipelines.map((p) => (
+                      <option key={p.pipelineId} value={p.pipelineId}>
+                        {p.pipelineName}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {tasksQuery.isPending && (
+                <p role="status" className="text-sm text-muted-foreground">
+                  Loading task evidence…
+                </p>
+              )}
+              {tasksQuery.data?.items.map((task) => (
+                <div key={task.id} className="rounded-lg border p-4 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="font-medium text-sm">
+                      Q{task.ordinal + 1}: {task.question}
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      <Badge variant={stateBadgeVariant(task.state)}>
+                        {task.state}
+                      </Badge>
+                      <Badge variant="outline">
+                        {task.answerable ? 'Answerable' : 'Unanswerable'}
+                      </Badge>
+                      <Badge variant="outline">Pool: {task.pool}</Badge>
+                    </div>
+                  </div>
+
+                  {task.answer && (
+                    <div className="rounded bg-muted/40 p-3 text-sm space-y-1">
+                      <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                        <strong>Answer</strong>
+                        <span>
+                          ({task.answer.provider} / {task.answer.model})
+                        </span>
+                        {task.answer.abstained && (
+                          <Badge variant="secondary">Abstained</Badge>
+                        )}
+                        <span>
+                          Validated citations: {task.answer.citations.length}
+                        </span>
+                        {task.answer.reusedFromRunTaskId && (
+                          <Badge variant="outline">Reused</Badge>
+                        )}
+                      </div>
+                      <p>{task.answer.answerText}</p>
+                    </div>
+                  )}
+
+                  {task.retrievedItems.length > 0 && (
+                    <div className="space-y-1">
+                      <p className="text-xs font-medium text-muted-foreground">
+                        Retrieved evidence ({task.retrievedItems.length} chunks,
+                        depth {task.retrievedDepth})
+                      </p>
+                      <ul className="space-y-1 text-xs">
+                        {task.retrievedItems.map((item) => (
+                          <li
+                            key={item.chunkId}
+                            className="rounded border p-2 text-muted-foreground"
+                          >
+                            <span className="font-medium text-foreground">
+                              #{item.finalRank} {item.documentName} (p.
+                              {item.page})
+                            </span>{' '}
+                            · score {item.finalScore.toFixed(4)}
+                            {item.keywordRank !== null &&
+                              ` · kw #${item.keywordRank}`}
+                            {item.denseRank !== null &&
+                              ` · dense #${item.denseRank}`}
+                            {item.fusedRank !== null &&
+                              ` · fused #${item.fusedRank}`}
+                            {item.rerankRank !== null &&
+                              ` · rerank #${item.rerankRank}`}
+                            <p className="mt-1 line-clamp-2">{item.content}</p>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {task.observations.length > 0 && (
+                    <div className="flex flex-wrap gap-2 text-xs">
+                      {task.observations.map((obs) => (
+                        <span
+                          key={obs.id}
+                          className="rounded border px-2 py-1 bg-background"
+                          title={obs.reason ?? undefined}
+                        >
+                          <strong>
+                            {obs.metricId}
+                            {obs.cutoff > 0 ? `@${obs.cutoff}` : ''}:
+                          </strong>{' '}
+                          {obs.value === null
+                            ? `Unavailable (${obs.status})`
+                            : obs.value.toFixed(3)}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+
+                  {task.judgeAttempts.length > 0 && (
+                    <details className="text-xs">
+                      <summary className="cursor-pointer text-muted-foreground">
+                        Judge audit trail ({task.judgeAttempts.length} attempts)
+                      </summary>
+                      <ul className="mt-2 space-y-1">
+                        {task.judgeAttempts.map((a) => (
+                          <li key={a.id} className="rounded border p-2">
+                            <strong>{a.metricId}</strong> ({a.rubricVersion}) ·
+                            attempt #{a.attemptNumber}
+                            {a.isRepair ? ' (repair)' : ''} · {a.model} ·{' '}
+                            {a.status}
+                            {a.score !== null
+                              ? ` · score ${a.score.toFixed(3)}`
+                              : ''}
+                            {a.reason ? ` · ${a.reason}` : ''}
+                            {a.rawResponseHash && (
+                              <span className="ml-2 text-muted-foreground">
+                                hash: {a.rawResponseHash.slice(0, 12)}
+                              </span>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
+                  )}
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+        )}
+
+        {runsList.data && runsList.data.items.length > 1 && (
+          <Card>
+            <CardHeader>
+              <CardTitle>Recent Runs</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-2 text-sm">
+              {runsList.data.items.map((r) => (
+                <div
+                  key={r.id}
+                  className="flex flex-wrap items-center justify-between gap-2 rounded border p-2.5"
+                >
+                  <div>
+                    <button
+                      type="button"
+                      className="font-medium text-primary underline"
+                      onClick={() => setSearchParams({ run: r.id })}
+                    >
+                      {r.name}
+                    </button>
+                    <span className="ml-2 text-xs text-muted-foreground">
+                      {r.mode} · {r.completedUnits}/{r.totalUnits} units ·{' '}
+                      {new Date(r.queuedAt).toLocaleString()}
+                    </span>
+                  </div>
+                  <Badge variant={stateBadgeVariant(r.state)}>{r.state}</Badge>
+                </div>
+              ))}
+            </CardContent>
+          </Card>
         )}
       </div>
     </div>

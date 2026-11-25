@@ -1,114 +1,78 @@
-import path from 'path';
-import { fileURLToPath } from 'url';
-import { config as loadEnv } from 'dotenv';
-import express from 'express';
-import { loadConfig } from './lib/config.js';
-import { OpenAIClient } from './lib/openaiClient.js';
-import { QdrantClient } from './lib/qdrantClient.js';
-import { createEmbeddingsHandler } from './routes/embeddings.js';
-import { createSearchHandler } from './routes/search.js';
-import { createAnswerHandler } from './routes/answer.js';
-import { LlamaParseClient } from './lib/llamaParseClient.js';
-import { createParseHandler } from './routes/parse.js';
-import { createJudgeHandler } from './routes/judge.js';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { loadEnvironment, readConfig } from './config/env.js';
+import { openDatabase, ready } from './db/database.js';
+import { Datasets } from './db/datasets.js';
+import { Indexes } from './db/indexes.js';
+import { Jobs } from './db/jobs.js';
+import { Pipelines } from './db/pipelines.js';
+import { createApp } from './http/app.js';
+import { blobDirectory } from './ingestion/blobs.js';
+import { createLogger } from './lib/logger.js';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const workspaceRoot = path.resolve(__dirname, '..', '..');
-
-const loadEnvFile = (filename: string, override = false) => {
-  const result = loadEnv({ path: path.join(workspaceRoot, filename), override });
-  if (result.error) {
-    const error = result.error as NodeJS.ErrnoException;
-    if (error.code !== 'ENOENT') {
-      throw error;
+if (process.env.NODE_ENV !== 'test') loadEnvironment();
+const config = readConfig();
+const defaultStaticDir = fileURLToPath(
+  new URL('../../frontend/build', import.meta.url),
+);
+const staticDir =
+  config.env.STATIC_DIR ??
+  (process.env.NODE_ENV === 'production' &&
+  existsSync(join(defaultStaticDir, 'index.html'))
+    ? defaultStaticDir
+    : undefined);
+const db = openDatabase(config.env.DATABASE_PATH, undefined, {
+  blobDirectory: blobDirectory(config),
+});
+const jobs = new Jobs(db, Date.now, config.env.WORKER_LEASE_MS);
+const logger = createLogger();
+let stopping = false;
+const app = createApp({
+  config,
+  logger,
+  staticDir,
+  datasets: new Datasets(db, jobs),
+  pipelines: new Pipelines(db),
+  indexes: new Indexes(db, jobs),
+  ready: async () => {
+    if (stopping || !ready(db) || !jobs.online()) return false;
+    if (config.env.QDRANT_REQUIRED !== 'true' || !config.qdrant) return true;
+    try {
+      const response = await fetch(`${config.qdrant.url}/readyz`, {
+        headers: config.qdrant.apiKey
+          ? { 'api-key': config.qdrant.apiKey }
+          : {},
+        signal: AbortSignal.timeout(2000),
+        redirect: 'error',
+      });
+      await response.body?.cancel();
+      return response.ok;
+    } catch {
+      return false;
     }
-  }
-};
-
-loadEnvFile('.env');
-loadEnvFile('.env.local', true);
-
-const config = loadConfig();
-const openai = new OpenAIClient(config);
-const qdrant = new QdrantClient(config);
-const llamaParse = new LlamaParseClient(config);
-
-const app = express();
-
-const parseAllowedOrigins = (value: string | undefined) =>
-  value
-    ?.split(',')
-    .map((origin) => origin.trim())
-    .filter(Boolean) ?? [];
-
-const parsedOrigins = parseAllowedOrigins(process.env.CORS_ORIGINS);
-const allowAnyOrigin = parsedOrigins.includes('*');
-const defaultLocalOrigins = [
-  'http://localhost:3000',
-  'http://127.0.0.1:3000',
-  'http://localhost:5173',
-  'http://127.0.0.1:5173',
-];
-const configuredOrigins = parsedOrigins.filter((origin) => origin !== '*');
-const allowedOrigins = allowAnyOrigin
-  ? []
-  : Array.from(
-      new Set([
-        ...(configuredOrigins.length > 0 ? configuredOrigins : defaultLocalOrigins),
-        ...defaultLocalOrigins,
-      ])
-    );
-
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
-  const requestHeaders = req.headers['access-control-request-headers'];
-
-  if (allowAnyOrigin) {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-  } else if (origin && allowedOrigins.includes(origin)) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-    res.setHeader('Vary', 'Origin');
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
-  } else if (origin) {
-    res.setHeader('Vary', 'Origin');
-    if (req.method === 'OPTIONS') {
-      res.status(403).end();
-    } else {
-      res.status(403).json({ error: 'Origin not allowed.' });
-    }
-    return;
-  }
-
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.setHeader(
-    'Access-Control-Allow-Headers',
-    typeof requestHeaders === 'string' && requestHeaders.trim()
-      ? requestHeaders
-      : 'Content-Type, Authorization'
-  );
-
-  if (req.method === 'OPTIONS') {
-    res.status(204).end();
-    return;
-  }
-
-  next();
+  },
 });
-
-app.use(express.json({ limit: '16mb' }));
-
-app.get('/health', (_req, res) => {
-  res.json({ status: 'ok' });
-});
-
-app.post('/api/chunks', createEmbeddingsHandler(openai, qdrant));
-app.post('/api/search', createSearchHandler(openai, qdrant));
-app.post('/api/answer', createAnswerHandler(openai, qdrant));
-app.post('/api/parse', createParseHandler(llamaParse));
-app.post('/api/judge', createJudgeHandler(openai));
-
-const PORT = process.env.PORT ? Number(process.env.PORT) : 7070;
-app.listen(PORT, () => {
-  console.log(`[backend] listening on http://localhost:${PORT}`);
-});
+const server = app.listen(config.env.PORT, config.env.HOST, () =>
+  logger.info({ host: config.env.HOST, port: config.env.PORT }, 'listening'),
+);
+function shutdown() {
+  if (stopping) return;
+  stopping = true;
+  // A disconnected client may still have a pending provider call. Bound process drain as well as socket drain.
+  let closed = false;
+  const deadline = setTimeout(() => {
+    server.closeAllConnections();
+    if (!closed) db.close();
+    logger.warn('shutdown deadline reached');
+    process.exit(1);
+  }, config.env.SHUTDOWN_TIMEOUT_MS);
+  deadline.unref();
+  server.close(() => {
+    db.close();
+    closed = true;
+    logger.info('stopped');
+  });
+}
+process.once('SIGTERM', shutdown);
+process.once('SIGINT', shutdown);

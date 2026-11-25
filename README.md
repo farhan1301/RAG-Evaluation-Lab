@@ -1,457 +1,291 @@
-<div align="center">
+# RAG Evaluation Lab
 
-# <img src="favicon/favicon-32x32.png" alt="RAG Evaluation Lab icon" width="28" height="28" /> RAG Evaluation Lab
-
-**A comprehensive platform for building, testing, and evaluating Retrieval-Augmented Generation pipelines**
-
-[![TypeScript](https://img.shields.io/badge/TypeScript-007ACC?style=for-the-badge&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![React](https://img.shields.io/badge/React-20232A?style=for-the-badge&logo=react&logoColor=61DAFB)](https://reactjs.org/)
-[![Node.js](https://img.shields.io/badge/Node.js-43853D?style=for-the-badge&logo=node.js&logoColor=white)](https://nodejs.org/)
-[![Express](https://img.shields.io/badge/Express.js-404D59?style=for-the-badge)](https://expressjs.com/)
-
-[Features](#-features) • [Tech Stack](#️-tech-stack) • [Quick Start](#-quick-start) • [API Reference](#-api-reference) • [Documentation](#-documentation)
-
-</div>
+RAG Evaluation Lab is a self-hosted, open-source workbench for building, comparing, and auditing Retrieval-Augmented Generation (RAG) pipelines. Every dataset revision, chunked index generation, pipeline revision, experiment run, retrieved evidence item, generated answer, judge attempt, and provider cost record is persisted in SQLite and executed by a durable background worker—so you can run offline keyword retrieval comparisons with zero API keys, reload or close your browser without losing work, and optionally add OpenAI, Anthropic, or local OpenAI-compatible models for dense/hybrid retrieval, answer generation, structured judging, and human-reviewed synthetic test-set generation.
 
 ---
 
-## 📖 Overview
+## Quick Start (Docker Compose — Under 5 Minutes)
 
-RAG Evaluation Lab is an end-to-end workspace for building, running, and evaluating retrieval-augmented generation (RAG) pipelines. The platform provides a modern, intuitive interface for managing datasets, configuring multi-stage pipelines, running experiments, and analyzing results with comprehensive metrics.
+No API keys, cloud accounts, or model downloads are required to run your first comparison. Excluding initial Docker image download, the workflow below takes under five minutes:
 
-### Architecture
+1. **Clone and start the stack**
 
-- **Frontend**: Vite + React application with Tailwind CSS for orchestrating datasets, pipelines, experiments, and reporting
-- **Backend**: TypeScript Express service handling OpenAI, Qdrant, and LlamaParse integrations
+   ```bash
+   git clone https://github.com/farhan1301/RAG-Evaluation-Lab.git
+   cd RAG-Evaluation-Lab
+   docker compose up --build
+   ```
 
----
+   This builds a single multi-stage Node 26 image and starts `app` (serving the built frontend and `/api/v1` on one origin at `http://127.0.0.1:7070`) and `worker` (executing background parsing, indexing, experiment, and generation jobs against a shared named SQLite + blobs volume).
 
-## 🛠️ Tech Stack
+2. **Open the application**
 
-### Frontend
-- **Framework**: React 18 with TypeScript
-- **Build Tool**: Vite
-- **Styling**: Tailwind CSS
-- **UI Components**: Radix UI primitives
-- **State Management**: React Context API
+   Visit [http://127.0.0.1:7070](http://127.0.0.1:7070) in your browser.
 
-### Backend
-- **Runtime**: Node.js 18+
-- **Framework**: Express.js
-- **Language**: TypeScript
-- **Key Integrations**:
-  - OpenAI API (embeddings & chat)
-  - Qdrant (vector database)
-  - LlamaParse (document parsing)
+3. **Load the labeled sample dataset**
 
----
+   Navigate to **Datasets & Tasks** and click **Load Sample Dataset**. This creates the labeled RAG fundamentals corpus (3 documents and 10 tasks—9 answerable and 1 unanswerable—with complete graded document-level qrels `0–3`).
 
-## 🎥 Demo
+4. **Compare two retrieval pipelines**
+   - Open **Pipelines**, create a baseline keyword pipeline (SQLite FTS5 BM25, `topK: 5`), and click **Duplicate** to create an independent copy.
+   - Change a retrieval or chunking parameter on the copy (for example, `topK: 1` or `sentence-packed` chunking) and save.
+   - Open **Experiments**, select the sample dataset and both pipelines, choose **Retrieval-only** mode, and start the run.
+   - Close or refresh the browser at any time—progress and results stay in SQLite. Open **Reports** or **History** to inspect paired deltas, per-task retrieved passage diffs, and export Markdown, JSON, or paginated print/PDF reports.
 
-Click the image below to watch a demonstration of the platform:
+### Enabling Dense and Hybrid Retrieval in Compose
 
-[![Watch Demo](/RAG_Demo_Thumbnail.png)](https://drive.google.com/file/d/1N9gWsj2-VUxENEvvmErER1WbRtXOn-Ph/view?usp=sharing)
+`qdrant` is included in `compose.yaml` under the optional `dense` profile so the default quick start stays lightweight and requires no extra image downloads. To enable dense or hybrid retrieval:
 
+1. Copy `.env.example` to `.env`, set `QDRANT_URL=http://qdrant:6333`, and configure an embedding profile (OpenAI `OPENAI_API_KEY` + `OPENAI_EMBED_MODEL=text-embedding-3-small`, or a local endpoint such as Ollama via `LOCAL_EMBED_BASE_URL` + `LOCAL_EMBED_MODEL`).
+2. Start with the `dense` profile:
 
----
-
-## ✨ Features
-
-### 🎯 Core Capabilities
-
-- **Guided Workflow**: Interactive landing page that explains the RAG evaluation process with direct navigation to datasets and experiments
-- **Dataset Management**:
-  - Drag-and-drop file uploads with real-time status tracking
-  - Curated sample datasets for quick starts
-  - CSV import with flexible header alias support
-- **Multi-Pipeline Configuration**:
-  - Configure complete RAG pipelines with granular control over each stage
-  - Parsing, chunking, embeddings, retrieval, reranking, LLM, and judge configurations
-  - Baseline selection and pipeline duplication for easy experimentation
-- **Intelligent Experiment Runner**:
-  - Auto-parsing of documents on-demand
-  - Real-time progress logging
-  - Comprehensive metrics: latency, token usage, and cost tracking
-  - Automatic persistence of experiment runs
-- **Advanced Reporting**:
-  - Pipeline comparison with metric deltas
-  - Automated recommendations for optimal configurations
-  - Export capabilities (Markdown and PDF)
-- **Document Processing**: LlamaParse-powered ingestion for consistent parsing with extensibility for additional techniques
-
-### 🚀 Coming Soon
-
-View our roadmap for upcoming features including additional model support, advanced reranking, dark mode, and enhanced metrics.
+   ```bash
+   docker compose --profile dense up --build
+   ```
 
 ---
 
-## 📁 Repository Structure
+## Native Development Setup
 
-```
-RAG Evaluation Lab/
-├── frontend/              # Vite + React UI application
-│   ├── src/
-│   │   ├── components/   # Feature pages (Datasets, Pipelines, Experiments, Reports, etc.)
-│   │   ├── state/        # React context providers for global state
-│   │   └── lib/          # Utilities (chunking, CSV parsing, API client)
-│   └── package.json
-├── backend/              # TypeScript Express API server
-│   ├── src/
-│   │   ├── lib/         # Client libraries (OpenAI, Qdrant, LlamaParse)
-│   │   └── routes/      # API endpoints (chunks, search, answer, judge, parse)
-│   ├── scripts/         # Verification and setup utilities
-│   └── sample-data/     # Sample assets for testing
-├── favicon/             # Application icons
-├── .env.example         # Environment variable template
-└── .env.local          # Local overrides (gitignored)
-```
-
----
-
-## 📋 Prerequisites
-
-Before getting started, ensure you have the following:
-
-| Requirement | Version | Notes |
-|------------|---------|-------|
-| Node.js | 18+ | JavaScript runtime |
-| npm | 9+ | Package manager |
-| Qdrant | Latest | Vector database (cloud or local) |
-| OpenAI API Key | - | For embeddings and chat completions |
-| LlamaParse API Key | - | Document parsing service |
-
----
-
-## 🚀 Quick Start
-
-### 1. Clone and Install
+Requires **Node.js `^22.22.0 || ^24.0.0 || >=26.0.0`** (tested on Node 22.22.3 and 26.13.1) and npm workspaces (`packages/contracts`, `backend`, `frontend`).
 
 ```bash
-# Clone the repository
-git clone <repository-url>
-cd "RAG Evaluation Lab"
-
-# Copy environment template
 cp .env.example .env.local
+npm ci
 ```
 
-Edit `.env.local` with your API keys and configuration:
+Start the three development processes in separate terminals:
 
 ```bash
-# Required environment variables
-OPENAI_API_KEY=your_openai_api_key
-QDRANT_URL=your_qdrant_url
-LLAMA_CLOUD_API_KEY=your_llamaparse_api_key
-VITE_BACKEND_URL=http://localhost:7070
-```
+# Terminal 1 — Express API (http://127.0.0.1:7070)
+npm run dev:backend
 
-### 2. Install Dependencies
+# Terminal 2 — Durable background worker
+npm run dev:worker
 
-```bash
-# Install frontend dependencies
-cd frontend
-npm install
-
-# Install backend dependencies
-cd ../backend
-npm install
-```
-
-> **Security Note:** Never commit API keys to version control. Keep all secrets in `.env.local` (gitignored) or use a secure secret management system.
-
-### 3. Run the Application
-
-**Terminal 1 - Start Backend:**
-```bash
-cd backend
+# Terminal 3 — Vite frontend dev server (http://127.0.0.1:3000, proxies /api -> 7070)
 npm run dev
-# Server starts at http://localhost:7070
 ```
 
-**Terminal 2 - Start Frontend:**
+- Node loads `.env.local` and `.env` from the repository root (process environment variables take precedence, followed by `.env.local`).
+- On Node 22, `node:sqlite` emits an expected `ExperimentalWarning` on stderr. All SQLite usage is isolated inside `backend/src/db/`.
+- **Native single-origin production run:**
+
+  ```bash
+  npm run build
+  NODE_ENV=production npm start -w rag-eval-backend
+  npm run start:worker
+  ```
+
+---
+
+## Provider Setup
+
+All provider credentials and upstream endpoint URLs remain strictly on the server. Application code contains no hard-coded default model IDs; configure each role explicitly in `.env` or `.env.local` (see [`.env.example`](.env.example)):
+
+| Provider / Capability                                                  | Required Variables                                                                                                                                        | Notes & Examples                                                                                                                                                                                                   |
+| ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **OpenAI** (chat, judge, embeddings)                                   | `OPENAI_API_KEY`, plus `OPENAI_CHAT_MODEL` (set to a current model), `OPENAI_JUDGE_MODEL` (optional; defaults to chat model), and/or `OPENAI_EMBED_MODEL` | Embedding example: `text-embedding-3-small`. Optional: `OPENAI_EMBED_DIMENSIONS`, `OPENAI_BASE_URL`, `OPENAI_CHAT_SUPPORTS_TEMPERATURE`.                                                                           |
+| **Anthropic** (chat, judge)                                            | `ANTHROPIC_API_KEY`, `ANTHROPIC_CHAT_MODEL`, optional `ANTHROPIC_JUDGE_MODEL`                                                                             | Model examples: `claude-sonnet-5-5`, `claude-opus-5-5`, `claude-haiku-5-5`. Pair with OpenAI or local embeddings for dense/hybrid retrieval.                                                                       |
+| **Local / Ollama Embeddings** (dense & hybrid without a cloud account) | `LOCAL_EMBED_BASE_URL`, `LOCAL_EMBED_MODEL`, `QDRANT_URL`                                                                                                 | Point to an OpenAI-compatible endpoint such as Ollama: `http://127.0.0.1:11434/v1` (native) or `http://host.docker.internal:11434/v1` (Docker Compose). Optional: `LOCAL_EMBED_API_KEY`, `LOCAL_EMBED_DIMENSIONS`. |
+| **Local / Ollama Chat & Judge**                                        | `LOCAL_CHAT_BASE_URL`, `LOCAL_CHAT_MODEL`, optional `LOCAL_JUDGE_MODEL`                                                                                   | Optional flags: `LOCAL_CHAT_SUPPORTS_TEMPERATURE=true`, `LOCAL_CHAT_SUPPORTS_STRUCTURED_OUTPUT=false`.                                                                                                             |
+| **HTTP Reranker**                                                      | `RERANK_BASE_URL`, `RERANK_MODEL`                                                                                                                         | Accepts `{ model, query, documents, top_n }` and returns validated candidate indices/scores. Pipelines select `fail` or `fallback` failure policy. Optional: `RERANK_API_KEY`.                                     |
+| **Qdrant Vector Store**                                                | `QDRANT_URL`                                                                                                                                              | Required only for `dense` and `hybrid` retrieval (`keyword` FTS5 works without Qdrant). Optional: `QDRANT_API_KEY`, `QDRANT_COLLECTION` (default `rag-eval-chunks`), `QDRANT_REQUIRED=true`.                       |
+| **LlamaParse Cloud Parser**                                            | `LLAMA_CLOUD_API_KEY`                                                                                                                                     | Enables `.docx` and scanned/image PDF extraction. Local `.txt`, `.md`, and text-layer `.pdf` parsing works offline with zero credentials.                                                                          |
+| **Pricing & Budgets**                                                  | `PRICE_SCHEDULE_JSON` or `PRICE_SCHEDULE_PATH`, `RUN_MAX_TOKENS`, `RUN_MAX_COST_USD`                                                                      | Models without an explicit price entry report cost as `unknown` (never estimated).                                                                                                                                 |
+
+---
+
+## Architecture
+
+```mermaid
+flowchart LR
+  Browser["Browser (React 19 SPA)"] -->|Same-origin HTTPS/HTTP| App["app (Express 5 + Static UI)"]
+  App <-->|SQLite WAL + Blobs Volume| Storage["/data/workspace.sqlite + /data/blobs"]
+  Worker["worker (Durable Job Runner)"] <-->|Leased Jobs + Heartbeat| Storage
+  App -.->|Search Preview| Qdrant["qdrant (Optional, dense profile)"]
+  Worker -.->|Batch Upsert / Search| Qdrant
+  Worker -.->|Chat / Judge / Embed / Rerank / OCR| Providers["Configured Providers (OpenAI, Anthropic, Ollama, HTTP)"]
+```
+
+### Repository Layout
+
+```text
+packages/contracts/    Shared Zod schemas, wire DTOs, metric identifiers
+backend/src/
+  config/              Validated env parsing and safe capability projection
+  db/                  node:sqlite migrations, repositories, online backup/restore
+  http/                Express app factory, /api/v1 routes, static SPA serving
+  jobs/                Durable SQLite queue, leases, fencing tokens, worker entry
+  ingestion/           Bounded blob uploads, local/LlamaParse parsers, chunkers
+  retrieval/           Immutable index generations, FTS5, Qdrant, RRF, rebuild
+  providers/           OpenAI, Anthropic, OpenAI-compatible, and HTTP reranker
+  evaluation/          Deterministic metrics, versioned judge rubrics, pricing
+  generation/          Synthetic Q&A generator, span validation, leakage checks
+  reporting/           Paired comparisons, bootstrap CIs, exports, derived docs
+  ops/                 Backup, restore, Qdrant rebuild, and worker health CLIs
+frontend/src/          React 19 + Router 8 + TanStack Query + Tailwind 4 UI
+tests/                 Vitest unit, HTTP, DB, recovery, and Qdrant integration tests
+e2e/                   Playwright browser workflow and provider-fixture tests
+```
+
+### Startup & Migration Ordering
+
+Both `app` and `worker` call `openDatabase()` at startup, which configures `PRAGMA busy_timeout=5000`, `PRAGMA foreign_keys=ON`, `PRAGMA journal_mode=WAL`, and executes pending SQL migrations inside a `BEGIN IMMEDIATE` transaction guarded by `PRAGMA user_version`. In `compose.yaml`, `worker` uses `depends_on: app: condition: service_started` (rather than `service_healthy`, which would deadlock because `app`'s `/health/ready` requires a fresh worker heartbeat in SQLite). Because migrations are serialized and idempotent via `PRAGMA user_version`, either process can start safely without racing or corrupting schema state.
+
+---
+
+## Metrics Explained
+
+### Deterministic Document-Level Retrieval Metrics
+
+Retrieval is scored at the **document level** by default so changing chunk sizes does not invalidate gold labels. Retrieved chunks are collapsed to unique documents at first occurrence, preserving rank order. Let $R$ be the set of positively graded gold documents ($g_i \in \{0,1,2,3\}$), and $b_i = 1$ if $g_i > 0$ else $0$.
+
+| Metric               | Formula                                                                                             | Notes                                                                         |
+| -------------------- | --------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| **Hit@k**            | $1$ if $\exists i \le k: b_i = 1$, else $0$                                                         | Macro mean across eligible tasks.                                             |
+| **Precision@k**      | $\frac{1}{k}\sum_{i=1}^{k} b_i$                                                                     | Returning fewer than $k$ documents keeps $k$ in the denominator.              |
+| **Recall@k**         | $\frac{1}{\|R\|}\sum_{i=1}^{k} b_i$                                                                 | Denominator includes all positive gold documents, including unretrieved ones. |
+| **MRR@k**            | $\frac{1}{\text{first positive rank}}$ if $\le k$, else $0$                                         | Mean reciprocal rank through cutoff $k$.                                      |
+| **MRR (full depth)** | $\frac{1}{\text{first positive rank}}$ across evaluated depth, else $0$                             | Records evaluated `topK` depth and returned document count.                   |
+| **nDCG@k**           | $\text{DCG}@k / \text{IDCG}@k$, where $\text{DCG}@k = \sum_{i=1}^{k} \frac{2^{g_i}-1}{\log_2(i+1)}$ | Ideal DCG orders all positive gold grades through $k$.                        |
+
+- **Hybrid fusion (RRF):** $\text{score}(d) = \sum_s \frac{w_s}{60 + \text{rank}_s(d)}$, tie-broken deterministically by stable chunk ID.
+- **Partial labeling pools:** Unjudged documents receive grade `0`, and `judgedCoverage` is reported alongside pooled estimates.
+- **Distinct exclusion statuses:** An eligible task with empty successful retrieval scores `0`. Failed retrieval (`retrieval_failed`), unanswerable tasks (`unanswerable`), missing qrels (`missing_qrels`), and tasks with zero positive gold documents (`no_relevant_docs`) record `value: null` with explicit counts rather than distorting means.
+
+### Structured LLM-Judge & Abstention Metrics
+
+Judge calls use versioned rubrics (`backend/src/evaluation/rubrics/*.json`), blind the judge to pipeline identity, treat retrieved passages as quoted data, and validate all returned `chunkId` evidence against the exact context passed to the answer model.
+
+| Metric                                                   | Formula / Rubric                                                                                                                                                                                                   |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Faithfulness / groundedness**                          | $\text{supported claims} / \text{total factual claims}$ (atomic claim decomposition with validated `chunkId` citations).                                                                                           |
+| **Answer relevance**                                     | $\text{grade} / 4$ on an anchored `0–4` scale (`0` off-topic, `1` tangential, `2` partially responsive, `3` directly responsive with minor omission, `4` fully responsive).                                        |
+| **Judged passage usefulness (Judged context precision)** | $\text{useful passages} / \text{delivered passages}$ (answerable empty retrieval records `0`).                                                                                                                     |
+| **Judged context recall**                                | $\text{supported reference facts} / \text{total reference facts}$ (requires reviewed `referenceFacts`).                                                                                                            |
+| **Answer correctness**                                   | $\text{satisfied reference facts} / \text{total reference facts}$, with a separate `criticalContradiction` flag and versioned pass policy (`minScore >= 0.8`, no critical contradiction, acceptance criteria met). |
+| **Abstention (answerable / unanswerable)**               | Reported as two separate metrics: answer attempt rate on answerable tasks, and abstention accuracy on unanswerable tasks.                                                                                          |
+
+### Null-on-Failure, Comparisons, Latency & Unknown Pricing
+
+- **Null-on-failure rule:** Timeout, judge refusal, malformed JSON, schema mismatch, or unresolved evidence `chunkId`s produce a `null` observation with an explicit status (`judge_timeout`, `judge_refused`, `judge_malformed`, `unresolved_evidence`, `judge_failed`)—never coerced to `0`. One bounded repair attempt is permitted and both attempts are retained in `judge_attempts`. `completionRate` is reported alongside every aggregate mean.
+- **Paired comparisons & bootstrap CIs:** Comparisons pair observations on identical `taskVersionId`, dataset revision, metric version, evaluation unit, and cutoff (plus identical judge model/settings and rubric version for judge deltas). For $\ge 5$ paired tasks, reports include a deterministic task-level paired percentile bootstrap interval (`seed=42`, $B=1000$, 95% CI). Incompatible runs remain inspectable side by side with incompatible fields highlighted; no winner is declared from unpaired averages.
+- **Latency:** Queue wait, index build time, serving latency (retrieval + rerank + generation), and evaluation (judge) latency are tracked separately with nearest-rank `p50`/`p95` and sample sizes.
+- **Unknown pricing:** Costs are computed only from actual provider token/request usage and an explicit operator-configured price schedule (`PRICE_SCHEDULE_JSON` / `PRICE_SCHEDULE_PATH`). Unconfigured models always report `unknown` / `null` (never estimated). Indexing, serving, per-query serving, judging, retry, and total run spend are broken out separately.
+
+---
+
+## Synthetic Test-Set Generation
+
+With a chat profile configured, operators can launch a cancellable synthetic generation job from any frozen dataset revision (**Datasets & Tasks -> Synthetic Test-Set Generation**):
+
+- **Strict span grounding:** Every proposed item must cite in-bounds character offsets and quotes matching the exact frozen document text; proposals with invalid spans are rejected and counted.
+- **Deduplication:** Proposals matching an existing normalized question or overlapping an existing source span by $\ge 50\%$ are automatically skipped.
+- **Verbatim leakage gate:** Any proposed reference answer with $\ge 5$ words and $\ge 24$ normalized characters is flagged and **blocked from promotion** if $\ge 75\%$ of its normalized words come from contiguous verbatim corpus runs ($\ge 4$ words, or $\ge 3$ words spanning $\ge 24$ chars) OR it contains a single contiguous verbatim run of $\ge 8$ words or $\ge 60$ characters. Reviewers must paraphrase flagged answers before promotion.
+- **Review-before-promotion:** Draft proposals live outside scored datasets and are never auto-scored. Promoting accepted proposals creates a new dataset revision while preserving generator provenance (batch ID, provider, model, prompt version, source spans, and whether a human edited the item).
+
+---
+
+## Operational Limits
+
+| Setting                            | Default                         | Environment Variable                 |
+| ---------------------------------- | ------------------------------- | ------------------------------------ |
+| JSON request body limit            | 256 KiB                         | `JSON_LIMIT_BYTES`                   |
+| Document upload / CSV import limit | 12 MiB                          | `DOCUMENT_LIMIT_BYTES`               |
+| API rate limit                     | 600 req / 60 s per client       | `RATE_LIMIT`, `RATE_WINDOW_MS`       |
+| Worker job lease duration          | 30 s                            | `WORKER_LEASE_MS`                    |
+| Provider request timeout           | 30 s                            | `PROVIDER_TIMEOUT_MS`                |
+| Embedding batch size               | 64 chunks                       | `EMBED_BATCH_SIZE`                   |
+| Graceful shutdown deadline         | 10 s                            | `SHUTDOWN_TIMEOUT_MS`                |
+| Local PDF extraction bounds        | 2,000 pages / 16 MiB text       | Built-in safety guard                |
+| DOCX container validation bound    | 32 MiB expanded / 1,024 entries | Built-in safety guard                |
+| Per-run token / cost budgets       | Unbounded (optional)            | `RUN_MAX_TOKENS`, `RUN_MAX_COST_USD` |
+
+---
+
+## Backup, Restore, and Rebuilding Qdrant
+
+SQLite (`workspace.sqlite`) and the private blob directory (`blobs/`) are authoritative for all workspace facts, documents, and reports. Qdrant vectors are derived and rebuildable from SQLite.
+
+**Offline contract & locking:**
+
+- Backing up to a **fresh** directory uses `node:sqlite`'s online backup API.
+- Backing up to an **existing** destination (`--overwrite`) and restoring over an **existing** workspace (`--force`) are **offline operations**: **stop `app` and `worker` first**.
+- Backup and restore guard each destination (`<backup-dir>.rag-eval.lock` for backups; both `<database>.rag-eval.lock` and `<blobs>.rag-eval.lock` for restores) with an exclusive fail-fast lock file (`O_CREAT | O_EXCL`) containing a random owner token and PID. There is no automatic stale-lock takeover: if a lock file already exists, the command fails fast and tells you which lock file to delete if no backup/restore is running.
+- Before swapping over an existing database, `restore` rechecks overwrite permission under the lock, checkpoints the existing database with `PRAGMA wal_checkpoint(TRUNCATE)` (aborting if busy—for example, if `app` or `worker` is still running), renames the existing DB, sidecars, and blobs directory to `.prev` names, installs and verifies the staged replacement, and deletes the `.prev` backups only after the swap succeeds.
+- **Limitation:** Restores are not crash-atomic under power loss or hard process termination during the swap window.
+
+### Native Commands
+
 ```bash
-cd frontend
-npm run dev
-# Application opens at http://localhost:5173
+# 1. Consistent online backup into a fresh directory (stop app and worker first if using --overwrite on an existing destination)
+npm run backup -- --out ./backups/snapshot-2026-11-25
+
+# 2. Restore into a fresh directory (stop app and worker first when restoring over an existing workspace with --force)
+npm run restore -- --from ./backups/snapshot-2026-11-25 --database /path/to/new/workspace.sqlite --blobs /path/to/new/blobs
+
+# 3. Rebuild all ready dense/hybrid index generations into Qdrant directly from SQLite
+npm run rebuild:qdrant
+# Or rebuild a single generation:
+npm run rebuild:qdrant -- --generation <generation-uuid>
 ```
 
-> **Tip:** Use `npm run dev:watch` in the backend for auto-restart on file changes during development.
-
----
-
-## ⚙️ Configuration
-
-### Environment Variables
-
-Both frontend and backend read environment variables from the repository root via `dotenv`. The `.env.local` file overrides `.env` for local development.
-
-#### Required Variables
-
-| Variable | Description |
-|----------|-------------|
-| `OPENAI_API_KEY` | OpenAI API key for embeddings and chat completions |
-| `QDRANT_URL` | Qdrant cluster URL (cloud or local instance) |
-| `LLAMA_CLOUD_API_KEY` or `LLAMA_PARSE_API_KEY` | LlamaParse API key for document parsing |
-| `VITE_BACKEND_URL` | Backend API URL for frontend requests |
-
-#### Optional Variables
-
-See `.env.example` for the complete list of optional configuration variables including model selection, collection names, CORS settings, and logging options.
-
----
-
-## 🔌 API Reference
-
-The backend provides the following REST endpoints:
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/health` | GET | Health check and readiness probe |
-| `/api/chunks` | POST | Upsert document chunks with embeddings to Qdrant |
-| `/api/search` | POST | Perform vector search against Qdrant collections |
-| `/api/answer` | POST | Retrieve context and synthesize answers via LLM |
-| `/api/judge` | POST | Evaluate answer quality using LLM-as-judge |
-| `/api/parse` | POST | Parse documents via LlamaParse |
-
-### Metrics and Evaluation
-
-The platform calculates comprehensive metrics from actual LLM evaluations:
-- Pass rate and quality scores
-- Context precision and groundedness
-- Latency (p50, p95, p99)
-- Token usage and cost per query
-
-All metrics are derived from real model calls rather than heuristics, ensuring production-ready quality signals.
-
----
-
-## 🏗️ Production Deployment
-
-### Build for Production
+### Docker Compose Commands
 
 ```bash
-# Build frontend (outputs to frontend/build)
-cd frontend
-npm run build
+# 1. Online backup into a fresh directory inside /data/backups (stop app and worker first if overwriting an existing destination)
+docker compose exec -T app node backend/dist/ops/backup.js --out /data/backups/snapshot-1
 
-# Build backend (outputs to backend/dist)
-cd ../backend
-npm run build
-npm start
+# Copy the snapshot off the container volume to the host:
+docker compose cp app:/data/backups/snapshot-1 ./backups/snapshot-1
+
+# 2. Restore into a fresh or existing volume (offline operation — stop app and worker first):
+docker compose stop app worker
+docker compose run --rm --no-deps -v "$(pwd)/backups/snapshot-1:/backup:ro" app \
+  node backend/dist/ops/restore.js --from /backup --force
+docker compose up -d
+
+# 3. Rebuild Qdrant dense/hybrid vectors from SQLite after recreating the Qdrant volume:
+docker compose --profile dense up -d qdrant
+docker compose exec -T app node backend/dist/ops/rebuild-qdrant.js
 ```
 
-### Deployment Recommendations
+### Interrupted Restore
 
-- **Frontend**: Deploy the `frontend/build` directory to a static hosting service (Vercel, Netlify) or CDN
-- **Backend**: Run the Node service behind an API gateway or load balancer with proper HTTPS/TLS
-- **Security**: Configure authentication, rate limiting, and request quotas before public deployment
+Before the first live rename, restore creates and flushes `<database>.restoring`. Startup refuses to open the workspace while this marker or any `.prev` artifact exists, including after a fresh restore that installed blobs but never installed the database.
 
-### NPM Scripts (Root Directory)
+1. Stop the app and worker and confirm all backup and restore processes have exited. Keep the source backup intact.
+2. Inspect the database, its SQLite sidecars, the blobs directory, and their `.prev` siblings. To recover an existing workspace, move partial replacements aside and return each available `.prev` to its original name. Keep originals that were never moved. If the replacement is complete, verify its database and referenced blobs before discarding the previous copies.
+3. For an incomplete fresh restore, move any partially installed files aside. With both destinations clear, remove the marker and abandoned destination locks and rerun restore from the verified backup.
+4. For a recovered workspace, remove the marker and any abandoned destination locks after verification, then restart the app and worker.
 
-Convenient scripts for running commands from the repository root:
-
-```bash
-npm run dev              # Start frontend dev server
-npm run dev:frontend     # Start frontend dev server (explicit)
-npm run dev:backend      # Start backend dev server
-npm run build            # Build frontend
-npm run build:backend    # Build backend
-```
+You can also force a brand-new index generation through the HTTP API at any time via `POST /api/v1/indexes` with `"forceRebuild": true`.
 
 ---
 
-## 🧪 Testing and Verification
+## Troubleshooting
 
-### API Smoke Tests
-
-Verify your API credentials and infrastructure without running the full UI:
-
-```bash
-cd backend
-
-# Test individual endpoints
-npx ts-node --swc ./scripts/verify-chunks.ts   # Test chunk upsert
-npx ts-node --swc ./scripts/verify-search.ts   # Test vector search
-npx ts-node --swc ./scripts/verify-answer.ts   # Test answer generation
-npx ts-node --swc ./scripts/verify-judge.ts    # Test evaluation
-npx ts-node --swc ./scripts/verify-parse.ts    # Test document parsing
-```
-
-### Qdrant Setup
-
-Initialize Qdrant with the required payload index:
-
-```bash
-cd backend
-npx ts-node --swc ./scripts/setup-qdrant-index.ts
-```
-
-This creates the `pipelineId` payload index needed for pipeline-aware vector operations.
+- **Worker not running (`/health/ready` returns `503`, `workerOnline: false`, jobs stay `queued`):** Ensure the worker process is running (`npm run dev:worker` natively, or `docker compose ps` to verify the `worker` container is running and healthy). Both `app` and `worker` must point to the exact same `DATABASE_PATH` and `BLOB_DIRECTORY`.
+- **Qdrant missing or unreachable (`denseStore: false` or dense/hybrid validation error):** Keyword mode requires no Qdrant. For dense or hybrid pipelines in Docker Compose, start Qdrant (`docker compose --profile dense up -d qdrant`) and set `QDRANT_URL=http://qdrant:6333` (Compose keeps Qdrant private with no host port published). For native development, publish Qdrant on loopback as documented in [`CONTRIBUTING.md`](CONTRIBUTING.md#test-layers) (`docker run --rm -d --name rag-eval-qdrant -p 127.0.0.1:6333:6333 qdrant/qdrant:v1.20.2@sha256:d277592721d2e3b73f9b797b53cf05e6a5bb2134f6d13fdbda4ca51782afbcac`), set `QDRANT_URL=http://127.0.0.1:6333`, and configure an embedding profile. Set `QDRANT_REQUIRED=true` only when you want `/health/ready` to fail if Qdrant is down.
+- **Origin or host denied (`403 origin_denied`):** Access the app using a hostname in `TRUSTED_HOSTS` (default `localhost,127.0.0.1,[::1]`). When deploying behind a reverse proxy or custom domain, add the hostname to `TRUSTED_HOSTS`, configure `TRUSTED_PROXIES` with your proxy IP/CIDR, and add any cross-origin browser origin to `CORS_ORIGINS`.
+- **Node 22 `ExperimentalWarning: SQLite`:** Expected on Node 22.x when opening `node:sqlite`. The Docker image uses Node 26.13.1.
 
 ---
 
-## 📚 Documentation
+## Security Model
 
-### Implementation Overview
+RAG Evaluation Lab is designed as a **self-hosted, single trusted workspace**:
 
-This section provides detailed information about the architecture, components, and implementation details of the RAG Evaluation Lab.
-
-### Backend (`/backend`)
-
-#### Goals
-- Provide a TypeScript + Express façade that keeps OpenAI, Qdrant, and LlamaParse credentials out of the browser.
-- Offer a complete RAG evaluation pipeline: ingest documents, embed chunks, retrieve context, draft answers, judge responses, and expose per-pipeline analytics.
-- Centralize configuration, logging, and CORS controls so the frontend and backend share a consistent runtime story, plus scripts that sanity-check each API surface.
-
-#### Key Components
-| Location | Description |
-| --- | --- |
-| `package.json`, `tsconfig.json` | Node/TypeScript scaffolding (ES modules, `tsx` dev runner, `tsc` build output). |
-| `src/lib/config.ts` | Loads env vars (merging `.env` + `.env.local`) and maps vector dimensions to per-size Qdrant collections (`QDRANT_COLLECTION_1536`, `QDRANT_COLLECTION_3072`). |
-| `src/lib/logger.ts` | Structured logging to both console and `logs/app.log`, with opt-in console suppression for verbose LlamaParse noise. |
-| `src/lib/openaiClient.ts` | Embedding + chat helpers that surface latency, token usage, GPT‑5 model quirks, and response-format support. |
-| `src/lib/qdrantClient.ts` | Pipeline-aware collection manager (sanitizes names, ensures payload indexes, retries deletes, and filters searches per `pipelineId`). |
-| `src/lib/llamaParseClient.ts` | Robust LlamaParse integration: resilient uploads, exponential backoff polling, payload normalization (markdown/text), and page-count extraction. |
-| `src/routes/embeddings.ts` | `POST /api/chunks` – embeds chunk payloads, optionally resets collections, wipes prior pipeline vectors, and returns vector dimension metadata. |
-| `src/routes/search.ts` | `POST /api/search` – embeds a query, searches the pipeline-specific collection, and exposes the resolved collection + vector size. |
-| `src/routes/answer.ts` | `POST /api/answer` – runs retrieval, composes a grounded answer prompt, returns matches/usage/latency, and mirrors the resolved collection metadata. |
-| `src/routes/judge.ts` | `POST /api/judge` – coaxes structured JSON verdicts, aggregates pass rate + average scores, and keeps raw per-task rationales. |
-| `src/routes/parse.ts` | `POST /api/parse` – forwards files to LlamaParse with detailed logging, returns normalized text + job IDs, and surfaces configuration gaps with `503`s. |
-| `src/index.ts` | Loads environment layers, configures strict CORS allowlists, applies JSON size limits, and mounts every route plus `/health`. |
-| `scripts/*.ts` | CLI utilities for bootstrapping Qdrant payload indexes and verifying each API surface end-to-end (chunks, search, answer, judge, parse). |
-
-#### Runtime Expectations
-- Required env vars: `OPENAI_API_KEY`, `QDRANT_URL`, and either `LLAMA_CLOUD_API_KEY` or `LLAMA_PARSE_API_KEY` if parsing should be enabled.
-- Optional overrides: `OPENAI_EMBED_MODEL`, `OPENAI_CHAT_MODEL`, `QDRANT_API_KEY`, `QDRANT_COLLECTION`, `QDRANT_COLLECTION_1536`, `QDRANT_COLLECTION_3072`, `LLAMA_CLOUD_BASE_URL`, `PORT`, `CORS_ORIGINS`, and the log toggles `LLAMA_PARSE_CONSOLE_LOGS` / `PARSE_ROUTE_CONSOLE_LOGS`.
-- Env layering: `.env` is loaded first, then `.env.local` (when present) can override per-developer secrets. `.env.example` documents every key.
-- CORS: `CORS_ORIGINS` accepts a comma-delimited allow list. The server blocks unknown origins unless `*` is present.
-- JSON payload limit: 16 MB, covering large document uploads while preventing accidental OOMs.
-- Start locally via `npm install && npm run dev` (hot reload with `tsx`). Production build uses `npm run build && npm start`.
-
-#### Notable Behaviors
-- Pipeline-aware Qdrant usage keeps embeddings partitioned per experiment configuration while automatically provisioning/cleaning collections and payload indexes.
-- All external calls (OpenAI, Qdrant, LlamaParse) bubble errors with descriptive messages, helping the frontend display actionable feedback.
-- LlamaParse integration includes retry/backoff for uploads/downloads and normalizes heterogeneous payload formats into a consistent `{ text, pageCount }` shape.
-- Judge responses request JSON-formatted output, coerce scores into the 0–1 range, and aggregate latency/tokens for downstream cost analysis.
-- `backend/scripts/*` give a quick way to validate credentials and infrastructure without running the full UI.
-
-### Frontend (`/frontend`)
-
-#### Goals
-- Provide a multi-step workspace (with a polished landing page) for dataset ingestion, pipeline configuration, experiment execution, and results analysis.
-- Persist experiment state within React context so datasets, pipelines, and results stay synchronized across pages.
-- Surface richer guidance via in-app documentation, experiment history, roadmap previews, and settings scaffolding.
-
-#### Key Modules & Screens
-| Location | Highlights |
-| --- | --- |
-| `src/App.tsx` | Entry shell with sidebar navigation, workflow helper, quick access to History/Reports, and route scaffolding. |
-| `src/state/dataset.tsx` | Context for uploaded documents and evaluation tasks, including sample dataset seeding and CSV import updates. |
-| `src/state/pipelines.tsx` | Manages pipeline definitions, baseline selection, duplication, timestamp tracking, and strategy defaults. |
-| `src/state/experimentResults.tsx` | Tracks experiment stage, status log, chunk previews, per-task results, judge details, and latest `ExperimentRun`. |
-| `src/lib/chunking.ts` | Chunking strategies (recursive/semantic/layout/table), sentence-aware splitting, and chunk statistics helpers. |
-| `src/lib/taskCsv.ts` | CSV parser that accepts header aliases, surfaces warnings, and hydrates task lists. |
-| `src/lib/backend.ts` | Strongly-typed fetch utilities for `/api/parse`, `/api/chunks`, `/api/search`, `/api/answer`, and `/api/judge`, including error parsing. |
-| `src/components/DatasetsPage.tsx` | File ingestion with progress UI, removal, sample dataset loader, and CSV task import feedback. |
-| `src/components/PipelinesPage.tsx` | Configure parsing, chunking, embedding, retrieval, reranker (placeholder), LLM, and judge stages per pipeline with expand/collapse controls. |
-| `src/components/ExperimentsPage.tsx` | Orchestrates runs across multiple pipelines, auto-parses documents when needed, tracks status logs/progress, and rolls up cost + latency estimates. |
-| `src/components/ReportsPage.tsx` | Compares pipelines, recommends top configs, highlights metric deltas, and exports Markdown/PDF summaries. |
-| `src/components/HistoryPage.tsx` | Presentational scaffolding for browsing previous experiments (seeded data + management affordances). |
-| `src/components/DocumentationPage.tsx` | Rich in-app documentation with copy-to-clipboard snippets, tabbed guides, and workflow walkthroughs. |
-| `src/components/ComingSoonPage.tsx` | Product roadmap showcasing planned features (re-ranking, model support, dark mode, metrics). |
-| `src/components/SettingsPage.tsx` | UX shell for future account/API key management (forms and toggles are presently static). |
-| `src/main.tsx` | Binds the dataset, pipeline, and experiment providers so every screen shares the same shared state. |
-
-#### Experiment Pipeline Logic
-1. **Prerequisites:** The UI blocks experiment runs until at least one uploaded document (raw content or ready-to-parse file) and one task exist.
-2. **Parsing on Demand:** When a pipeline runs, any uploaded-but-unparsed documents are sent to `/api/parse` using the baseline pipeline’s parsing strategy, with status updates fed back into the dataset context.
-3. **Chunking:** `chunkDocumentsWithConfig` slices content according to the active pipeline strategy; `summarizeChunkGroups` produces quick stats for the report.
-4. **Upsert:** `/api/chunks` embeds every chunk and writes them to the pipeline’s target Qdrant collection. Existing vectors for that pipeline are cleared, and collection metadata (dimension, source collection) is tracked.
-5. **Answering:** For each task + pipeline, `/api/answer` performs retrieval, captures cited chunks, latency, and token usage, and normalizes snippets for downstream rendering.
-6. **Judging:** Answers feed `/api/judge`, which yields per-task verdicts (pass/review), dimension-specific scores, rationales, latency, and token counts.
-7. **Metrics & Costing:** The experiment store computes aggregate metrics (pass rate, context precision, groundedness, latency p95, cost/query, tokens used) and derives “best pipeline” recommendations.
-8. **Reporting & Export:** The Reports page compares pipelines, highlights metric deltas against baseline, and offers Markdown/PDF exports summarizing findings and recommended next steps.
-9. **Persistence:** The latest `ExperimentRun` snapshot (including configuration copies) is stored in context for Reports, History, and Documentation pages.
-
-### Remaining / Optional Work
-- **Authentication & Authorization (critical):** No auth guard or rate limiting exists today; add API keys/session middleware before exposing beyond localhost.
-- **Persistent Storage (critical):** Experiment history and settings screens remain static—replace with real storage (backend API, database, or export/import utilities).
-- **Parsing Flexibility (critical):** `/api/parse` returns `503` without `LLAMA_CLOUD_API_KEY`; introduce alternative connectors so LlamaParse is optional.
-- **Provider Coverage (critical):** Backend only supports OpenAI even though the UI advertises other providers; wire up reranker + additional integrations (Anthropic/Cohere).
-- **Roadmap Delivery (critical):** Items showcased on the Coming Soon page (reranking, metrics, dark mode) are not implemented yet.
-- **Real-time Feedback:** Consider SSE/websocket progress updates instead of polling to show real-time pipeline stages.
-- **Testing & Observability:** Add unit/integration coverage for backend clients/routes, plus telemetry dashboards for token/cost monitoring.
-- **Deployment Tooling:** Docker images, CI workflows, and environment templates for staging/production readiness.
-- **Access Controls:** Gate admin settings (API keys, roadmap edits) and provide workspace-level isolation when multi-user support arrives.
+- **No secrets in the browser:** Provider API keys and upstream endpoint URLs exist only in server environment variables and are stripped from `/api/v1/capabilities`, browser bundles, source maps, and structured Pino logs (which redact authorization headers, cookies, API keys, prompts, document text, and raw upstream errors).
+- **Loopback by default:** Native servers bind to `127.0.0.1`, and `compose.yaml` publishes only `127.0.0.1:${APP_PORT:-7070}:7070` while keeping SQLite, uploaded blobs, and Qdrant private.
+- **Same-origin + host validation:** Browser requests use relative `/api/v1` paths on the same origin; untrusted `Host` and `Origin` headers are rejected with `403 origin_denied`.
+- **Shared or remote access:** Place an authenticated TLS reverse proxy (such as Caddy, nginx, or an identity-aware proxy) in front of `app`, add the external hostname to `TRUSTED_HOSTS`, and restrict `TRUSTED_PROXIES` to the proxy's address. Do not expose the workspace unauthenticated on a public network.
 
 ---
 
-## 🔧 Troubleshooting
+## Contributing, Changelog, and License
 
-### Common Issues
-
-| Issue | Solution |
-|-------|----------|
-| `ERR_UNKNOWN_FILE_EXTENSION ".ts"` | Use provided `npm run dev` scripts to apply proper TypeScript transpilation |
-| `fs.Stats constructor is deprecated` | Reinstall backend dependencies to ensure `tsx` is used instead of `ts-node` |
-| `Missing required environment variable` | Verify all required environment variables are set in `.env.local` |
-| Express fails to bind to port 7070 | Check if port is in use or override with `PORT` environment variable |
-| Backend route errors | Check `backend/logs/app.log` for detailed error messages |
-| 503 error on `/api/parse` | Ensure `LLAMA_CLOUD_API_KEY` or `LLAMA_PARSE_API_KEY` is configured |
-
-### Getting Help
-
-- Review the in-app documentation for detailed workflows
-- Check the `backend/logs/app.log` file for structured error logs
-- Verify all API keys and credentials are valid and have appropriate permissions
-
----
-
-## 🛣️ Roadmap
-
-### Planned Features
-
-- **Enhanced Model Support**: Integration with additional LLM providers (Anthropic, Cohere)
-- **Advanced Reranking**: Implement reranker functionality for improved retrieval accuracy
-- **Persistent Storage**: Database integration for experiment history and user settings
-- **Authentication & Authorization**: User management and API access controls
-- **Additional Parsing Methods**: Local parsers and OCR capabilities
-- **Dark Mode**: UI theme customization
-- **Enhanced Metrics**: Additional evaluation dimensions and custom metrics
-- **CI/CD Pipeline**: Automated testing and deployment workflows
-
-### Before Production
-
-- [ ] Configure HTTPS/TLS for secure communication
-- [ ] Implement authentication and rate limiting
-- [ ] Add persistent storage for history and settings
-- [ ] Set up monitoring and observability
-- [ ] Configure proper CORS and security headers
-
----
-
-## 🤝 Contributing
-
-Contributions are welcome! Please feel free to submit issues, feature requests, or pull requests.
-
----
-
-## 📄 License
-
-This project is provided as-is for evaluation and development purposes.
-
----
-
-## 👥 Team
-
-Built by the RAG Evaluation Lab Team
-
----
-
-<div align="center">
-
-**Happy Experimenting!**
-
-For questions or feedback, please open an issue on the repository.
-
-</div>
+- [Contributing Guide](CONTRIBUTING.md)
+- [Changelog & Upgrading from 0.x](CHANGELOG.md)
+- [MIT License](LICENSE)

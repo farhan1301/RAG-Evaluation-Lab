@@ -1,8 +1,25 @@
-import { useMemo, useCallback } from 'react';
-import { Download, FileText } from 'lucide-react';
-import { Button } from './ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
+import * as c from '@rag-eval/contracts';
+import { useQuery } from '@tanstack/react-query';
+import {
+  AlertTriangle,
+  ChevronDown,
+  ChevronRight,
+  Download,
+  FileJson,
+  Printer,
+} from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { Link, useParams, useSearchParams } from 'react-router';
+import { request } from '../data/workspace';
 import { Badge } from './ui/badge';
+import { Button } from './ui/button';
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from './ui/card';
 import {
   Table,
   TableBody,
@@ -11,42 +28,13 @@ import {
   TableHeader,
   TableRow,
 } from './ui/table';
-import { useExperimentResults } from '../state/experimentResults';
-import { cn } from './ui/utils';
-import {
-  METRIC_DEFINITIONS,
-  type MetricKey,
-  type PipelineMetrics,
-  type ExperimentPipelineResult,
-} from '../types/experiment';
 
-const PIPELINE_COLORS: Record<string, string> = {
-  A: '#3b82f6',
-  B: '#22c55e',
-  C: '#f97316',
-};
-
-const FALLBACK_COLORS = ['#a855f7', '#ec4899', '#14b8a6'];
-
-const METRIC_LOOKUP = METRIC_DEFINITIONS.reduce(
-  (acc, metric) => ({
-    ...acc,
-    [metric.key]: metric,
-  }),
-  {} as Record<MetricKey, (typeof METRIC_DEFINITIONS)[number]>
-);
-
-const NEXT_STEPS = [
-  'Tune chunking or retriever settings on the recommended configuration and rerun experiments to confirm the performance lift.',
-  'Export this report for stakeholders to review quality, latency, and cost trade-offs before promoting changes.',
-  'Capture qualitative feedback from subject-matter experts to complement the quantitative metrics shown here.',
-];
-
-const triggerDownload = (content: BlobPart, filename: string, mimeType: string) => {
-  if (typeof window === 'undefined') {
-    return;
-  }
-
+const triggerDownload = (
+  content: BlobPart,
+  filename: string,
+  mimeType: string,
+) => {
+  if (typeof window === 'undefined') return;
   const blob = new Blob([content], { type: mimeType });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
@@ -58,787 +46,1113 @@ const triggerDownload = (content: BlobPart, filename: string, mimeType: string) 
   URL.revokeObjectURL(url);
 };
 
-const wrapText = (line: string, maxLength = 90) => {
-  const segments: string[] = [];
-  let remaining = line.trim();
+function formatMetric(value: number | null) {
+  return value === null ? 'Unavailable' : value.toFixed(3);
+}
 
-  while (remaining.length > maxLength) {
-    let splitIndex = remaining.lastIndexOf(' ', maxLength);
-    if (splitIndex <= 0) {
-      splitIndex = maxLength;
-    }
-    segments.push(remaining.slice(0, splitIndex).trim());
-    remaining = remaining.slice(splitIndex).trimStart();
+function formatDelta(value: number | null) {
+  if (value === null) return 'Not comparable';
+  const sign = value > 0 ? '+' : '';
+  return `${sign}${value.toFixed(3)}`;
+}
+
+function formatMs(value: number | null) {
+  return value === null ? 'Unavailable' : `${Math.round(value)} ms`;
+}
+
+function formatCost(bucket: c.CostBucket) {
+  if (bucket.status === 'zero') return '$0.0000';
+  if (bucket.status === 'known' && bucket.totalUsd !== null) {
+    return `$${bucket.totalUsd.toFixed(4)}`;
   }
-
-  if (remaining.length) {
-    segments.push(remaining);
+  if (bucket.status === 'partial') {
+    return `$${bucket.knownUsd.toFixed(4)} (${bucket.pricedCalls}/${bucket.totalCalls} priced)`;
   }
+  return `Unknown (${bucket.totalCalls} unpriced)`;
+}
 
-  return segments.length ? segments : [''];
-};
+function directionBadgeVariant(
+  direction: c.MetricDirection,
+): 'default' | 'destructive' | 'secondary' | 'outline' {
+  if (direction === 'improved') return 'default';
+  if (direction === 'regressed') return 'destructive';
+  if (direction === 'unchanged') return 'secondary';
+  return 'outline';
+}
 
-const sanitizePdfText = (line: string) => line.replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)');
-
-const buildPdfDocument = (lines: string[]) => {
-  const sanitizedLines = lines.flatMap((line) => wrapText(line)).map(sanitizePdfText);
-  const textLines = sanitizedLines.length ? sanitizedLines : [''];
-
-  const textContent = [
-    'BT',
-    '/F1 12 Tf',
-    ...textLines.map((line, index) => {
-      const y = 780 - index * 16;
-      return `1 0 0 1 72 ${y} Tm (${line}) Tj`;
-    }),
-    'ET',
-  ].join('\n');
-
-  const header = '%PDF-1.4\n';
-  const objects: string[] = [];
-  const offsets: string[] = ['0000000000 65535 f \n'];
-  let body = '';
-
-  const appendObject = (object: string) => {
-    offsets.push(String(header.length + body.length).padStart(10, '0') + ' 00000 n \n');
-    body += object;
-  };
-
-  appendObject('1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n');
-  appendObject('2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n');
-  appendObject('3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>\nendobj\n');
-  appendObject(`4 0 obj\n<< /Length ${textContent.length} >>\nstream\n${textContent}\nendstream\nendobj\n`);
-  appendObject('5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n');
-
-  const xrefOffset = header.length + body.length;
-  const xref = `xref\n0 ${offsets.length}\n${offsets.join('')}`;
-  const trailer = `trailer\n<< /Size ${offsets.length} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`;
-
-  return header + body + xref + trailer;
-};
-
-
-const formatMetricValue = (key: MetricKey, value: number) =>
-  METRIC_LOOKUP[key]?.format ? METRIC_LOOKUP[key].format(value) : value.toString();
-
-const capitalize = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
-
-const boolLabel = (value: boolean) => (value ? 'Enabled' : 'Disabled');
-const dedupeLabel = (value: boolean) => (value ? 'On' : 'Off');
-
-const roundValue = (value: number | undefined, decimals: number) => {
-  if (typeof value !== 'number' || !Number.isFinite(value)) {
-    return 0;
-  }
-  const factor = 10 ** decimals;
-  return Math.round(value * factor) / factor;
-};
-
-const VALUE_EPSILON = 1e-6;
-
-const deriveMetricValue = (pipeline: ExperimentPipelineResult, key: MetricKey): number => {
-  const baseValue = pipeline.metrics?.[key];
-  if (typeof baseValue === 'number' && Number.isFinite(baseValue)) {
-    return baseValue;
-  }
-
-  switch (key) {
-    case 'precisionAt5':
-      return roundValue(pipeline.judgingSummary?.passRate, 2);
-    case 'recallAt5':
-      return roundValue(pipeline.judgingSummary?.averageScores.contextPrecision, 2);
-    case 'groundedness':
-      return roundValue(pipeline.judgingSummary?.averageScores.groundedness, 2);
-    case 'latencyP95': {
-      const answerLatencyMs = pipeline.answeringSummary?.latencyMs;
-      if (typeof answerLatencyMs === 'number' && Number.isFinite(answerLatencyMs)) {
-        return roundValue(answerLatencyMs / 1000, 2);
-      }
-      const averageJudgeLatencyMs =
-        typeof pipeline.judgingSummary?.latencyMs === 'number' &&
-        pipeline.judgingSummary?.details.length
-          ? pipeline.judgingSummary.latencyMs / pipeline.judgingSummary.details.length
-          : 0;
-      return roundValue(averageJudgeLatencyMs / 1000, 2);
-    }
-    case 'costPerQuery': {
-      const questionCount =
-        pipeline.judgingSummary?.details.length ??
-        pipeline.answeringSummary?.details.length ??
-        0;
-      if (!questionCount) {
-        return 0;
-      }
-      const answerCost = pipeline.answeringSummary?.costUsd ?? 0;
-      return roundValue(answerCost / questionCount, 4);
-    }
-    case 'tokensUsed': {
-      const answerTokens = pipeline.answeringSummary?.tokensUsed ?? 0;
-      const judgeTokens = pipeline.judgingSummary?.tokensUsed ?? 0;
-      const totalTokens = answerTokens + judgeTokens;
-      return Number.isFinite(totalTokens) ? Math.round(totalTokens) : 0;
-    }
-    default:
-      return 0;
-  }
-};
-
-const buildPipelineMetrics = (pipeline: ExperimentPipelineResult): PipelineMetrics =>
-  (['precisionAt5', 'recallAt5', 'latencyP95', 'groundedness', 'costPerQuery', 'tokensUsed'] as MetricKey[]).reduce(
-    (acc, key) => {
-      acc[key] = deriveMetricValue(pipeline, key);
-      return acc;
-    },
-    {} as PipelineMetrics,
-  );
+function stateBadgeVariant(
+  state: string,
+): 'default' | 'secondary' | 'outline' | 'destructive' {
+  if (state === 'succeeded') return 'default';
+  if (state === 'failed') return 'destructive';
+  if (state === 'cancelled') return 'outline';
+  return 'secondary';
+}
 
 export function ReportsPage() {
-  const { latestRun } = useExperimentResults();
+  const { runId } = useParams();
+  const validParam = Boolean(runId && c.id.safeParse(runId).success);
 
-  const pipelineMap = useMemo(() => {
-    if (!latestRun) {
-      return {};
-    }
-    return latestRun.pipelines.reduce((acc, pipeline) => {
-      acc[pipeline.pipelineId] = pipeline;
-      return acc;
-    }, {} as Record<string, (typeof latestRun.pipelines)[number]>);
-  }, [latestRun]);
+  const latestList = useQuery({
+    queryKey: ['runs', 'latest'],
+    queryFn: () => request(c.page(c.runSummary), 'runs?limit=1'),
+    enabled: !runId,
+  });
 
-  const pipelineOrder = useMemo(
-    () => (latestRun ? latestRun.pipelines.map((pipeline) => pipeline.pipelineId) : []),
-    [latestRun]
-  );
+  const resolvedRunId = runId
+    ? validParam
+      ? runId
+      : ''
+    : (latestList.data?.items[0]?.id ?? '');
 
-  const hasRun = Boolean(latestRun && pipelineOrder.length > 0);
+  const runQuery = useQuery({
+    queryKey: ['runs', resolvedRunId],
+    queryFn: () => request(c.runDetail, `runs/${resolvedRunId}`),
+    enabled: Boolean(resolvedRunId),
+  });
 
-  if (!hasRun) {
+  const isLoading =
+    (!runId && latestList.isPending) ||
+    (Boolean(resolvedRunId) && runQuery.isPending);
+  const loadError =
+    (!runId && latestList.error?.message) || runQuery.error?.message || null;
+
+  if (!runQuery.data?.pipelines.length) {
     return (
-      <div className="p-8 bg-zinc-50">
-        <div className="max-w-4xl mx-auto">
-          <Card>
-            <CardHeader>
-              <CardTitle>No experiment results yet</CardTitle>
-              <CardDescription className="text-zinc-600">
-                Run an experiment to generate comparative metrics and a downloadable report.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4 text-sm">
-              <p className="text-zinc-600">
-                Once your first experiment completes, this page will populate with pass rate, context precision, latency, and cost
-                comparisons for every pipeline you tested. You will also unlock export options for sharing the findings
-                with stakeholders.
-              </p>
-              <p className="text-zinc-500">
-                Head to the <strong>Experiments</strong> tab to launch a run.
-              </p>
-            </CardContent>
-          </Card>
-        </div>
+      <section className="page max-w-4xl space-y-3">
+        <h1>{runId ? 'Report unavailable' : 'No experiment results yet'}</h1>
+        <p className="text-muted-foreground">
+          {runId
+            ? 'This saved run could not be loaded.'
+            : 'Complete an experiment to compare metrics and export its report.'}
+        </p>
+        {isLoading && (
+          <p role="status" className="text-sm text-muted-foreground">
+            Loading report…
+          </p>
+        )}
+        {loadError && (
+          <p role="alert" className="text-sm text-destructive">
+            {loadError}
+          </p>
+        )}
+        <Link
+          className="text-primary underline"
+          to={runId ? '/history' : '/experiments'}
+        >
+          {runId ? 'Open experiment history' : 'Open experiments'}
+        </Link>
+      </section>
+    );
+  }
+
+  return <SavedRunReport run={runQuery.data} />;
+}
+
+function TaskEvidenceColumn({
+  title,
+  task,
+  qrelGrades,
+}: {
+  title: string;
+  task: c.RunTaskDetail | null;
+  qrelGrades: Map<string, number>;
+}) {
+  if (!task) {
+    return (
+      <div className="rounded-lg border p-3 text-sm text-muted-foreground">
+        <h4 className="font-medium text-foreground">{title}</h4>
+        <p className="mt-2">Task was not evaluated on this side.</p>
       </div>
     );
   }
 
-  const baselineId =
-    (latestRun?.baselinePipelineId && pipelineMap[latestRun.baselinePipelineId]
-      ? latestRun.baselinePipelineId
-      : undefined) ?? pipelineOrder[0];
+  return (
+    <div className="rounded-lg border p-3 space-y-3 text-xs">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h4 className="text-sm font-semibold text-foreground">{title}</h4>
+        <div className="flex flex-wrap gap-1">
+          <Badge variant={stateBadgeVariant(task.state)}>{task.state}</Badge>
+          {task.servingLatencyMs !== null && (
+            <Badge variant="outline">
+              Serving {Math.round(task.servingLatencyMs)} ms
+            </Badge>
+          )}
+        </div>
+      </div>
 
-  const baselinePipeline = baselineId ? pipelineMap[baselineId] : undefined;
+      {task.errorMessage && (
+        <p role="alert" className="text-destructive">
+          {task.errorMessage}
+        </p>
+      )}
 
-  const recommendedId =
-    (latestRun?.bestByMetric.precisionAt5 &&
-    pipelineMap[latestRun.bestByMetric.precisionAt5]
-      ? latestRun.bestByMetric.precisionAt5
-      : undefined) ?? baselineId;
+      {task.answer && (
+        <div className="rounded bg-muted/40 p-2.5 space-y-1.5">
+          <div className="flex flex-wrap items-center gap-1.5 text-muted-foreground">
+            <strong className="text-foreground">Answer</strong>
+            <span>
+              ({task.answer.provider} / {task.answer.model})
+            </span>
+            {task.answer.abstained && (
+              <Badge variant="secondary">Abstained</Badge>
+            )}
+            <Badge variant="outline">
+              {task.answer.citations.length} validated citation
+              {task.answer.citations.length === 1 ? '' : 's'}
+            </Badge>
+            {task.answer.invalidCitations.length > 0 && (
+              <Badge variant="destructive">
+                {task.answer.invalidCitations.length} rejected
+              </Badge>
+            )}
+          </div>
+          <p className="text-sm text-foreground">{task.answer.answerText}</p>
+        </div>
+      )}
 
-  const recommendedPipeline = recommendedId ? pipelineMap[recommendedId] : undefined;
-  const recommendedSnapshot = recommendedPipeline?.pipelineSnapshot;
+      <div className="space-y-1.5">
+        <div className="font-medium text-muted-foreground">
+          Retrieved evidence ({task.retrievedItems.length} chunk
+          {task.retrievedItems.length === 1 ? '' : 's'}
+          {task.retrievedDepth !== null ? `, depth ${task.retrievedDepth}` : ''}
+          )
+        </div>
+        {task.retrievedItems.length === 0 ? (
+          <p className="text-muted-foreground">No passages retrieved.</p>
+        ) : (
+          <ul className="space-y-1.5">
+            {task.retrievedItems.map((item) => {
+              const grade = qrelGrades.get(item.documentId);
+              const cited = task.answer?.citations.includes(item.chunkId);
+              return (
+                <li key={item.chunkId} className="rounded border p-2 space-y-1">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="font-medium text-foreground">
+                      #{item.finalRank} {item.documentName} (p.{item.page})
+                    </span>
+                    <span className="text-muted-foreground">
+                      score {item.finalScore.toFixed(4)}
+                    </span>
+                    {item.keywordRank !== null && (
+                      <span className="text-muted-foreground">
+                        · kw #{item.keywordRank}
+                      </span>
+                    )}
+                    {item.denseRank !== null && (
+                      <span className="text-muted-foreground">
+                        · dense #{item.denseRank}
+                      </span>
+                    )}
+                    {item.fusedRank !== null && (
+                      <span className="text-muted-foreground">
+                        · fused #{item.fusedRank}
+                      </span>
+                    )}
+                    {item.rerankRank !== null && (
+                      <span className="text-muted-foreground">
+                        · rerank #{item.rerankRank}
+                      </span>
+                    )}
+                    {grade !== undefined && grade > 0 && (
+                      <Badge variant="default">Gold grade {grade}</Badge>
+                    )}
+                    {cited && <Badge variant="secondary">Cited</Badge>}
+                  </div>
+                  <p className="text-muted-foreground">{item.content}</p>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
 
-  const generatedAt = latestRun?.completedAt ?? latestRun?.startedAt ?? new Date().toISOString();
-  const formattedTimestamp = new Intl.DateTimeFormat(undefined, {
-    dateStyle: 'full',
-    timeStyle: 'short',
-  }).format(new Date(generatedAt));
+      {task.judgeAttempts.length > 0 && (
+        <div className="space-y-1.5">
+          <div className="font-medium text-muted-foreground">
+            Judge evidence &amp; audit trail ({task.judgeAttempts.length})
+          </div>
+          <ul className="space-y-1">
+            {task.judgeAttempts.map((attempt) => {
+              const parsed =
+                attempt.parsedOutput && typeof attempt.parsedOutput === 'object'
+                  ? (attempt.parsedOutput as Record<string, unknown>)
+                  : null;
+              const rationale =
+                typeof parsed?.rationale === 'string'
+                  ? parsed.rationale
+                  : typeof parsed?.reason === 'string' && parsed.reason.trim()
+                    ? parsed.reason
+                    : null;
+              return (
+                <li key={attempt.id} className="rounded border p-2 space-y-1">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <strong className="text-foreground">
+                      {attempt.metricId}
+                    </strong>
+                    <span className="text-muted-foreground">
+                      ({attempt.rubricVersion} · #{attempt.attemptNumber}
+                      {attempt.isRepair ? ' repair' : ''} · {attempt.model})
+                    </span>
+                    <Badge
+                      variant={
+                        attempt.status === 'succeeded'
+                          ? 'secondary'
+                          : 'destructive'
+                      }
+                    >
+                      {attempt.status}
+                    </Badge>
+                    {attempt.score !== null && (
+                      <span className="font-medium">
+                        {attempt.score.toFixed(3)}
+                      </span>
+                    )}
+                  </div>
+                  {rationale && (
+                    <p className="text-muted-foreground">{rationale}</p>
+                  )}
+                  {attempt.reason && attempt.reason !== rationale && (
+                    <p className="text-muted-foreground">{attempt.reason}</p>
+                  )}
+                  {attempt.rawResponseHash && (
+                    <p className="text-[11px] text-muted-foreground">
+                      Hash: {attempt.rawResponseHash.slice(0, 12)}
+                    </p>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
 
-  const pipelineEntries = pipelineOrder
-    .map((id, index) => ({
-      id,
-      pipeline: pipelineMap[id],
-      color: PIPELINE_COLORS[id] ?? FALLBACK_COLORS[index % FALLBACK_COLORS.length],
-    }))
-    .filter((entry) => entry.pipeline);
-
-  const pipelineMetrics = pipelineEntries.reduce(
-    (acc, entry) => {
-      const { id, pipeline } = entry;
-      if (!pipeline) {
-        return acc;
-      }
-
-      acc[id] = {
-        name: pipeline.pipelineName,
-        metrics: buildPipelineMetrics(pipeline),
-      };
-
-      return acc;
-    },
-    {} as Record<
-      string,
-      {
-        name: string;
-        metrics: PipelineMetrics;
-      }
-    >
+function SavedRunReport({ run }: { run: c.RunDetail }) {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [exporting, setExporting] = useState<'markdown' | 'json' | null>(null);
+  const [onlyDiffering, setOnlyDiffering] = useState(false);
+  const [expandedTasks, setExpandedTasks] = useState<Record<string, boolean>>(
+    {},
   );
 
-  const baselineMetrics = baselineId ? pipelineMetrics[baselineId]?.metrics : undefined;
-  const recommendedMetrics = recommendedPipeline
-    ? pipelineMetrics[recommendedPipeline.pipelineId]?.metrics
-    : undefined;
-
-  const highlightMetrics =
-    recommendedMetrics && baselineMetrics
-      ? METRIC_DEFINITIONS.filter((definition) => {
-          const recommendedValue = recommendedMetrics[definition.key];
-          const baselineValue = baselineMetrics[definition.key];
-          if (recommendedValue === undefined || baselineValue === undefined) {
-            return false;
-          }
-          if (definition.better === 'higher') {
-            return recommendedValue > baselineValue;
-          }
-          return recommendedValue < baselineValue;
-        })
-      : [];
-
-  const highlightSummary = highlightMetrics.slice(0, 3).map((metric) => metric.label).join(', ');
-  const recommendationSummary =
-    highlightMetrics.length > 0 && baselinePipeline
-      ? `It outperforms your baseline (${baselinePipeline.pipelineName}) on ${highlightSummary}${
-          highlightMetrics.length > 3 ? ' and additional metrics' : ''
-        }.`
-      : 'It maintains parity with your baseline configuration while ensuring consistent quality.';
-
-  const COMPARISON_METRICS: MetricKey[] = [
-    'precisionAt5',
-    'recallAt5',
-    'groundedness',
-    'latencyP95',
-    'costPerQuery',
-    'tokensUsed',
-  ];
-
-  const pipelineComparisonRows = pipelineEntries.map(({ id, pipeline, color }) => {
-    const metrics = pipelineMetrics[id]?.metrics;
-    return {
-      id,
-      name: pipeline?.pipelineName ?? `Pipeline ${id}`,
-      color,
-      metrics,
-      isBaseline: id === baselineId,
-      isRecommended: id === recommendedId,
-    };
+  const runsList = useQuery({
+    queryKey: ['runs', 'list'],
+    queryFn: () => request(c.page(c.runSummary), 'runs?limit=50'),
   });
 
-  const metricExtremes = COMPARISON_METRICS.reduce(
-    (acc, metric) => {
-      const values = pipelineComparisonRows
-        .map((row) => row.metrics?.[metric])
-        .filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
+  const baselineDefault =
+    run.pipelines.find((p) => p.isBaseline)?.pipelineId ??
+    run.pipelines[0]?.pipelineId ??
+    '';
+  const paramBasePipeline = searchParams.get('baselinePipeline') ?? '';
+  const baselinePipelineId = run.pipelines.some(
+    (p) => p.pipelineId === paramBasePipeline,
+  )
+    ? paramBasePipeline
+    : baselineDefault;
 
-      if (!values.length) {
-        return acc;
-      }
+  const paramCompareRun = searchParams.get('compareRun') ?? '';
+  const candidateRunId =
+    paramCompareRun && c.id.safeParse(paramCompareRun).success
+      ? paramCompareRun
+      : run.id;
 
-      const betterDirection = METRIC_LOOKUP[metric]?.better ?? 'higher';
-      const best = betterDirection === 'higher' ? Math.max(...values) : Math.min(...values);
-      const worst = betterDirection === 'higher' ? Math.min(...values) : Math.max(...values);
+  const candidateRunQuery = useQuery({
+    queryKey: ['runs', candidateRunId],
+    queryFn: () => request(c.runDetail, `runs/${candidateRunId}`),
+    enabled: candidateRunId !== run.id,
+  });
 
-      acc[metric] = { best, worst };
-      return acc;
+  const candidateRun =
+    candidateRunId === run.id ? run : (candidateRunQuery.data ?? null);
+
+  const defaultCandidatePipelineId = useMemo(() => {
+    if (!candidateRun) return '';
+    if (candidateRun.id === run.id) {
+      return (
+        candidateRun.pipelines.find((p) => p.pipelineId !== baselinePipelineId)
+          ?.pipelineId ??
+        candidateRun.pipelines[0]?.pipelineId ??
+        ''
+      );
+    }
+    return (
+      candidateRun.pipelines.find((p) => p.isBaseline)?.pipelineId ??
+      candidateRun.pipelines[0]?.pipelineId ??
+      ''
+    );
+  }, [candidateRun, run.id, baselinePipelineId]);
+
+  const paramCandidatePipeline = searchParams.get('candidatePipeline') ?? '';
+  const candidatePipelineId = candidateRun?.pipelines.some(
+    (p) => p.pipelineId === paramCandidatePipeline,
+  )
+    ? paramCandidatePipeline
+    : defaultCandidatePipelineId;
+
+  const canCompare =
+    Boolean(baselinePipelineId && candidateRunId && candidatePipelineId) &&
+    !(candidateRunId === run.id && candidatePipelineId === baselinePipelineId);
+
+  const comparisonQuery = useQuery({
+    queryKey: [
+      'comparisons',
+      run.id,
+      baselinePipelineId,
+      candidateRunId,
+      candidatePipelineId,
+    ],
+    queryFn: () => {
+      const params = new URLSearchParams({
+        baselineRunId: run.id,
+        baselinePipelineId,
+        candidateRunId,
+        candidatePipelineId,
+      });
+      return request(c.comparisonResult, `comparisons?${params}`);
     },
-    {} as Record<MetricKey, { best: number; worst: number }>
+    enabled: canCompare,
+  });
+
+  const singleTasksQuery = useQuery({
+    queryKey: ['runs', run.id, 'tasks', baselinePipelineId],
+    queryFn: () =>
+      request(
+        c.page(c.runTaskDetail),
+        `runs/${run.id}/tasks?limit=100&pipelineId=${baselinePipelineId}`,
+      ),
+    enabled: !canCompare && Boolean(baselinePipelineId),
+  });
+
+  const comparison = comparisonQuery.data;
+
+  // Auto-expand the first differing task so reviewers immediately see concrete evidence.
+  useEffect(() => {
+    if (!comparison?.tasks.length) return;
+    const firstDiff = comparison.tasks.find((t) => t.differs);
+    if (!firstDiff) return;
+    setExpandedTasks((prev) =>
+      Object.keys(prev).length > 0 ? prev : { [firstDiff.taskVersionId]: true },
+    );
+  }, [comparison]);
+
+  const updateCompareParams = (next: {
+    baselinePipeline?: string;
+    compareRun?: string;
+    candidatePipeline?: string;
+  }) => {
+    const params = new URLSearchParams(searchParams);
+    if (next.baselinePipeline !== undefined) {
+      params.set('baselinePipeline', next.baselinePipeline);
+    }
+    if (next.compareRun !== undefined) {
+      if (next.compareRun === run.id) params.delete('compareRun');
+      else params.set('compareRun', next.compareRun);
+    }
+    if (next.candidatePipeline !== undefined) {
+      if (!next.candidatePipeline) params.delete('candidatePipeline');
+      else params.set('candidatePipeline', next.candidatePipeline);
+    }
+    setSearchParams(params);
+  };
+
+  const baseline = run.pipelines.find((p) => p.isBaseline) ?? run.pipelines[0];
+  const timestamp = new Intl.DateTimeFormat(undefined, {
+    dateStyle: 'full',
+    timeStyle: 'short',
+  }).format(new Date(run.completedAt ?? run.queuedAt));
+
+  const metricKeys = Array.from(
+    new Map(
+      run.pipelines
+        .flatMap((p) => [
+          ...p.retrievalMetrics,
+          ...p.judgeMetrics,
+          ...p.abstentionMetrics,
+        ])
+        .map((m) => [`${m.metricId}:${m.cutoff}:${m.evaluationUnit}`, m]),
+    ).values(),
   );
 
-  const buildMarkdownReport = useCallback(() => {
-    if (!latestRun) {
-      return '';
-    }
-
-    const title = latestRun.name ?? 'Experiment Report';
-    const lines: string[] = [];
-    lines.push(`# ${title}`);
-    lines.push('');
-    lines.push(`Generated on ${formattedTimestamp}`);
-    lines.push('');
-
-    if (recommendedPipeline) {
-      lines.push('## Recommendation');
-      lines.push(
-        `**${recommendedPipeline.pipelineName}** is recommended as the leading configuration. ${recommendationSummary}`.trim()
-      );
-      if (highlightMetrics.length) {
-        lines.push('');
-        lines.push('Key improvements:');
-        highlightMetrics.forEach((metric) => {
-          lines.push(`- ${METRIC_LOOKUP[metric.key]?.label ?? metric.key}`);
-        });
+  const exportReport = async (format: 'markdown' | 'json') => {
+    setExportError(null);
+    setExporting(format);
+    try {
+      const params = new URLSearchParams({ format });
+      if (baselinePipelineId) {
+        params.set('baselinePipelineId', baselinePipelineId);
       }
-
-      if (recommendedSnapshot) {
-        lines.push('');
-        lines.push('Configuration snapshot:');
-        lines.push(
-          `- Chunking: ${capitalize(recommendedSnapshot.chunking.strategy)} chunks (${recommendedSnapshot.chunking.chunkSize} tokens, ${recommendedSnapshot.chunking.overlap}% overlap)`
-        );
-        lines.push(`- Embedding: ${recommendedSnapshot.embedding.model}`);
-        lines.push(
-          `- Retrieval: Top-K ${recommendedSnapshot.retriever.topK}, deduplication ${dedupeLabel(recommendedSnapshot.retriever.deduplicate)}`
-        );
-        lines.push(
-          `- Reranker: ${boolLabel(recommendedSnapshot.reranker.enabled)} (${recommendedSnapshot.reranker.model})`
-        );
-        lines.push(
-          `- LLM: ${recommendedSnapshot.llm.model} (temperature ${recommendedSnapshot.llm.temperature.toFixed(1)}, max ${recommendedSnapshot.llm.maxTokens} tokens)`
-        );
-        lines.push(`- Judge: ${recommendedSnapshot.judge.model}`);
-      }
-    } else {
-      lines.push('## Recommendation');
-      lines.push('No clear leading configuration was identified for this experiment.');
-    }
-
-    lines.push('');
-    lines.push('## Pipeline Metrics');
-
-    const tableHeader = [
-      'Pipeline',
-      ...COMPARISON_METRICS.map((metric) => METRIC_LOOKUP[metric]?.label ?? metric),
-    ];
-    const headerRow = `| ${tableHeader.join(' | ')} |`;
-    const separatorRow = `| ${tableHeader.map(() => '---').join(' | ')} |`;
-    lines.push(headerRow);
-    lines.push(separatorRow);
-
-    pipelineComparisonRows.forEach((row) => {
-      const valueCells = COMPARISON_METRICS.map((metric) => {
-        const value = row.metrics?.[metric];
-        if (value === undefined || Number.isNaN(value)) {
-          return '—';
+      if (canCompare) {
+        if (candidateRunId !== run.id) {
+          params.set('compareRunId', candidateRunId);
+          params.set('comparePipelineId', candidatePipelineId);
+        } else {
+          params.set('candidatePipelineId', candidatePipelineId);
         }
-        return formatMetricValue(metric, value);
-      });
-
-      const labels: string[] = [];
-      if (row.isBaseline) {
-        labels.push('Baseline');
       }
-      if (row.isRecommended) {
-        labels.push('Recommended');
+      const response = await fetch(`/api/v1/runs/${run.id}/export?${params}`);
+      if (!response.ok) {
+        const detail = c.errorEnvelope.safeParse(
+          await response.json().catch(() => null),
+        );
+        throw new Error(
+          detail.success
+            ? detail.data.error.message
+            : `Export failed (${response.status}).`,
+        );
       }
-
-      const pipelineLabel = labels.length ? `${row.name} (${labels.join(', ')})` : row.name;
-      lines.push(`| ${[pipelineLabel, ...valueCells].join(' | ')} |`);
-    });
-
-    lines.push('');
-    lines.push('## Suggested Next Steps');
-    NEXT_STEPS.forEach((step) => {
-      lines.push(`- ${step}`);
-    });
-
-    return lines.join('\n');
-  }, [
-    latestRun,
-    formattedTimestamp,
-    recommendedPipeline,
-    recommendationSummary,
-    highlightMetrics,
-    recommendedSnapshot,
-    pipelineComparisonRows,
-  ]);
-
-  const handleExportMarkdown = useCallback(() => {
-    const markdown = buildMarkdownReport();
-    if (!markdown) {
-      return;
-    }
-    triggerDownload(markdown, 'experiment-report.md', 'text/markdown');
-  }, [buildMarkdownReport]);
-
-  const handleExportPdf = useCallback(() => {
-    if (!latestRun) {
-      return;
-    }
-
-    const title = latestRun.name ?? 'Experiment Report';
-    const lines: string[] = [];
-    lines.push(title);
-    lines.push(`Generated on ${formattedTimestamp}`);
-    lines.push('');
-
-    if (recommendedPipeline) {
-      lines.push('Recommendation:');
-      lines.push(
-        `${recommendedPipeline.pipelineName} – ${recommendationSummary.replace(/\s+/g, ' ').trim()}`
+      const ext = format === 'json' ? 'json' : 'md';
+      const mime =
+        format === 'json'
+          ? 'application/json;charset=utf-8'
+          : 'text/markdown;charset=utf-8';
+      const content = await response.text();
+      triggerDownload(content, `run-${run.id.slice(0, 8)}-report.${ext}`, mime);
+    } catch (err) {
+      setExportError(
+        err instanceof Error ? err.message : 'Could not export report.',
       );
-
-      if (recommendedSnapshot) {
-        lines.push('');
-        lines.push('Configuration Snapshot');
-        lines.push(
-          `Chunking: ${capitalize(recommendedSnapshot.chunking.strategy)} chunks (${recommendedSnapshot.chunking.chunkSize} tokens, ${recommendedSnapshot.chunking.overlap}% overlap)`
-        );
-        lines.push(
-          `Embedding: ${recommendedSnapshot.embedding.model}`
-        );
-        lines.push(
-          `Retrieval: Top-K ${recommendedSnapshot.retriever.topK}, deduplication ${dedupeLabel(recommendedSnapshot.retriever.deduplicate)}`
-        );
-        lines.push(
-          `Reranker: ${boolLabel(recommendedSnapshot.reranker.enabled)} (${recommendedSnapshot.reranker.model})`
-        );
-        lines.push(
-          `LLM: ${recommendedSnapshot.llm.model} (temperature ${recommendedSnapshot.llm.temperature.toFixed(1)}, max ${recommendedSnapshot.llm.maxTokens} tokens)`
-        );
-        lines.push(`Judge: ${recommendedSnapshot.judge.model}`);
-      }
-    } else {
-      lines.push('Recommendation: No leading configuration identified.');
+    } finally {
+      setExporting(null);
     }
+  };
 
-    lines.push('');
-    lines.push('Pipeline Metrics');
+  const visibleComparisonTasks = useMemo(() => {
+    if (!comparison) return [];
+    return onlyDiffering
+      ? comparison.tasks.filter((t) => t.differs)
+      : comparison.tasks;
+  }, [comparison, onlyDiffering]);
 
-    pipelineComparisonRows.forEach((row) => {
-      const badges: string[] = [];
-      if (row.isBaseline) {
-        badges.push('Baseline');
-      }
-      if (row.isRecommended) {
-        badges.push('Recommended');
-      }
+  const differingCount = useMemo(
+    () => (comparison ? comparison.tasks.filter((t) => t.differs).length : 0),
+    [comparison],
+  );
 
-      const rowTitle = badges.length ? `${row.name} (${badges.join(', ')})` : row.name;
-      lines.push(rowTitle);
-
-      COMPARISON_METRICS.forEach((metric) => {
-        const label = METRIC_LOOKUP[metric]?.label ?? metric;
-        const value = row.metrics?.[metric];
-        const formattedValue =
-          value === undefined || Number.isNaN(value) ? '—' : formatMetricValue(metric, value);
-        lines.push(`  - ${label}: ${formattedValue}`);
-      });
-
-      lines.push('');
-    });
-
-    lines.push('Suggested Next Steps');
-    lines.push('');
-    NEXT_STEPS.forEach((step) => {
-      lines.push(`- ${step}`);
-    });
-
-    const pdf = buildPdfDocument(lines);
-    triggerDownload(pdf, 'experiment-report.pdf', 'application/pdf');
-  }, [
-    latestRun,
-    formattedTimestamp,
-    recommendedPipeline,
-    recommendationSummary,
-    recommendedSnapshot,
-    pipelineComparisonRows,
-  ]);
+  const availableRuns = runsList.data?.items ?? [];
 
   return (
-    <div className="p-8 bg-zinc-50">
+    <div className="print-report px-4 py-6 sm:p-8 bg-background">
       <div className="max-w-7xl mx-auto space-y-6">
-        {/* Header */}
-        <div className="flex items-center justify-between gap-4 flex-wrap">
-          <div>
-            <h2 className="text-zinc-900">
-              {latestRun?.name ?? 'Experiment Report'}
-            </h2>
-            <p className="text-zinc-600">Generated on {formattedTimestamp}</p>
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="space-y-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <h1>{run.name}</h1>
+              <Badge variant={stateBadgeVariant(run.state)}>{run.state}</Badge>
+            </div>
+            <p className="text-sm text-muted-foreground">
+              {timestamp} · {run.datasetName} (r{run.datasetRevision}) ·{' '}
+              {run.mode} · {run.completedUnits}/{run.totalUnits} units completed
+            </p>
+            <p className="text-xs text-muted-foreground">
+              Frozen snapshot: retrieval {run.snapshot.retrievalMetricVersion} ·
+              prompt {run.snapshot.promptVersion} · price table{' '}
+              {run.snapshot.priceScheduleVersion} · cutoffs{' '}
+              {run.snapshot.cutoffs.join(', ')}
+            </p>
           </div>
-          <div className="flex gap-2 flex-wrap">
-            <Button variant="outline" className="gap-2" onClick={handleExportPdf}>
-              <FileText size={16} />
-              Export PDF
+          <div className="no-print flex flex-wrap gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              className="gap-2"
+              disabled={exporting !== null}
+              onClick={() => void exportReport('markdown')}
+            >
+              <Download size={16} aria-hidden="true" />
+              {exporting === 'markdown' ? 'Exporting…' : 'Export Markdown'}
             </Button>
-            <Button variant="outline" className="gap-2" onClick={handleExportMarkdown}>
-              <Download size={16} />
-              Export Markdown
+            <Button
+              type="button"
+              variant="outline"
+              className="gap-2"
+              disabled={exporting !== null}
+              onClick={() => void exportReport('json')}
+            >
+              <FileJson size={16} aria-hidden="true" />
+              {exporting === 'json' ? 'Exporting…' : 'Export JSON'}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              className="gap-2"
+              onClick={() => window.print()}
+            >
+              <Printer size={16} aria-hidden="true" />
+              Print / Save PDF
             </Button>
           </div>
         </div>
 
-        {/* Recommendation */}
-        <Card>
-          <CardHeader>
-            <CardTitle>AI-Generated Recommendation</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <p className="text-zinc-700">
-              {recommendedPipeline ? (
-                <>
-                  Based on the most recent experiment,{' '}
-                  <strong>{recommendedPipeline.pipelineName}</strong> provides the strongest balance
-                  across the tracked metrics. {recommendationSummary}
-                </>
-              ) : (
-                'Run details were recorded, but we could not identify a leading configuration.'
-              )}
-            </p>
+        {exportError && (
+          <p role="alert" className="text-sm text-destructive">
+            {exportError}
+          </p>
+        )}
 
-            {recommendedSnapshot && (
-              <div className="p-4 rounded-lg border border-zinc-200 bg-zinc-50">
-                <p className="mb-2 text-zinc-600">
-                  Recommended configuration snapshot:
-                </p>
-                <ul className="space-y-1 text-sm text-zinc-700">
-                  <li>
-                    • <strong>Chunking:</strong>{' '}
-                    {capitalize(recommendedSnapshot.chunking.strategy)} chunks (
-                    {recommendedSnapshot.chunking.chunkSize} tokens,{' '}
-                    {recommendedSnapshot.chunking.overlap}% overlap)
-                  </li>
-                  <li>
-                    • <strong>Embedding:</strong> {recommendedSnapshot.embedding.model}
-                  </li>
-                  <li>
-                    • <strong>Retrieval:</strong> Top-K {recommendedSnapshot.retriever.topK},{' '}
-                    deduplication {dedupeLabel(recommendedSnapshot.retriever.deduplicate)}
-                  </li>
-                  <li>
-                    • <strong>Reranker:</strong> {boolLabel(recommendedSnapshot.reranker.enabled)} (
-                    {recommendedSnapshot.reranker.model})
-                  </li>
-                  <li>
-                    • <strong>LLM:</strong> {recommendedSnapshot.llm.model} (temperature{' '}
-                    {recommendedSnapshot.llm.temperature.toFixed(1)}, max{' '}
-                    {recommendedSnapshot.llm.maxTokens} tokens)
-                  </li>
-                  <li>
-                    • <strong>Judge:</strong> {recommendedSnapshot.judge.model}
-                  </li>
-                </ul>
-              </div>
-            )}
+        {run.state !== 'succeeded' && (
+          <Card className="print-card border-amber-300 dark:border-amber-700">
+            <CardContent className="py-3 text-sm">
+              <strong>Run status: {run.state}.</strong>{' '}
+              {run.errorMessage ??
+                'Metrics and evidence below reflect the persisted checkpointed observations recorded before completion stopped.'}
+            </CardContent>
+          </Card>
+        )}
 
-            <p className="text-sm text-zinc-600">
-              Keep iterating on the recommended pipeline to validate that these improvements hold up
-              across new evaluation datasets before promoting the configuration to production.
-            </p>
-          </CardContent>
-        </Card>
-
-        {/* Pipeline Comparison */}
-        <Card>
+        <Card className="print-card">
           <CardHeader>
             <CardTitle>Pipeline Comparison Overview</CardTitle>
-            <CardDescription className="text-zinc-600">
-              All metrics compared against {baselinePipeline?.pipelineName ?? 'the first pipeline'}
+            <CardDescription>
+              Baseline: {baseline?.pipelineName ?? 'None'} · Price schedule:{' '}
+              {run.snapshot.priceScheduleVersion} · Serving p50/p95:{' '}
+              {formatMs(run.latency.serving.p50Ms)} /{' '}
+              {formatMs(run.latency.serving.p95Ms)} (n=
+              {run.latency.serving.sampleSize})
             </CardDescription>
           </CardHeader>
-          <CardContent>
-            {pipelineComparisonRows.length > 0 ? (
-              <div className="overflow-x-auto">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Pipeline</TableHead>
-                      {COMPARISON_METRICS.map((metric) => (
-                        <TableHead key={metric} className="text-right">
-                          {METRIC_LOOKUP[metric]?.label ?? capitalize(metric)}
-                        </TableHead>
-                      ))}
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {pipelineComparisonRows.map((row) => (
-                      <TableRow key={row.id}>
-                        <TableCell className="font-medium">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: row.color }} />
-                            <span>{row.name}</span>
-                            {row.isBaseline && <Badge variant="outline">Baseline</Badge>}
-                            {row.isRecommended && !row.isBaseline && (
-                              <Badge variant="outline">Recommended</Badge>
-                            )}
-                      </div>
-                    </TableCell>
-                    {COMPARISON_METRICS.map((metric) => (
-                      <TableCell key={metric} className="text-right">
-                        {row.metrics && typeof row.metrics[metric] === 'number' ? (
-                          <div className="flex flex-col items-end gap-1">
-                            {(() => {
-                              const value = row.metrics?.[metric];
-                              if (typeof value !== 'number') {
-                                return null;
-                              }
-                              const extremes = metricExtremes[metric];
-                              const baselineValue = baselineMetrics?.[metric];
-                              const betterDirection = METRIC_LOOKUP[metric]?.better ?? 'higher';
-
-                              const difference =
-                                typeof baselineValue === 'number' ? value - baselineValue : undefined;
-
-                              const percentChange =
-                                typeof difference === 'number' &&
-                                typeof baselineValue === 'number' &&
-                                Math.abs(baselineValue) > VALUE_EPSILON
-                                  ? (difference / baselineValue) * 100
-                                  : undefined;
-
-                              const isBest =
-                                extremes &&
-                                Math.abs(value - extremes.best) < VALUE_EPSILON &&
-                                !(extremes && Math.abs(extremes.best - extremes.worst) < VALUE_EPSILON);
-
-                              const isWorst =
-                                extremes &&
-                                Math.abs(value - extremes.worst) < VALUE_EPSILON &&
-                                !(extremes && Math.abs(extremes.best - extremes.worst) < VALUE_EPSILON);
-
-                              const highlightState: 'best' | 'worst' | 'neutral' = (() => {
-                                if (isBest && isWorst) {
-                                  return 'neutral';
-                                }
-                                if (isBest) {
-                                  return 'best';
-                                }
-                                if (isWorst) {
-                                  return 'worst';
-                                }
-                                return 'neutral';
-                              })();
-
-                              const valueColorClass =
-                                highlightState === 'neutral' ? 'text-zinc-700' : '';
-
-                              const valueStyle =
-                                highlightState === 'best'
-                                  ? { color: '#16a34a' }
-                                  : highlightState === 'worst'
-                                  ? { color: '#dc2626' }
-                                  : undefined;
-
-                              const valueClasses = cn('font-semibold', valueColorClass);
-
-                              const arrowSymbol =
-                                typeof percentChange === 'number'
-                                  ? percentChange > 0
-                                    ? '↑'
-                                    : percentChange < 0
-                                    ? '↓'
-                                    : '→'
-                                  : typeof difference === 'number'
-                                  ? difference > 0
-                                    ? '↑'
-                                    : difference < 0
-                                    ? '↓'
-                                    : '→'
-                                  : null;
-
-                              const percentMagnitude =
-                                typeof percentChange === 'number'
-                                  ? Math.abs(percentChange) >= 10
-                                    ? Math.abs(percentChange).toFixed(0)
-                                    : Math.abs(percentChange).toFixed(1)
-                                  : null;
-
-                              const improvement =
-                                typeof difference === 'number'
-                                  ? betterDirection === 'higher'
-                                    ? difference > 0
-                                    : difference < 0
-                                  : false;
-
-                              const regression =
-                                typeof difference === 'number'
-                                  ? betterDirection === 'higher'
-                                    ? difference < 0
-                                    : difference > 0
-                                  : false;
-
-                              let deltaText: string | null = null;
-                              let deltaClass = 'text-xs font-medium text-muted-foreground';
-
-                              if (row.isBaseline) {
-                                deltaText = 'Baseline';
-                              } else if (typeof percentChange === 'number') {
-                                deltaText = `${arrowSymbol} ${percentMagnitude ?? '0'}%`;
-                                if (percentChange === 0) {
-                                  deltaClass = 'text-xs font-medium text-muted-foreground';
-                                } else if (improvement) {
-                                  deltaClass = 'text-xs font-medium text-green-600';
-                                } else if (regression) {
-                                  deltaClass = 'text-xs font-medium text-red-600';
-                                }
-                              } else if (
-                                typeof difference === 'number' &&
-                                typeof baselineValue === 'number'
-                              ) {
-                                const formattedDiff = formatMetricValue(metric, Math.abs(difference));
-                                deltaText =
-                                  arrowSymbol && formattedDiff
-                                    ? `${arrowSymbol} ${formattedDiff}`
-                                    : null;
-                                if (difference === 0) {
-                                  deltaClass = 'text-xs font-medium text-muted-foreground';
-                                } else if (improvement) {
-                                  deltaClass = 'text-xs font-medium text-green-600';
-                                } else if (regression) {
-                                  deltaClass = 'text-xs font-medium text-red-600';
-                                }
-                              }
-
-                              return (
-                                <>
-                                  <span className={valueClasses} style={valueStyle}>
-                                    {formatMetricValue(metric, value)}
-                                  </span>
-                                  {deltaText ? <span className={deltaClass}>{deltaText}</span> : null}
-                                </>
-                              );
-                            })()}
-                          </div>
-                        ) : (
-                          '—'
-                        )}
+          <CardContent className="overflow-x-auto">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Pipeline</TableHead>
+                  {metricKeys.map((m) => (
+                    <TableHead
+                      key={`${m.metricId}:${m.cutoff}:${m.evaluationUnit}`}
+                      className="text-right"
+                    >
+                      {m.displayLabel}
+                    </TableHead>
+                  ))}
+                  <TableHead className="text-right">Serving p95</TableHead>
+                  <TableHead className="text-right">Total spend</TableHead>
+                  <TableHead className="text-right">Retry spend</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {run.pipelines.map((pl) => {
+                  const lookup = new Map(
+                    [
+                      ...pl.retrievalMetrics,
+                      ...pl.judgeMetrics,
+                      ...pl.abstentionMetrics,
+                    ].map((m) => [
+                      `${m.metricId}:${m.cutoff}:${m.evaluationUnit}`,
+                      m,
+                    ]),
+                  );
+                  return (
+                    <TableRow key={pl.pipelineId}>
+                      <TableCell className="font-medium">
+                        <div className="flex items-center gap-2">
+                          <span>{pl.pipelineName}</span>
+                          {pl.isBaseline && (
+                            <Badge variant="outline">Baseline</Badge>
+                          )}
+                        </div>
+                        <div className="text-xs text-muted-foreground">
+                          r{pl.pipelineRevision} · {pl.config.retriever.mode} ·
+                          topK {pl.config.retriever.topK}
+                        </div>
                       </TableCell>
-                    ))}
-                  </TableRow>
-                ))}
+                      {metricKeys.map((m) => {
+                        const entry = lookup.get(
+                          `${m.metricId}:${m.cutoff}:${m.evaluationUnit}`,
+                        );
+                        return (
+                          <TableCell
+                            key={`${m.metricId}:${m.cutoff}:${m.evaluationUnit}`}
+                            className="text-right text-xs"
+                          >
+                            <div>{formatMetric(entry?.mean ?? null)}</div>
+                            {entry && (
+                              <div className="text-muted-foreground">
+                                {entry.eligibleCount}/{entry.totalCount}
+                                {entry.hasPartialPool &&
+                                entry.meanJudgedCoverage !== null
+                                  ? ` · ${Math.round(entry.meanJudgedCoverage * 100)}% judged`
+                                  : ''}
+                              </div>
+                            )}
+                          </TableCell>
+                        );
+                      })}
+                      <TableCell className="text-right text-xs">
+                        {formatMs(pl.latency.serving.p95Ms)}
+                      </TableCell>
+                      <TableCell className="text-right text-xs">
+                        {formatCost(pl.cost.total)}
+                      </TableCell>
+                      <TableCell className="text-right text-xs">
+                        {formatCost(pl.cost.retry)}
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
               </TableBody>
             </Table>
+          </CardContent>
+        </Card>
+
+        <Card className="print-card">
+          <CardHeader>
+            <CardTitle>Paired Comparison &amp; Historical Diff</CardTitle>
+            <CardDescription>
+              Compare two pipelines in this run or against another saved run on
+              identical task versions.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="no-print grid gap-3 md:grid-cols-3">
+              <div>
+                <label
+                  htmlFor="report-baseline-pipeline"
+                  className="block text-sm font-medium"
+                >
+                  Baseline pipeline
+                </label>
+                <select
+                  id="report-baseline-pipeline"
+                  className="mt-1 block w-full rounded border bg-background p-2 text-sm"
+                  value={baselinePipelineId}
+                  onChange={(e) =>
+                    updateCompareParams({ baselinePipeline: e.target.value })
+                  }
+                >
+                  {run.pipelines.map((p) => (
+                    <option key={p.pipelineId} value={p.pipelineId}>
+                      {p.pipelineName} (r{p.pipelineRevision})
+                    </option>
+                  ))}
+                </select>
               </div>
-            ) : (
-              <p className="text-zinc-600">
-                No pipeline results detected in the latest experiment.
+
+              <div>
+                <label
+                  htmlFor="report-candidate-run"
+                  className="block text-sm font-medium"
+                >
+                  Candidate run
+                </label>
+                <select
+                  id="report-candidate-run"
+                  className="mt-1 block w-full rounded border bg-background p-2 text-sm"
+                  value={candidateRunId}
+                  onChange={(e) =>
+                    updateCompareParams({
+                      compareRun: e.target.value,
+                      candidatePipeline: '',
+                    })
+                  }
+                >
+                  <option value={run.id}>
+                    This run: {run.name} ({run.datasetName} r
+                    {run.datasetRevision})
+                  </option>
+                  {availableRuns
+                    .filter((item) => item.id !== run.id)
+                    .map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.name} ({item.datasetName} r{item.datasetRevision}{' '}
+                        · {item.state})
+                      </option>
+                    ))}
+                </select>
+              </div>
+
+              <div>
+                <label
+                  htmlFor="report-candidate-pipeline"
+                  className="block text-sm font-medium"
+                >
+                  Candidate pipeline
+                </label>
+                <select
+                  id="report-candidate-pipeline"
+                  className="mt-1 block w-full rounded border bg-background p-2 text-sm"
+                  value={candidatePipelineId}
+                  disabled={!candidateRun}
+                  onChange={(e) =>
+                    updateCompareParams({ candidatePipeline: e.target.value })
+                  }
+                >
+                  {(candidateRun?.pipelines ?? []).map((p) => (
+                    <option key={p.pipelineId} value={p.pipelineId}>
+                      {p.pipelineName} (r{p.pipelineRevision})
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            {!canCompare && (
+              <p className="text-sm text-muted-foreground">
+                Select a second pipeline or another saved run to compute paired
+                metric deltas and side-by-side task evidence.
               </p>
+            )}
+
+            {canCompare &&
+              (comparisonQuery.isPending || candidateRunQuery.isPending) && (
+                <p role="status" className="text-sm text-muted-foreground">
+                  Computing paired comparison…
+                </p>
+              )}
+
+            {(comparisonQuery.error || candidateRunQuery.error) && (
+              <p role="alert" className="text-sm text-destructive">
+                {(comparisonQuery.error ?? candidateRunQuery.error)?.message}
+              </p>
+            )}
+
+            {comparison && (
+              <div className="space-y-6">
+                {comparison.incompatibilities.length > 0 && (
+                  <div
+                    role="alert"
+                    className="rounded-lg border border-amber-400 bg-amber-50 p-4 text-sm text-amber-950 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-100 space-y-2"
+                  >
+                    <div className="flex items-center gap-2 font-semibold">
+                      <AlertTriangle size={16} aria-hidden="true" />
+                      Incompatible comparison fields detected
+                    </div>
+                    <p>
+                      Both runs remain inspectable side by side below, but
+                      deltas are suppressed wherever definitions or dataset
+                      revisions do not match.
+                    </p>
+                    <ul className="list-disc pl-5 space-y-1 text-xs">
+                      {comparison.incompatibilities.map((item) => (
+                        <li key={`${item.scope}-${item.field}`}>
+                          <strong>{item.field}</strong>: baseline{' '}
+                          <code>{item.baselineValue}</code> vs candidate{' '}
+                          <code>{item.candidateValue}</code> — {item.reason}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {comparison.configDiff.length > 0 && (
+                  <div className="space-y-2">
+                    <h3 className="text-base font-semibold">
+                      Configuration Diff
+                    </h3>
+                    <div className="overflow-x-auto">
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead>Setting</TableHead>
+                            <TableHead>
+                              Baseline ({comparison.baseline.pipelineName})
+                            </TableHead>
+                            <TableHead>
+                              Candidate ({comparison.candidate.pipelineName})
+                            </TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {comparison.configDiff.map((diff) => (
+                            <TableRow key={diff.path}>
+                              <TableCell className="font-mono text-xs">
+                                {diff.path}
+                              </TableCell>
+                              <TableCell className="font-mono text-xs">
+                                {JSON.stringify(diff.baseline)}
+                              </TableCell>
+                              <TableCell className="font-mono text-xs">
+                                {JSON.stringify(diff.candidate)}
+                              </TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </div>
+                  </div>
+                )}
+
+                <div className="space-y-2">
+                  <h3 className="text-base font-semibold">
+                    Paired Metric Deltas
+                  </h3>
+                  <div className="overflow-x-auto">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Metric</TableHead>
+                          <TableHead className="text-right">
+                            Baseline (paired)
+                          </TableHead>
+                          <TableHead className="text-right">
+                            Candidate (paired)
+                          </TableHead>
+                          <TableHead className="text-right">Delta</TableHead>
+                          <TableHead>Direction</TableHead>
+                          <TableHead className="text-right">
+                            Paired / Missing
+                          </TableHead>
+                          <TableHead className="text-right">
+                            95% Bootstrap CI
+                          </TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {comparison.metrics.map((metric) => (
+                          <TableRow
+                            key={`${metric.metricId}:${metric.cutoff}:${metric.evaluationUnit}`}
+                          >
+                            <TableCell className="font-medium text-xs">
+                              <div>{metric.displayLabel}</div>
+                              <div className="text-muted-foreground">
+                                {metric.metricVersion} · {metric.evaluationUnit}
+                              </div>
+                            </TableCell>
+                            <TableCell className="text-right text-xs">
+                              {formatMetric(metric.baselineMean)}
+                            </TableCell>
+                            <TableCell className="text-right text-xs">
+                              {formatMetric(metric.candidateMean)}
+                            </TableCell>
+                            <TableCell className="text-right text-xs font-medium">
+                              {formatDelta(metric.absoluteDelta)}
+                            </TableCell>
+                            <TableCell>
+                              <Badge
+                                variant={directionBadgeVariant(
+                                  metric.direction,
+                                )}
+                              >
+                                {metric.direction.replaceAll('_', ' ')}
+                              </Badge>
+                            </TableCell>
+                            <TableCell className="text-right text-xs">
+                              {metric.pairedCount} / {metric.missingPairs}
+                            </TableCell>
+                            <TableCell className="text-right text-xs">
+                              {metric.bootstrapCi ? (
+                                <span>
+                                  [{formatDelta(metric.bootstrapCi.lower)},{' '}
+                                  {formatDelta(metric.bootstrapCi.upper)}]
+                                </span>
+                              ) : (
+                                <span className="text-muted-foreground">
+                                  {metric.bootstrapNote ?? 'Unavailable'}
+                                </span>
+                              )}
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    <strong>Resampling rule:</strong>{' '}
+                    {comparison.resamplingRule.description}
+                  </p>
+                </div>
+              </div>
             )}
           </CardContent>
         </Card>
 
-        {/* Next Steps */}
-        <Card>
-          <CardHeader>
-            <CardTitle>Suggested Next Steps</CardTitle>
-            <CardDescription className="text-zinc-600">
-              Iterate on your strongest pipeline and validate improvements with fresh data.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3 text-sm text-zinc-700">
-            <ul className="list-disc list-inside space-y-2">
-              {NEXT_STEPS.map((step) => (
-                <li key={step}>{step}</li>
-              ))}
-            </ul>
-          </CardContent>
-        </Card>
+        {comparison && (
+          <Card className="print-card print-page-break">
+            <CardHeader>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <CardTitle>
+                    Per-Task Side-by-Side Evidence ({comparison.tasks.length}{' '}
+                    tasks, {differingCount} differing)
+                  </CardTitle>
+                  <CardDescription>
+                    Inspect retrieved passages, generated answers, validated
+                    citations, and judge rationales side by side.
+                  </CardDescription>
+                </div>
+                <div className="no-print flex items-center gap-2">
+                  <input
+                    id="report-only-differing"
+                    type="checkbox"
+                    checked={onlyDiffering}
+                    onChange={(e) => setOnlyDiffering(e.target.checked)}
+                  />
+                  <label htmlFor="report-only-differing" className="text-sm">
+                    Show differing tasks only ({differingCount})
+                  </label>
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {visibleComparisonTasks.length === 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  No tasks match the current filter.
+                </p>
+              ) : (
+                visibleComparisonTasks.map((task) => {
+                  const isOpen = Boolean(expandedTasks[task.taskVersionId]);
+                  const qrelGrades = new Map(
+                    task.qrels.map((q) => [q.documentId, q.grade]),
+                  );
+                  return (
+                    <article
+                      key={task.taskVersionId}
+                      className="print-avoid-break rounded-lg border p-4 space-y-3"
+                    >
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div className="space-y-1">
+                          <h3 className="text-sm font-semibold">
+                            Q{task.ordinal + 1}: {task.question}
+                          </h3>
+                          <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                            <Badge variant="outline">
+                              {task.answerable ? 'Answerable' : 'Unanswerable'}
+                            </Badge>
+                            <Badge variant="outline">Pool: {task.pool}</Badge>
+                            {task.differs ? (
+                              <Badge variant="default">Differs</Badge>
+                            ) : (
+                              <Badge variant="secondary">Identical</Badge>
+                            )}
+                            {task.differenceSummary.length > 0 && (
+                              <span className="text-muted-foreground">
+                                {task.differenceSummary.slice(0, 3).join(' · ')}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="no-print gap-1"
+                          aria-expanded={isOpen}
+                          onClick={() =>
+                            setExpandedTasks((prev) => ({
+                              ...prev,
+                              [task.taskVersionId]: !isOpen,
+                            }))
+                          }
+                        >
+                          {isOpen ? (
+                            <ChevronDown size={14} aria-hidden="true" />
+                          ) : (
+                            <ChevronRight size={14} aria-hidden="true" />
+                          )}
+                          {isOpen ? 'Hide evidence' : 'Inspect evidence'}
+                        </Button>
+                      </div>
+
+                      <div
+                        className={
+                          isOpen
+                            ? 'space-y-3'
+                            : 'hidden print-only-block space-y-3'
+                        }
+                      >
+                        {(task.expectedAnswer ||
+                          task.acceptanceRule ||
+                          task.referenceFacts.length > 0) && (
+                          <div className="rounded bg-muted/30 p-2.5 text-xs space-y-1">
+                            {task.expectedAnswer && (
+                              <div>
+                                <strong>Reference answer:</strong>{' '}
+                                {task.expectedAnswer}
+                              </div>
+                            )}
+                            {task.acceptanceRule && (
+                              <div>
+                                <strong>Acceptance criteria:</strong>{' '}
+                                {task.acceptanceRule}
+                              </div>
+                            )}
+                            {task.referenceFacts.length > 0 && (
+                              <div>
+                                <strong>Reference facts:</strong>{' '}
+                                {task.referenceFacts.join(' · ')}
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {task.metricDeltas.length > 0 && (
+                          <div className="flex flex-wrap gap-2 text-xs">
+                            {task.metricDeltas.map((md) => (
+                              <span
+                                key={`${md.metricId}:${md.cutoff}:${md.evaluationUnit}`}
+                                className="rounded border px-2 py-1 bg-background"
+                              >
+                                <strong>{md.displayLabel}:</strong>{' '}
+                                {md.baselineValue !== null
+                                  ? md.baselineValue.toFixed(3)
+                                  : (md.baselineStatus ?? '—')}{' '}
+                                →{' '}
+                                {md.candidateValue !== null
+                                  ? md.candidateValue.toFixed(3)
+                                  : (md.candidateStatus ?? '—')}
+                                {md.delta !== null
+                                  ? ` (${formatDelta(md.delta)})`
+                                  : ''}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+
+                        <div className="grid gap-3 lg:grid-cols-2">
+                          <TaskEvidenceColumn
+                            title={`Baseline: ${comparison.baseline.pipelineName}`}
+                            task={task.baseline}
+                            qrelGrades={qrelGrades}
+                          />
+                          <TaskEvidenceColumn
+                            title={`Candidate: ${comparison.candidate.pipelineName}`}
+                            task={task.candidate}
+                            qrelGrades={qrelGrades}
+                          />
+                        </div>
+                      </div>
+                    </article>
+                  );
+                })
+              )}
+            </CardContent>
+          </Card>
+        )}
+
+        {!comparison && singleTasksQuery.data && (
+          <Card className="print-card print-page-break">
+            <CardHeader>
+              <CardTitle>
+                Per-Task Evidence ({singleTasksQuery.data.items.length} tasks)
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {singleTasksQuery.data.items.map((task) => {
+                const qrelGrades = new Map(
+                  task.qrels.map((q) => [q.documentId, q.grade]),
+                );
+                return (
+                  <article
+                    key={task.id}
+                    className="print-avoid-break rounded-lg border p-4 space-y-3"
+                  >
+                    <h3 className="text-sm font-semibold">
+                      Q{task.ordinal + 1}: {task.question}
+                    </h3>
+                    <TaskEvidenceColumn
+                      title={task.pipelineName}
+                      task={task}
+                      qrelGrades={qrelGrades}
+                    />
+                  </article>
+                );
+              })}
+            </CardContent>
+          </Card>
+        )}
       </div>
     </div>
   );

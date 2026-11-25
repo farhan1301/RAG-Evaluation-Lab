@@ -1,813 +1,516 @@
-import { useState } from 'react';
-import {
-  Book,
-  Key,
-  Database,
-  Workflow,
-  FlaskConical,
-  FileText,
-  Sparkles,
-  AlertCircle,
-  CheckCircle2,
-  ExternalLink,
-  Copy,
-  ChevronRight,
-} from 'lucide-react';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
-import { Alert, AlertDescription, AlertTitle } from './ui/alert';
+import * as c from '@rag-eval/contracts';
+import { useQuery } from '@tanstack/react-query';
+import { BookOpen } from 'lucide-react';
+import { Link } from 'react-router';
+import { request } from '../data/workspace';
 import { Badge } from './ui/badge';
-import { Button } from './ui/button';
-import { Separator } from './ui/separator';
-import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from './ui/accordion';
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from './ui/card';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from './ui/table';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
+
+function formatBytes(bytes: number) {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${bytes} B`;
+}
 
 export function DocumentationPage() {
-  const [copiedText, setCopiedText] = useState<string | null>(null);
+  const docQuery = useQuery({
+    queryKey: ['documentation'],
+    queryFn: () => request(c.documentationPayload, 'documentation'),
+  });
 
-  const copyToClipboard = (text: string, id: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedText(id);
-    setTimeout(() => setCopiedText(null), 2000);
-  };
-
-  const CodeBlock = ({ code, id }: { code: string; id: string }) => (
-    <div className="relative rounded-lg border bg-zinc-50 border-zinc-200 p-4 mt-3">
-      <pre className="text-sm overflow-x-auto">
-        <code>{code}</code>
-      </pre>
-      <Button size="sm" variant="ghost" className="absolute top-2 right-2" onClick={() => copyToClipboard(code, id)}>
-        {copiedText === id ? <CheckCircle2 size={14} /> : <Copy size={14} />}
-      </Button>
-    </div>
-  );
+  const doc = docQuery.data;
 
   return (
-    <div className="p-8 bg-zinc-50 min-h-screen">
-      <div className="max-w-6xl mx-auto space-y-6">
-        <div>
-          <div className="flex items-center gap-3 mb-2">
-            <Book className="text-blue-500" size={32} />
-            <h1 className="text-3xl">Documentation</h1>
-          </div>
-          <p className="text-lg text-zinc-600">Complete guide to using the RAG Evaluation Lab</p>
+    <div className="page max-w-6xl space-y-6">
+      <div>
+        <div className="flex items-center gap-3 mb-2">
+          <BookOpen className="text-primary" size={28} aria-hidden="true" />
+          <h1>Documentation</h1>
         </div>
-
-        <Tabs defaultValue="overview" className="space-y-6">
-          <TabsList className="grid w-full grid-cols-3 lg:grid-cols-6">
-            <TabsTrigger value="overview">Overview</TabsTrigger>
-            <TabsTrigger value="api-keys">API Keys</TabsTrigger>
-            <TabsTrigger value="datasets">Datasets</TabsTrigger>
-            <TabsTrigger value="pipelines">Pipelines</TabsTrigger>
-            <TabsTrigger value="experiments">Experiments</TabsTrigger>
-            <TabsTrigger value="reports">Reports</TabsTrigger>
-          </TabsList>
-
-          <TabsContent value="overview" className="space-y-6">
-            <Card>
-              <CardHeader>
-                <CardTitle>What is RAG Evaluation Lab?</CardTitle>
-                <CardDescription>
-                  A comprehensive platform for testing and optimizing Retrieval-Augmented Generation systems
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <p>
-                  RAG Evaluation Lab provides a systematic workflow to design, test, and compare different RAG pipeline configurations.
-                  Whether you&apos;re fine-tuning chunk sizes, comparing embedding models, or testing different LLM providers,
-                  this platform gives you the tools to make data-driven decisions.
-                </p>
-
-                <Alert className="bg-blue-50 border-blue-200">
-                  <AlertCircle className="h-4 w-4" />
-                  <AlertTitle>Key Philosophy</AlertTitle>
-                  <AlertDescription>
-                    Every component is configurable and measurable. We emphasize transparency, explainability, and scientific rigor in evaluating RAG
-                    systems.
-                  </AlertDescription>
-                </Alert>
-
-                <div className="space-y-3 pt-4">
-                  <h4>The 4-Step Workflow</h4>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                    {[
-                      { num: 1, title: 'Datasets & Tasks', desc: 'Upload documents and define test questions' },
-                      { num: 2, title: 'Pipelines', desc: 'Configure RAG pipeline components' },
-                      { num: 3, title: 'Experiments', desc: 'Run and compare multiple configurations' },
-                      { num: 4, title: 'Reports', desc: 'Analyze results and get recommendations' },
-                    ].map((step) => (
-                      <div
-                        key={step.num}
-                        className="flex gap-3 p-3 rounded-lg border border-zinc-200 bg-white"
-                      >
-                        <div
-                          className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 bg-blue-100 text-blue-600"
-                        >
-                          {step.num}
-                        </div>
-                        <div>
-                          <div className="font-medium">{step.title}</div>
-                          <div className="text-sm opacity-75">{step.desc}</div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {[
-                {
-                  icon: <Sparkles className="text-purple-500" size={20} />,
-                  title: 'Key Capabilities',
-                  items: ['Compare multiple RAG configurations', 'Track experiment history and results', 'Get AI-generated improvement suggestions'],
-                },
-                {
-                  icon: <FlaskConical className="text-blue-500" size={20} />,
-                  title: 'Common Use Cases',
-                  items: ['Choosing the best embedding model', 'Optimizing chunking strategies', 'Benchmarking retrieval techniques'],
-                },
-              ].map((card, index) => (
-                <Card key={index}>
-                  <CardHeader className="flex flex-row items-center gap-3">
-                    <div className="p-2 rounded-md bg-blue-500/10">{card.icon}</div>
-                    <div>
-                      <CardTitle className="text-lg">{card.title}</CardTitle>
-                    </div>
-                  </CardHeader>
-                  <CardContent>
-                    <ul className="space-y-2 text-sm">
-                      {card.items.map((item, itemIndex) => (
-                        <li key={itemIndex} className="flex items-center gap-2">
-                          <CheckCircle2 size={14} className="text-green-500" />
-                          <span>{item}</span>
-                        </li>
-                      ))}
-                    </ul>
-                  </CardContent>
-                </Card>
-              ))}
-            </div>
-
-            <Card>
-              <CardHeader>
-                <CardTitle>Quick Start</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <ol className="space-y-3 text-sm">
-                  {[
-                    {
-                      title: 'Connect API Keys',
-                      description:
-                        'Add your LlamaParse (required) and OpenAI (required) keys in Settings. Cohere and Anthropic integrations stay optional for extra model coverage.',
-                    },
-                    {
-                      title: 'Upload Documents',
-                      description: 'Go to Datasets & Tasks and upload your test documents (PDFs, docs, text files).',
-                    },
-                    {
-                      title: 'Create Test Questions',
-                      description: 'Define evaluation questions with ground truth answers.',
-                    },
-                    {
-                      title: 'Configure Pipelines',
-                      description: 'Design one or more pipeline configurations to test.',
-                    },
-                    {
-                      title: 'Run Experiments',
-                      description: 'Execute experiments and monitor progress in real-time.',
-                    },
-                    {
-                      title: 'Analyze Reports',
-                      description: 'Review comprehensive metrics and AI-generated recommendations.',
-                    },
-                  ].map((step, index) => (
-                    <li key={index} className="flex items-start gap-3">
-                      <Badge className="h-6 w-6 rounded-full flex items-center justify-center p-0">{index + 1}</Badge>
-                      <div>
-                        <div className="font-medium mb-1">{step.title}</div>
-                        <div className="opacity-80">{step.description}</div>
-                      </div>
-                    </li>
-                  ))}
-                </ol>
-              </CardContent>
-            </Card>
-
-          </TabsContent>
-
-          <TabsContent value="api-keys" className="space-y-6">
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <Key size={20} />
-                  Setting Up API Keys
-                </CardTitle>
-                <CardDescription>
-                  Configure your API credentials for embeddings, LLMs, and other services.
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <Alert className="bg-yellow-50 border-yellow-200">
-                  <AlertCircle className="h-4 w-4" />
-                  <AlertTitle>Security Note</AlertTitle>
-                  <AlertDescription>
-                    API keys are stored locally in your browser and never sent to external servers. Always keep your keys secure and never share them
-                    publicly.
-                  </AlertDescription>
-                </Alert>
-              </CardContent>
-            </Card>
-
-            <Accordion type="single" collapsible className="space-y-3">
-              <AccordionItem
-                value="llamaparse"
-                className="border rounded-lg px-4 border-zinc-200"
-              >
-                <AccordionTrigger>
-                  <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 rounded-lg flex items-center justify-center bg-blue-100">
-                      <FileText className="text-blue-500" size={20} />
-                    </div>
-                    <div className="text-left">
-                      <div className="font-medium">LlamaParse API Key</div>
-                      <div className="text-sm opacity-60">Required for document ingestion</div>
-                    </div>
-                  </div>
-                </AccordionTrigger>
-                <AccordionContent className="space-y-4 pt-4">
-                  <div>
-                    <h4 className="mb-2">How to Get Your LlamaParse API Key:</h4>
-                    <ol className="space-y-2 text-sm ml-4 list-decimal">
-                      <li>
-                        Create an account at{' '}
-                        <a
-                          href="https://cloud.llamaindex.ai"
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-blue-500 hover:underline inline-flex items-center gap-1"
-                        >
-                          cloud.llamaindex.ai <ExternalLink size={12} />
-                        </a>
-                      </li>
-                      <li>Navigate to the API Keys section of the dashboard</li>
-                      <li>Generate a new key dedicated to RAG Evaluation Lab</li>
-                      <li>Copy the key and store it securely</li>
-                      <li>Add it to the backend `.env` as `LLAMA_CLOUD_API_KEY`</li>
-                    </ol>
-                  </div>
-
-                  <Separator />
-
-                  <div>
-                    <h4 className="mb-2">Why You Need It:</h4>
-                    <ul className="space-y-1 text-sm">
-                      <li className="flex items-center gap-2">
-                        <CheckCircle2 size={14} className="text-green-500" />
-                        Powers all document parsing before chunking and experiments
-                      </li>
-                      <li className="flex items-center gap-2">
-                        <CheckCircle2 size={14} className="text-green-500" />
-                        Enables page counts and job tracking within experiment logs
-                      </li>
-                    </ul>
-                  </div>
-                </AccordionContent>
-              </AccordionItem>
-
-              <AccordionItem
-                value="openai"
-                className="border rounded-lg px-4 border-zinc-200"
-              >
-                <AccordionTrigger>
-                  <div className="flex items-center gap-3">
-                    <div
-                      className="w-10 h-10 rounded-lg flex items-center justify-center bg-green-100"
-                    >
-                      <Key className="text-green-500" size={20} />
-                    </div>
-                    <div className="text-left">
-                      <div className="font-medium">OpenAI API Key</div>
-                      <div className="text-sm opacity-60">For GPT models and embeddings</div>
-                    </div>
-                  </div>
-                </AccordionTrigger>
-                <AccordionContent className="space-y-4 pt-4">
-                  <div>
-                    <h4 className="mb-2">How to Get Your OpenAI API Key:</h4>
-                    <ol className="space-y-2 text-sm ml-4 list-decimal">
-                      <li>
-                        Go to{' '}
-                        <a
-                          href="https://platform.openai.com"
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-blue-500 hover:underline inline-flex items-center gap-1"
-                        >
-                          platform.openai.com <ExternalLink size={12} />
-                        </a>
-                      </li>
-                      <li>Sign up or log in to your account</li>
-                      <li>Navigate to API Keys section in your account settings</li>
-                      <li>Click &quot;Create new secret key&quot;</li>
-                      <li>Copy the key (you won&apos;t be able to see it again!)</li>
-                      <li>Paste it in the Settings page of this app</li>
-                    </ol>
-                  </div>
-
-                  <Separator />
-
-                  <div>
-                    <h4 className="mb-2">What You&apos;ll Need It For:</h4>
-                    <ul className="space-y-1 text-sm">
-                      <li className="flex items-center gap-2">
-                        <CheckCircle2 size={14} className="text-green-500" />
-                        Embedding models (text-embedding-3-small, text-embedding-3-large)
-                      </li>
-                      <li className="flex items-center gap-2">
-                        <CheckCircle2 size={14} className="text-green-500" />
-                        LLM generators (GPT-5 Chat, GPT-5 Mini, GPT-4.1 family, GPT-4o series)
-                      </li>
-                      <li className="flex items-center gap-2">
-                        <CheckCircle2 size={14} className="text-green-500" />
-                        Judge models for evaluation
-                      </li>
-                    </ul>
-                  </div>
-
-                  <div>
-                    <h4 className="mb-2">Example Usage:</h4>
-                    <CodeBlock
-                      id="openai-example"
-                      code={`import openai
-
-openai.api_key = "sk-..."
-
-# Generate embeddings
-response = openai.embeddings.create(
-    model="text-embedding-3-small",
-    input="Your text here"
-)
-
-# Use GPT for generation
-response = openai.chat.completions.create(
-    model="gpt-5-chat-latest",
-    messages=[{"role": "user", "content": "Hello!"}]
-)`}
-                    />
-                  </div>
-                </AccordionContent>
-              </AccordionItem>
-
-              <AccordionItem
-                value="cohere"
-                className="border rounded-lg px-4 border-zinc-200"
-              >
-                <AccordionTrigger>
-                  <div className="flex items-center gap-3">
-                    <div
-                      className="w-10 h-10 rounded-lg flex items-center justify-center bg-purple-100"
-                    >
-                      <Key className="text-purple-500" size={20} />
-                    </div>
-                    <div className="text-left">
-                      <div className="font-medium">Cohere API Key</div>
-                      <div className="text-sm opacity-60">For embeddings and reranking</div>
-                    </div>
-                  </div>
-                </AccordionTrigger>
-                <AccordionContent className="space-y-4 pt-4">
-                  <div>
-                    <h4 className="mb-2">How to Get Your Cohere API Key:</h4>
-                    <ol className="space-y-2 text-sm ml-4 list-decimal">
-                      <li>
-                        Visit{' '}
-                        <a
-                          href="https://dashboard.cohere.ai"
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-blue-500 hover:underline inline-flex items-center gap-1"
-                        >
-                          dashboard.cohere.ai <ExternalLink size={12} />
-                        </a>
-                      </li>
-                      <li>Create an account or sign in</li>
-                      <li>Go to API Keys in the dashboard</li>
-                      <li>Generate a new API key</li>
-                      <li>Copy and save it securely</li>
-                      <li>Add it to Settings in this app</li>
-                    </ol>
-                  </div>
-
-                  <Separator />
-
-                  <div>
-                    <h4 className="mb-2">What You&apos;ll Need It For:</h4>
-                    <ul className="space-y-1 text-sm">
-                      <li className="flex items-center gap-2">
-                        <CheckCircle2 size={14} className="text-green-500" />
-                        Multilingual embeddings (cohere-embed-v3)
-                      </li>
-                      <li className="flex items-center gap-2">
-                        <CheckCircle2 size={14} className="text-green-500" />
-                        Reranking models (Cohere Rerank v3)
-                      </li>
-                    </ul>
-                  </div>
-
-                  <div>
-                    <h4 className="mb-2">Example Usage:</h4>
-                    <CodeBlock
-                      id="cohere-example"
-                      code={`import cohere
-
-co = cohere.Client("your-api-key")
-
-# Generate embeddings
-response = co.embed(
-    texts=["Your text here"],
-    model="embed-english-v3.0"
-)
-
-# Rerank results
-response = co.rerank(
-    query="search query",
-    documents=["doc1", "doc2"],
-    model="rerank-english-v3.0"
-)`}
-                    />
-                  </div>
-                </AccordionContent>
-              </AccordionItem>
-
-              <AccordionItem
-                value="anthropic"
-                className="border rounded-lg px-4 border-zinc-200"
-              >
-                <AccordionTrigger>
-                  <div className="flex items-center gap-3">
-                    <div
-                      className="w-10 h-10 rounded-lg flex items-center justify-center bg-orange-100"
-                    >
-                      <Key className="text-orange-500" size={20} />
-                    </div>
-                    <div className="text-left">
-                      <div className="font-medium">Anthropic API Key</div>
-                      <div className="text-sm opacity-60">For Claude models</div>
-                    </div>
-                  </div>
-                </AccordionTrigger>
-                <AccordionContent className="space-y-4 pt-4">
-                  <div>
-                    <h4 className="mb-2">How to Get Your Anthropic API Key:</h4>
-                    <ol className="space-y-2 text-sm ml-4 list-decimal">
-                      <li>
-                        Go to{' '}
-                        <a
-                          href="https://console.anthropic.com"
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-blue-500 hover:underline inline-flex items-center gap-1"
-                        >
-                          console.anthropic.com <ExternalLink size={12} />
-                        </a>
-                      </li>
-                      <li>Sign up for an account</li>
-                      <li>Navigate to API Keys</li>
-                      <li>Create a new API key</li>
-                      <li>Save the key securely</li>
-                    </ol>
-                  </div>
-
-                  <Separator />
-
-                  <div>
-                    <h4 className="mb-2">What You&apos;ll Need It For:</h4>
-                    <ul className="space-y-1 text-sm">
-                      <li className="flex items-center gap-2">
-                        <CheckCircle2 size={14} className="text-green-500" />
-                        Claude 3 models (Haiku, Opus)
-                      </li>
-                      <li className="flex items-center gap-2">
-                        <CheckCircle2 size={14} className="text-green-500" />
-                        Alternative LLM for generation and judging
-                      </li>
-                    </ul>
-                  </div>
-                </AccordionContent>
-              </AccordionItem>
-            </Accordion>
-          </TabsContent>
-
-          <TabsContent value="datasets" className="space-y-6">
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <Database size={20} />
-                  Datasets &amp; Tasks
-                </CardTitle>
-                <CardDescription>Upload documents and create evaluation questions.</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-6">
-                <div>
-                  <h4 className="mb-3">Uploading Documents</h4>
-                  <p className="text-sm opacity-80 mb-3">
-                    The Datasets page allows you to upload documents that will serve as your knowledge base for RAG evaluation.
-                  </p>
-                  <div
-                    className="p-4 rounded-lg border border-zinc-200 bg-zinc-50"
-                  >
-                    <h5 className="text-sm font-medium mb-2">Supported Formats:</h5>
-                    <ul className="text-sm space-y-1">
-                      {['PDF documents', 'Microsoft Word (.doc, .docx)', 'Text files (.txt)', 'Markdown files (.md)'].map((item) => (
-                        <li key={item} className="flex items-center gap-2">
-                          <CheckCircle2 size={14} className="text-green-500" />
-                          {item}
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                </div>
-
-                <Separator />
-
-                <div>
-                  <h4 className="mb-3">Creating Test Questions</h4>
-                  <p className="text-sm opacity-80 mb-3">Evaluation questions are the foundation of your RAG assessment. Each question should have:</p>
-                  <div className="space-y-3">
-                    {[
-                      {
-                        title: 'Question',
-                        description: 'A clear, specific question that can be answered from your documents',
-                      },
-                      {
-                        title: 'Ground Truth Answer',
-                        description: 'The correct, expected answer based on your documents',
-                      },
-                      {
-                        title: 'Context References (Optional)',
-                        description: 'Specific passages that contain the answer',
-                      },
-                    ].map((card) => (
-                    <div key={card.title} className="p-3 rounded-lg border border-zinc-200">
-                        <div className="font-medium text-sm mb-1">{card.title}</div>
-                        <div className="text-sm opacity-60">{card.description}</div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                <Alert className="bg-blue-50 border-blue-200">
-                  <AlertCircle className="h-4 w-4" />
-                  <AlertTitle>Best Practice</AlertTitle>
-                  <AlertDescription>
-                    Create a diverse set of questions covering different difficulty levels, topics, and answer types (factual, comparative,
-                    summarization) for comprehensive evaluation.
-                  </AlertDescription>
-                </Alert>
-              </CardContent>
-            </Card>
-          </TabsContent>
-
-          <TabsContent value="pipelines" className="space-y-6">
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <Workflow size={20} />
-                  Pipeline Configuration
-                </CardTitle>
-                <CardDescription>Design RAG pipelines with configurable stages.</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-6">
-                <p className="text-sm opacity-80">
-                  A RAG pipeline consists of multiple stages, each responsible for a specific task. Configure each stage to test different approaches
-                  and find the optimal setup.
-                </p>
-
-                <div className="space-y-4">
-                  {[
-                    {
-                      stage: 'Chunking Strategy',
-                      description: 'How documents are split into manageable pieces',
-                      options: [
-                        'Recursive: Character-based splitting with overlap',
-                        'Semantic: Meaning-based chunking using embeddings',
-                        'Layout-aware: Preserves PDF structure',
-                        'Table Splitter: Specialized for tabular data',
-                      ],
-                      params: 'Chunk Size (100-1000 tokens), Overlap (0-50%)',
-                    },
-                    {
-                      stage: 'Embedding Model',
-                      description: 'Converts text chunks into vector representations',
-                      options: [
-                        'text-embedding-3-small: Fast, cost-effective (1536d)',
-                        'text-embedding-3-large: High accuracy (3072d)',
-                        'cohere-embed-v3: Multilingual support (1024d)',
-                      ],
-                      params: 'Model selection',
-                    },
-                    {
-                      stage: 'Vector Database',
-                      description: 'Stores and searches document embeddings',
-                      options: ['Qdrant: High-performance vector search (default)'],
-                      params: 'Distance metric (Cosine), top-K retrieval (1-100)',
-                    },
-                    {
-                      stage: 'Reranking (Optional)',
-                      description: 'Refines retrieved results to improve relevance',
-                      options: [
-                        'None: Skip reranking',
-                        'Cohere Rerank v3: Optimized for long contexts',
-                        'OpenAI Rerank: Balanced performance and cost',
-                      ],
-                      params: 'Max rerank candidates (10-200)',
-                    },
-                    {
-                      stage: 'Generation Model',
-                      description: 'Produces answers based on retrieved context',
-                      options: [
-                        'GPT-5 Chat Latest: Flagship reasoning and grounding',
-                        'GPT-5 Mini: Balanced cost-to-quality',
-                        'GPT-4.1 Mini: Efficient for bulk experimentation',
-                        'GPT-4o Mini: Proven cost-effective baseline',
-                      ],
-                      params: 'Temperature (0-1), Max tokens (100-1000)',
-                    },
-                    {
-                      stage: 'Evaluation Metrics',
-                      description: 'Judge answers for accuracy and quality',
-                      options: [
-                        'Exact Match',
-                        'Semantic Similarity',
-                        'Context Recall',
-                        'LLM Judge (GPT-5 Chat Latest)',
-                      ],
-                      params: 'Weights for composite scoring',
-                    },
-                  ].map((item) => (
-                    <Card key={item.stage} className="bg-white">
-                      <CardContent className="p-6 space-y-3">
-                        <div className="flex items-center justify-between">
-                          <div>
-                            <h4 className="font-medium">{item.stage}</h4>
-                            <p className="text-sm opacity-70">{item.description}</p>
-                          </div>
-                          <Badge variant="secondary">
-                            Stage
-                          </Badge>
-                        </div>
-                        <div className="space-y-2">
-                          <div className="text-sm font-medium opacity-80">Common options:</div>
-                          <ul className="text-sm space-y-1">
-                            {item.options.map((option) => (
-                              <li key={option} className="flex items-center gap-2">
-                                <ChevronRight size={14} className="opacity-50" />
-                                {option}
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
-                        <div className="text-sm opacity-70">
-                          <span className="font-medium">Key parameters:</span> {item.params}
-                        </div>
-                      </CardContent>
-                    </Card>
-                  ))}
-                </div>
-              </CardContent>
-            </Card>
-          </TabsContent>
-
-          <TabsContent value="experiments" className="space-y-6">
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <FlaskConical size={20} />
-                  Running Experiments
-                </CardTitle>
-                <CardDescription>Execute and monitor RAG experiments.</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-6">
-                <div className="grid md:grid-cols-3 gap-3">
-                  {[
-                    {
-                      title: 'Configure Experiment',
-                      description:
-                        'Select one or more pipelines, choose evaluation metrics, and define run parameters (iterations, judges, cost limits).',
-                    },
-                    {
-                      title: 'Monitor Progress',
-                      description: 'Track experiment execution in real-time with status updates, cost tracking, and retrieval stats.',
-                    },
-                    {
-                      title: 'Compare Results',
-                      description: 'View live comparisons across pipelines with key metrics highlighted and ranked.',
-                    },
-                  ].map((item) => (
-                    <div
-                      key={item.title}
-                      className="p-4 rounded-lg border border-zinc-200 bg-zinc-50"
-                    >
-                      <div className="font-medium mb-1">{item.title}</div>
-                      <div className="text-sm opacity-80">{item.description}</div>
-                    </div>
-                  ))}
-                </div>
-
-                <Alert className="bg-purple-50 border-purple-200">
-                  <Sparkles className="h-4 w-4" />
-                  <AlertTitle>Tip</AlertTitle>
-                  <AlertDescription>
-                    Enable automatic prompt optimization to have GPT-5 Chat suggest improvements after each run based on the latest results.
-                  </AlertDescription>
-                </Alert>
-              </CardContent>
-            </Card>
-          </TabsContent>
-
-          <TabsContent value="reports" className="space-y-6">
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <FileText size={20} />
-                  Understanding Reports
-                </CardTitle>
-                <CardDescription>Analyze results and get AI-generated recommendations.</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-6">
-                <div>
-                  <h4 className="mb-3">Report Sections</h4>
-                  <div className="space-y-3">
-                    {[
-                      {
-                        title: 'Overview',
-                        description: 'High-level comparison of all pipelines with key metrics, execution time, and cost breakdown.',
-                      },
-                      {
-                        title: 'Detailed Metrics',
-                        description:
-                          'In-depth analysis of each metric with charts showing performance across pipelines. Best values are highlighted in green.',
-                      },
-                      {
-                        title: 'Question-by-Question Analysis',
-                        description:
-                          'Drill down into individual questions to see which pipelines performed best on specific types of queries.',
-                      },
-                      {
-                        title: 'AI Recommendations',
-                        description:
-                          'GPT-5 Chat analyzes your results and provides actionable suggestions for improvement, including specific parameter adjustments.',
-                      },
-                      {
-                        title: 'Export Options',
-                        description: 'Download full reports as JSON, CSV, or formatted PDFs for sharing and documentation.',
-                      },
-                    ].map((section) => (
-                      <div
-                        key={section.title}
-                        className="p-4 rounded-lg border border-zinc-200 bg-zinc-50"
-                      >
-                        <h5 className="font-medium mb-2">{section.title}</h5>
-                        <p className="text-sm opacity-80">{section.description}</p>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                <Separator />
-
-                <div>
-                  <h4 className="mb-3">Interpreting Results</h4>
-                  <div className="space-y-3 text-sm">
-                    <p className="opacity-80">
-                      <strong>Look for trade-offs:</strong> The &quot;best&quot; pipeline depends on your priorities. A faster, cheaper pipeline might
-                      sacrifice some accuracy, which could be acceptable for certain use cases.
-                    </p>
-                    <p className="opacity-80">
-                      <strong>Consider consistency:</strong> A pipeline that performs well across all metrics is often more reliable than one that excels
-                      in just one area.
-                    </p>
-                    <p className="opacity-80">
-                      <strong>Analyze failure patterns:</strong> Understanding where and why a pipeline fails helps you make targeted improvements to
-                      specific stages.
-                    </p>
-                  </div>
-                </div>
-
-                <Alert className="bg-green-50 border-green-200">
-                  <CheckCircle2 className="h-4 w-4" />
-                  <AlertTitle>Best Practice</AlertTitle>
-                  <AlertDescription>
-                    Run experiments with representative test sets and iterate on your pipeline based on report insights. Track results in History to see
-                    improvements over time.
-                  </AlertDescription>
-                </Alert>
-              </CardContent>
-            </Card>
-          </TabsContent>
-        </Tabs>
+        <p className="text-muted-foreground">
+          Live operational reference derived from shipped server configuration,
+          metric formulas, and versioned judge rubrics.
+        </p>
       </div>
+
+      {docQuery.isPending && (
+        <p role="status" className="text-sm text-muted-foreground">
+          Loading shipped configuration and metric definitions…
+        </p>
+      )}
+
+      {docQuery.error && (
+        <p role="alert" className="text-sm text-destructive">
+          {docQuery.error.message}
+        </p>
+      )}
+
+      <Tabs defaultValue="overview" className="space-y-6">
+        <TabsList
+          aria-label="Documentation sections"
+          className="grid h-auto w-full grid-cols-2 sm:grid-cols-4"
+        >
+          <TabsTrigger value="overview">Workflow</TabsTrigger>
+          <TabsTrigger value="configuration">Configuration</TabsTrigger>
+          <TabsTrigger value="retrieval">Ingestion &amp; Retrieval</TabsTrigger>
+          <TabsTrigger value="metrics">Metrics &amp; Rubrics</TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="overview" className="space-y-4">
+          <Card>
+            <CardHeader>
+              <CardTitle>Reproducible RAG Evaluation Workflow</CardTitle>
+              <CardDescription>
+                SQLite owns every dataset revision, pipeline revision, job, and
+                scored observation.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4 text-sm">
+              <p>
+                Load the built-in sample dataset or upload local text, Markdown,
+                or text PDF documents to run deterministic keyword retrieval
+                experiments offline with zero API keys. Adding server-side
+                provider profiles unlocks dense/hybrid retrieval, grounded
+                answer generation, and structured rubric judging on the same
+                saved runs.
+              </p>
+              <ol className="grid gap-3 sm:grid-cols-2">
+                {[
+                  {
+                    to: '/datasets',
+                    title: '1. Datasets & Tasks',
+                    detail:
+                      'Upload documents, author questions, reference facts, answerability flags, and graded 0-3 document qrels.',
+                  },
+                  {
+                    to: '/pipelines',
+                    title: '2. Pipelines',
+                    detail:
+                      'Configure chunking, retrieval mode, top-K, optional HTTP reranker, and server-managed model profiles. Duplicate baselines to compare changes.',
+                  },
+                  {
+                    to: '/experiments',
+                    title: '3. Experiments',
+                    detail:
+                      'Submit frozen retrieval-only or full-RAG runs to the durable worker queue with cancellation, retry, and checkpointed progress.',
+                  },
+                  {
+                    to: '/reports',
+                    title: '4. Reports & History',
+                    detail:
+                      'Inspect paired deltas, seeded bootstrap confidence intervals, side-by-side task evidence, Markdown/JSON exports, and paginated print output.',
+                  },
+                ].map((step) => (
+                  <li key={step.to} className="rounded-lg border p-4 space-y-1">
+                    <Link
+                      to={step.to}
+                      className="font-semibold text-primary underline"
+                    >
+                      {step.title}
+                    </Link>
+                    <p className="text-muted-foreground">{step.detail}</p>
+                  </li>
+                ))}
+              </ol>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="configuration" className="space-y-4">
+          {doc ? (
+            <>
+              <Card>
+                <CardHeader>
+                  <CardTitle>Active Server Capabilities</CardTitle>
+                  <CardDescription>
+                    Reported directly from <code>/api/v1/documentation</code>{' '}
+                    (credentials and endpoint URLs remain server-only).
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4 text-sm">
+                  <div className="flex flex-wrap gap-2">
+                    <Badge
+                      variant={
+                        doc.capabilities.workerOnline ? 'default' : 'secondary'
+                      }
+                    >
+                      Worker:{' '}
+                      {doc.capabilities.workerOnline ? 'online' : 'offline'}
+                    </Badge>
+                    <Badge
+                      variant={
+                        doc.capabilities.denseStore ? 'default' : 'outline'
+                      }
+                    >
+                      Qdrant dense store:{' '}
+                      {doc.capabilities.denseStore
+                        ? 'configured'
+                        : 'not configured'}
+                    </Badge>
+                    <Badge
+                      variant={
+                        doc.capabilities.cloudParser ? 'default' : 'outline'
+                      }
+                    >
+                      LlamaParse cloud parser:{' '}
+                      {doc.capabilities.cloudParser
+                        ? 'configured'
+                        : 'not configured'}
+                    </Badge>
+                    <Badge variant="outline">
+                      Software v{doc.softwareVersion}
+                    </Badge>
+                  </div>
+
+                  {doc.capabilities.profiles.length > 0 ? (
+                    <div className="overflow-x-auto">
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead>Role</TableHead>
+                            <TableHead>Model</TableHead>
+                            <TableHead>Provider</TableHead>
+                            <TableHead>Supported options</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {doc.capabilities.profiles.map((profile) => (
+                            <TableRow key={`${profile.role}-${profile.model}`}>
+                              <TableCell className="capitalize font-medium">
+                                {profile.role}
+                              </TableCell>
+                              <TableCell>{profile.model}</TableCell>
+                              <TableCell>{profile.provider}</TableCell>
+                              <TableCell>
+                                {profile.options.length > 0
+                                  ? profile.options.join(', ')
+                                  : 'Default'}
+                              </TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </div>
+                  ) : (
+                    <p className="text-muted-foreground">
+                      No remote or local model profiles are currently
+                      configured. Offline keyword retrieval evaluation works
+                      without any profiles; configure provider variables on the
+                      backend to enable dense retrieval, generation, or judging.
+                    </p>
+                  )}
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle>Operational Limits &amp; Pricing</CardTitle>
+                </CardHeader>
+                <CardContent className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
+                  <div className="rounded border p-3">
+                    <div className="text-xs text-muted-foreground">
+                      JSON / Upload Limits
+                    </div>
+                    <div className="font-medium">
+                      {formatBytes(doc.limits.jsonLimitBytes)} JSON ·{' '}
+                      {formatBytes(doc.limits.documentLimitBytes)} upload
+                    </div>
+                  </div>
+                  <div className="rounded border p-3">
+                    <div className="text-xs text-muted-foreground">
+                      Rate Limit
+                    </div>
+                    <div className="font-medium">
+                      {doc.limits.rateLimit} req /{' '}
+                      {Math.round(doc.limits.rateWindowMs / 1000)}s
+                    </div>
+                  </div>
+                  <div className="rounded border p-3">
+                    <div className="text-xs text-muted-foreground">
+                      Worker Lease &amp; Timeout
+                    </div>
+                    <div className="font-medium">
+                      {Math.round(doc.limits.workerLeaseMs / 1000)}s lease ·{' '}
+                      {Math.round(doc.limits.providerTimeoutMs / 1000)}s timeout
+                    </div>
+                  </div>
+                  <div className="rounded border p-3">
+                    <div className="text-xs text-muted-foreground">
+                      Embedding Batch Size
+                    </div>
+                    <div className="font-medium">
+                      {doc.limits.embedBatchSize} chunks / batch
+                    </div>
+                  </div>
+                  <div className="rounded border p-3">
+                    <div className="text-xs text-muted-foreground">
+                      Run Budgets
+                    </div>
+                    <div className="font-medium">
+                      {doc.limits.runMaxTokens !== null
+                        ? `${doc.limits.runMaxTokens.toLocaleString()} tokens`
+                        : 'No token cap'}{' '}
+                      ·{' '}
+                      {doc.limits.runMaxCostUsd !== null
+                        ? `$${doc.limits.runMaxCostUsd.toFixed(2)} USD`
+                        : 'No USD cap'}
+                    </div>
+                  </div>
+                  <div className="rounded border p-3">
+                    <div className="text-xs text-muted-foreground">
+                      Price Schedule ({doc.pricing.currency})
+                    </div>
+                    <div className="font-medium">{doc.pricing.version}</div>
+                    <div className="text-xs text-muted-foreground">
+                      {doc.pricing.configuredModels.length > 0
+                        ? `Priced models: ${doc.pricing.configuredModels.join(', ')}`
+                        : 'Unpriced models remain explicitly Unknown.'}
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            </>
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              Configuration details will appear once the backend responds.
+            </p>
+          )}
+        </TabsContent>
+
+        <TabsContent value="retrieval" className="space-y-4">
+          {doc ? (
+            <>
+              <Card>
+                <CardHeader>
+                  <CardTitle>Ingestion &amp; Chunking</CardTitle>
+                  <CardDescription>
+                    Chunk size {doc.ingestion.chunkSizeRange.min}–
+                    {doc.ingestion.chunkSizeRange.max} characters · Overlap{' '}
+                    {doc.ingestion.overlapRange.min}–
+                    {doc.ingestion.overlapRange.max} characters
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4 text-sm">
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div className="rounded border p-3">
+                      <div className="font-medium">Local offline formats</div>
+                      <p className="mt-1 text-muted-foreground">
+                        {doc.ingestion.localFormats.join(', ')}
+                      </p>
+                    </div>
+                    <div className="rounded border p-3">
+                      <div className="font-medium">Optional cloud formats</div>
+                      <p className="mt-1 text-muted-foreground">
+                        {doc.ingestion.cloudFormats.join(', ')}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    {doc.ingestion.chunkingStrategies.map((strat) => (
+                      <div key={strat.id} className="rounded border p-3">
+                        <div className="font-medium">
+                          {strat.name}{' '}
+                          <code className="text-xs text-muted-foreground">
+                            ({strat.id})
+                          </code>
+                        </div>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          {strat.description}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle>Retrieval Modes, Fusion &amp; Reranking</CardTitle>
+                  <CardDescription>
+                    Reciprocal Rank Fusion:{' '}
+                    <code>{doc.retrieval.rrfFormula}</code>
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4 text-sm">
+                  <div className="grid gap-3 md:grid-cols-3">
+                    {doc.retrieval.modes.map((mode) => (
+                      <div
+                        key={mode.id}
+                        className="rounded border p-3 space-y-1"
+                      >
+                        <div className="font-medium">{mode.name}</div>
+                        <p className="text-xs text-muted-foreground">
+                          {mode.description}
+                        </p>
+                        <div className="flex flex-wrap gap-1 pt-1">
+                          {!mode.requiresDenseStore &&
+                            !mode.requiresEmbeddingProfile && (
+                              <Badge variant="secondary">Offline ready</Badge>
+                            )}
+                          {mode.requiresDenseStore && (
+                            <Badge variant="outline">Requires Qdrant</Badge>
+                          )}
+                          {mode.requiresEmbeddingProfile && (
+                            <Badge variant="outline">Requires embedding</Badge>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="space-y-1">
+                    <h3 className="text-sm font-semibold">
+                      Reranker failure policies
+                    </h3>
+                    <ul className="list-disc pl-5 text-xs text-muted-foreground space-y-1">
+                      {doc.retrieval.rerankFailurePolicies.map((policy) => (
+                        <li key={policy.id}>
+                          <strong>{policy.id}</strong>: {policy.description}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                </CardContent>
+              </Card>
+            </>
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              Ingestion and retrieval reference will appear once loaded.
+            </p>
+          )}
+        </TabsContent>
+
+        <TabsContent value="metrics" className="space-y-4">
+          {doc ? (
+            <>
+              <Card>
+                <CardHeader>
+                  <CardTitle>
+                    Paired Comparison &amp; Resampling Rules
+                  </CardTitle>
+                  <CardDescription>
+                    Prompt {doc.evaluation.promptVersion} · Retrieval{' '}
+                    {doc.evaluation.retrievalMetricVersion} · Abstention{' '}
+                    {doc.evaluation.abstentionMetricVersion}
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-2 text-sm text-muted-foreground">
+                  <p>{doc.evaluation.comparisonRule}</p>
+                  <p>
+                    <strong className="text-foreground">
+                      Bootstrap interval:
+                    </strong>{' '}
+                    {doc.evaluation.resamplingRule.description}
+                  </p>
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle>
+                    Shipped Metric Definitions &amp; Rubrics
+                  </CardTitle>
+                  <CardDescription>
+                    Derived directly from{' '}
+                    <code>backend/src/evaluation/metrics.ts</code> and versioned
+                    JSON rubric files.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  {(['retrieval', 'judge', 'abstention'] as const).map(
+                    (category) => {
+                      const group = doc.evaluation.metrics.filter(
+                        (m) => m.category === category,
+                      );
+                      return (
+                        <div key={category} className="space-y-2">
+                          <h3 className="text-base font-semibold capitalize">
+                            {category} metrics
+                          </h3>
+                          <div className="space-y-2">
+                            {group.map((metric) => (
+                              <div
+                                key={metric.metricId}
+                                className="rounded-lg border p-3 text-sm space-y-1.5"
+                              >
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <strong>{metric.displayLabel}</strong>
+                                  <Badge variant="outline">
+                                    {metric.version}
+                                  </Badge>
+                                  <Badge variant="secondary">
+                                    Unit: {metric.evaluationUnit}
+                                  </Badge>
+                                  {metric.rubricHash && (
+                                    <span className="text-xs font-mono text-muted-foreground">
+                                      sha256:{metric.rubricHash.slice(0, 12)}
+                                    </span>
+                                  )}
+                                </div>
+                                <p className="text-xs text-muted-foreground">
+                                  {metric.description}
+                                </p>
+                                <div className="text-xs">
+                                  <strong>Formula:</strong>{' '}
+                                  <code>{metric.formula}</code>
+                                </div>
+                                {metric.anchors && (
+                                  <div className="text-xs text-muted-foreground">
+                                    <strong>Scale anchors:</strong>{' '}
+                                    {Object.entries(metric.anchors)
+                                      .map(([k, v]) => `${k} = ${v}`)
+                                      .join(' · ')}
+                                  </div>
+                                )}
+                                {metric.passPolicy && (
+                                  <div className="text-xs text-muted-foreground">
+                                    <strong>
+                                      Pass policy ({metric.passPolicy.version}):
+                                    </strong>{' '}
+                                    score &gt;= {metric.passPolicy.minScore},
+                                    critical contradiction forbidden:{' '}
+                                    {String(
+                                      metric.passPolicy
+                                        .forbidCriticalContradiction,
+                                    )}
+                                    , acceptance criteria required:{' '}
+                                    {String(
+                                      metric.passPolicy
+                                        .requireAcceptanceCriteria,
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    },
+                  )}
+                </CardContent>
+              </Card>
+            </>
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              Metric and rubric definitions will appear once loaded.
+            </p>
+          )}
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }
