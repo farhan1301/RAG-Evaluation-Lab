@@ -191,6 +191,33 @@ export class Indexes {
     );
   }
 
+  listReadyDenseGenerations(generationId?: string): StoredIndexGeneration[] {
+    if (generationId) {
+      const gen = this.getStored(generationId);
+      if (gen.state !== 'ready') {
+        throw new ApiError(
+          409,
+          'conflict',
+          `Index generation "${generationId}" is in "${gen.state}" state and cannot be rebuilt into Qdrant.`,
+        );
+      }
+      if (gen.mode !== 'dense' && gen.mode !== 'hybrid') {
+        throw new ApiError(
+          400,
+          'invalid_input',
+          `Index generation "${generationId}" uses "${gen.mode}" mode and does not require Qdrant vectors.`,
+        );
+      }
+      return [gen];
+    }
+    const rows = this.db
+      .prepare(
+        `${selectGeneration} WHERE g.state = 'ready' AND g.mode IN ('dense', 'hybrid') ORDER BY g.created_at ASC, g.id ASC`,
+      )
+      .all();
+    return rows.map((row) => decodeGeneration(row));
+  }
+
   planOrReuse(
     request: CreateIndexRequest,
     embedding: {

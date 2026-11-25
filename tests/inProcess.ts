@@ -27,13 +27,51 @@ export function send(
   if (data !== undefined) req.push(Buffer.from(data));
   req.push(null);
   const res = new ServerResponse(req);
+  const chunks: Buffer[] = [];
+  res.write = ((
+    chunk: unknown,
+    encoding?: BufferEncoding | (() => void),
+    cb?: () => void,
+  ) => {
+    if (chunk !== undefined && chunk !== null && typeof chunk !== 'function') {
+      chunks.push(
+        Buffer.isBuffer(chunk)
+          ? chunk
+          : Buffer.from(
+              String(chunk),
+              typeof encoding === 'string' ? encoding : 'utf8',
+            ),
+      );
+    }
+    const callback = typeof encoding === 'function' ? encoding : cb;
+    callback?.();
+    return true;
+  }) as typeof res.write;
   return new Promise<{
     status: number;
     headers: ReturnType<typeof res.getHeaders>;
     body: unknown;
   }>((resolve, reject) => {
-    res.end = (chunk?: Buffer | string | (() => void)) => {
-      const text = typeof chunk === 'function' ? '' : chunk?.toString() || '';
+    res.end = ((
+      chunk?: Buffer | string | (() => void),
+      encoding?: BufferEncoding | (() => void),
+      cb?: () => void,
+    ) => {
+      if (
+        chunk !== undefined &&
+        chunk !== null &&
+        typeof chunk !== 'function'
+      ) {
+        chunks.push(
+          Buffer.isBuffer(chunk)
+            ? chunk
+            : Buffer.from(
+                String(chunk),
+                typeof encoding === 'string' ? encoding : 'utf8',
+              ),
+        );
+      }
+      const text = Buffer.concat(chunks).toString('utf8');
       const contentType = String(res.getHeader('content-type') ?? '');
       try {
         const body = !text
@@ -49,11 +87,18 @@ export function send(
       } catch (err) {
         reject(err);
       }
+      const callback =
+        typeof chunk === 'function'
+          ? chunk
+          : typeof encoding === 'function'
+            ? encoding
+            : cb;
+      callback?.();
       res.emit('finish');
       res.emit('close');
       socket.destroy();
       return res;
-    };
+    }) as typeof res.end;
     app(req, res);
   });
 }

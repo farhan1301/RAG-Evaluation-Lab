@@ -67,7 +67,7 @@ import type { Jobs } from './jobs.js';
 import type { Pipelines } from './pipelines.js';
 
 export const PROMPT_VERSION = 'grounded-answer-v1';
-export const SOFTWARE_VERSION = '0.1.0';
+export const SOFTWARE_VERSION = '1.0.0';
 
 const frozenSnapshotSchema = z.strictObject({
   softwareVersion: z.string(),

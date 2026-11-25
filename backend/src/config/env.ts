@@ -40,7 +40,11 @@ const csv = z.string().transform((value) =>
 );
 const envSchema = z
   .object({
+    HOST: z
+      .union([z.ipv4(), z.ipv6(), z.literal('localhost')])
+      .default('127.0.0.1'),
     PORT: z.coerce.number().int().min(0).max(65535).default(7070),
+    STATIC_DIR: z.string().trim().min(1).optional(),
     DATABASE_PATH: z
       .string()
       .min(1)

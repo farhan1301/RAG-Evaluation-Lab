@@ -1,10 +1,11 @@
 {
   "name": "rag-eval-lab",
-  "version": "0.1.0",
+  "version": "1.0.0",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=22.13"
+    "node": ">=22.18"
   },
   "workspaces": [
     "packages/*",
@@ -21,7 +22,10 @@
     "test:e2e": "playwright test",
     "format": "biome format --write .",
     "dev:worker": "npm run dev:worker -w rag-eval-backend",
-    "start:worker": "npm run start:worker -w rag-eval-backend"
+    "start:worker": "npm run start:worker -w rag-eval-backend",
+    "backup": "tsx backend/src/ops/backup.ts",
+    "restore": "tsx backend/src/ops/restore.ts",
+    "rebuild:qdrant": "tsx backend/src/ops/rebuild-qdrant.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "2.6.9",

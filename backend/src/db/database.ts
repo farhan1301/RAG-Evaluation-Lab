@@ -10,6 +10,8 @@ const migrations = [
   '005-generation.sql',
 ];
 
+export const SCHEMA_VERSION = migrations.length;
+
 export function transaction<T>(db: DatabaseSync, work: () => T): T {
   db.exec('BEGIN IMMEDIATE');
   try {
@@ -26,6 +28,31 @@ export function ready(db: DatabaseSync) {
   return (
     db.prepare('PRAGMA user_version').get()?.user_version === migrations.length
   );
+}
+
+export function integrityCheck(db: DatabaseSync): boolean {
+  const row = db.prepare('PRAGMA integrity_check').get();
+  return row?.integrity_check === 'ok';
+}
+
+export function checkWorkerHealth(
+  databasePath: string,
+  leaseMs: number,
+  now = Date.now,
+): boolean {
+  const db = new DatabaseSync(databasePath);
+  try {
+    db.exec('PRAGMA busy_timeout=5000');
+    if (!ready(db)) return false;
+    const row = db
+      .prepare('SELECT seen FROM worker_presence WHERE id = 1')
+      .get();
+    return typeof row?.seen === 'number' && row.seen >= now() - leaseMs;
+  } catch {
+    return false;
+  } finally {
+    db.close();
+  }
 }
 
 export function openDatabase(path: string, targetVersion = migrations.length) {

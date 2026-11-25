@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { join, relative, resolve } from 'node:path';
 import express, { type ErrorRequestHandler } from 'express';
 import { trace, SpanStatusCode } from '@opentelemetry/api';
 import type { Logger } from 'pino';
@@ -33,6 +35,7 @@ interface Dependencies {
   logger: Logger;
   ready: () => boolean | Promise<boolean>;
   now?: () => number;
+  staticDir?: string;
 }
 export function createApp({
   config,
@@ -47,6 +50,7 @@ export function createApp({
   logger,
   ready,
   now = Date.now,
+  staticDir,
 }: Dependencies) {
   const indexes =
     providedIndexes ?? new Indexes(datasets.database, datasets.jobs, now);
@@ -197,6 +201,60 @@ export function createApp({
   app.use('/api/v1', indexesRouter(indexes, retrieval, providers, config));
   app.use('/api/v1', experimentsRouter(runs, config));
   app.use('/api/v1', reportingRouter(runs, datasets, config, now));
+  app.use(['/api', '/health'], () => {
+    throw new ApiError(404, 'not_found', 'Route not found.');
+  });
+  const resolvedStaticDir = staticDir ?? env.STATIC_DIR;
+  if (resolvedStaticDir) {
+    const rootDir = resolve(resolvedStaticDir);
+    const indexHtmlPath = join(rootDir, 'index.html');
+    if (!existsSync(indexHtmlPath)) {
+      throw new Error(
+        `Static asset directory is missing index.html: ${rootDir}`,
+      );
+    }
+    app.use(
+      express.static(rootDir, {
+        index: 'index.html',
+        dotfiles: 'ignore',
+        fallthrough: true,
+        redirect: false,
+        setHeaders(res, filePath) {
+          res.setHeader('X-Content-Type-Options', 'nosniff');
+          const rel = relative(rootDir, filePath).replaceAll('\\', '/');
+          if (rel.startsWith('assets/')) {
+            res.setHeader(
+              'Cache-Control',
+              'public, max-age=31536000, immutable',
+            );
+          } else {
+            res.setHeader('Cache-Control', 'no-store');
+          }
+        },
+      }),
+    );
+    app.use((req, res, next) => {
+      if (req.method !== 'GET' && req.method !== 'HEAD') {
+        next();
+        return;
+      }
+      if (
+        req.path.startsWith('/assets/') ||
+        /\/[^/]+\.[a-zA-Z0-9]{1,10}$/.test(req.path)
+      ) {
+        next();
+        return;
+      }
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('Cache-Control', 'no-store');
+      // indexHtmlPath is fixed by the server, so allow dot-directories in it
+      // (e.g. an install under ~/.local or a .worktrees checkout); send's
+      // default would reject the whole path with a 404 that surfaces as 500.
+      res.sendFile(indexHtmlPath, { dotfiles: 'allow' }, (err) => {
+        if (err) next(err);
+      });
+    });
+  }
   app.use(() => {
     throw new ApiError(404, 'not_found', 'Route not found.');
   });

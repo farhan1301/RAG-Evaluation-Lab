@@ -1,3 +1,6 @@
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { loadEnvironment, readConfig } from './config/env.js';
 import { openDatabase, ready } from './db/database.js';
 import { Datasets } from './db/datasets.js';
@@ -9,6 +12,15 @@ import { createLogger } from './lib/logger.js';
 
 if (process.env.NODE_ENV !== 'test') loadEnvironment();
 const config = readConfig();
+const defaultStaticDir = fileURLToPath(
+  new URL('../../frontend/build', import.meta.url),
+);
+const staticDir =
+  config.env.STATIC_DIR ??
+  (process.env.NODE_ENV === 'production' &&
+  existsSync(join(defaultStaticDir, 'index.html'))
+    ? defaultStaticDir
+    : undefined);
 const db = openDatabase(config.env.DATABASE_PATH);
 const jobs = new Jobs(db, Date.now, config.env.WORKER_LEASE_MS);
 const logger = createLogger();
@@ -16,6 +28,7 @@ let stopping = false;
 const app = createApp({
   config,
   logger,
+  staticDir,
   datasets: new Datasets(db, jobs),
   pipelines: new Pipelines(db),
   indexes: new Indexes(db, jobs),
@@ -37,8 +50,8 @@ const app = createApp({
     }
   },
 });
-const server = app.listen(config.env.PORT, '127.0.0.1', () =>
-  logger.info({ port: config.env.PORT }, 'listening'),
+const server = app.listen(config.env.PORT, config.env.HOST, () =>
+  logger.info({ host: config.env.HOST, port: config.env.PORT }, 'listening'),
 );
 function shutdown() {
   if (stopping) return;

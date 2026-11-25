@@ -1,0 +1,102 @@
+# Self-hosted single-workspace deployment for RAG Evaluation Lab.
+#
+# Quick start (zero API keys, offline SQLite FTS5 keyword mode):
+#   docker compose up --build
+#
+# Optional dense / hybrid retrieval with Qdrant:
+#   Set QDRANT_URL=http://qdrant:6333 and an embedding model (OpenAI or local
+#   OpenAI-compatible endpoint such as Ollama) in .env, then run:
+#   docker compose --profile dense up --build
+#
+# Migration ordering:
+#   app starts first and opens SQLite with PRAGMA busy_timeout=5000 and a
+#   BEGIN IMMEDIATE migration transaction guarded by PRAGMA user_version.
+#   worker depends on app (service_started, not service_healthy, because app's
+#   /health/ready requires an active worker heartbeat in SQLite) and uses the
+#   same serialized openDatabase() path, so migrations are safe regardless of
+#   startup timing.
+
+services:
+  app:
+    image: rag-eval-lab:1.0.0
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["node", "backend/dist/index.js"]
+    ports:
+      - "127.0.0.1:${APP_PORT:-7070}:7070"
+    env_file:
+      - path: .env
+        required: false
+      - path: .env.local
+        required: false
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 7070
+      DATABASE_PATH: /data/workspace.sqlite
+      BLOB_DIRECTORY: /data/blobs
+      STATIC_DIR: /app/frontend/build
+    volumes:
+      - workspace-data:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:7070/health/ready').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 5s
+      timeout: 3s
+      start_period: 10s
+      retries: 12
+    stop_grace_period: 15s
+    restart: unless-stopped
+
+  worker:
+    image: rag-eval-lab:1.0.0
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["node", "backend/dist/jobs/worker.js"]
+    depends_on:
+      app:
+        condition: service_started
+    env_file:
+      - path: .env
+        required: false
+      - path: .env.local
+        required: false
+    environment:
+      NODE_ENV: production
+      DATABASE_PATH: /data/workspace.sqlite
+      BLOB_DIRECTORY: /data/blobs
+    volumes:
+      - workspace-data:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "node", "backend/dist/ops/worker-health.js"]
+      interval: 10s
+      timeout: 3s
+      start_period: 10s
+      retries: 6
+    stop_grace_period: 15s
+    restart: unless-stopped
+
+  # Qdrant is placed behind the optional "dense" profile so the default quick
+  # start stays lightweight and requires zero API keys or extra image downloads.
+  # Qdrant remains private on the Compose network (no host port published).
+  qdrant:
+    image: qdrant/qdrant:v1.20.2@sha256:d277592721d2e3b73f9b797b53cf05e6a5bb2134f6d13fdbda4ca51782afbcac
+    profiles: ["dense"]
+    volumes:
+      - qdrant-data:/qdrant/storage
+    restart: unless-stopped
+
+volumes:
+  workspace-data:
+  qdrant-data:
