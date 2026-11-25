@@ -1,4 +1,5 @@
 import fetch from 'node-fetch';
+import { supportsTemperature } from '../config/modelOptions.js';
 import type { AppConfig } from './config.js';
 
 export interface EmbeddingResponse {
@@ -40,11 +41,14 @@ export class OpenAIClient {
 
     const targetModel = options.model?.trim() || this.config.openaiEmbeddingModel;
 
-    const response = await fetch('https://api.openai.com/v1/embeddings', {
+    const local = targetModel === this.config.localEmbedModel;
+    const baseUrl = local ? this.config.localEmbedBaseUrl : 'https://api.openai.com/v1';
+    if (!baseUrl) throw new Error('Embedding endpoint is unavailable.');
+    const response = await fetch(`${baseUrl.replace(/\/$/, '')}/embeddings`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${this.config.openaiApiKey}`,
+        ...(!local && { Authorization: `Bearer ${this.config.openaiApiKey}` }),
       },
       body: JSON.stringify({
         model: targetModel,
@@ -78,19 +82,14 @@ export class OpenAIClient {
     const { model, temperature, maxTokens, responseFormat } = options;
 
     const resolvedModel = (model ?? this.config.openaiChatModel).trim();
-    const requiresDefaultTemperature =
-      resolvedModel.toLowerCase().startsWith('gpt-5') &&
-      (resolvedModel.toLowerCase().includes('mini') ||
-        resolvedModel.toLowerCase().includes('nano'));
-
     const body: Record<string, unknown> = {
       model: resolvedModel,
       messages,
-      ...(typeof maxTokens === 'number' ? { max_tokens: maxTokens } : {}),
+      ...(typeof maxTokens === 'number' ? { [resolvedModel.toLowerCase().startsWith('gpt-5') ? 'max_completion_tokens' : 'max_tokens']: maxTokens } : {}),
       ...(responseFormat ? { response_format: responseFormat } : {}),
     };
 
-    if (!requiresDefaultTemperature) {
+    if (supportsTemperature(resolvedModel)) {
       body.temperature = typeof temperature === 'number' ? temperature : 0.2;
     } else if (typeof temperature === 'number' && temperature === 1) {
       body.temperature = 1;

@@ -6,6 +6,8 @@ interface AnswerRequestBody {
   pipelineId: string;
   question: string;
   topK?: number;
+  temperature?: number;
+  maxTokens?: number;
   model?: string;
   embeddingModel?: string;
 }
@@ -76,6 +78,8 @@ export const createAnswerHandler = (
       const messages = buildAnswerPrompt(question, contextSnippets);
       const completion = await openai.chatCompletion(messages, {
         model: model?.trim() || undefined,
+        temperature: req.body.temperature,
+        maxTokens: req.body.maxTokens,
       });
       const latencyMs = Date.now() - startedAt;
 

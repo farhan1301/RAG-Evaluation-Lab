@@ -4,18 +4,19 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=22.22"
+    "node": ">=22.13"
   },
   "workspaces": [
+    "packages/*",
     "frontend",
     "backend"
   ],
   "scripts": {
     "dev": "npm run dev -w rag-eval-frontend",
     "dev:backend": "npm run dev -w rag-eval-backend",
-    "build": "npm run build --workspaces && node scripts/check-startup.mjs",
+    "build": "npm run build --workspaces --if-present && node scripts/check-startup.mjs",
     "lint": "biome lint .",
-    "typecheck": "tsc -p backend/tsconfig.json --noEmit && tsc -p frontend/tsconfig.json && tsc -p frontend/tsconfig.node.json && tsc -p tests/tsconfig.json",
+    "typecheck": "tsc -p packages/contracts/tsconfig.json && tsc -p backend/tsconfig.json --noEmit && tsc -p frontend/tsconfig.json && tsc -p frontend/tsconfig.node.json && tsc -p tests/tsconfig.json",
     "test": "vitest run",
     "format": "biome format --write ."
   },

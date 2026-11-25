@@ -134,7 +134,7 @@ export class QdrantClient {
     ];
 
     const attempts = 3;
-    let lastError: { status: number; detail: string; method: string; path: string } | null = null;
+    let lastStatus = 0;
 
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       for (const { method, path, body } of endpoints) {
@@ -149,25 +149,9 @@ export class QdrantClient {
           return;
         }
 
-        const detail = await response.text();
-        lastError = { status: response.status, detail, method, path };
+        lastStatus = response.status;
+        await response.text();
 
-        if (response.status === 404) {
-          if (typeof console !== 'undefined' && typeof console.warn === 'function') {
-            console.warn(
-              `[QdrantClient] Index endpoint ${method} ${path} returned 404 for collection "${collection}" (attempt ${
-                attempt + 1
-              } of ${attempts}).`
-            );
-          }
-          continue;
-        }
-
-        if (typeof console !== 'undefined' && typeof console.warn === 'function') {
-          console.warn(
-            `[QdrantClient] Attempt to create pipelineId index failed (${response.status}) via ${method} ${path}: ${detail}`
-          );
-        }
       }
 
       if (attempt < attempts - 1) {
@@ -175,17 +159,7 @@ export class QdrantClient {
       }
     }
 
-    if (typeof console !== 'undefined' && typeof console.error === 'function' && lastError) {
-      console.error('[QdrantClient] Failed to create pipelineId index', {
-        collection,
-        ...lastError,
-      });
-    }
-
-    const detail =
-      lastError?.detail ?? 'Qdrant did not accept index creation via supported endpoints.';
-    const status = lastError?.status ?? 0;
-    throw new Error(`Failed to create Qdrant pipelineId index (${status}): ${detail}`);
+    throw new Error(`Failed to create Qdrant pipelineId index (${lastStatus}).`);
   }
 
   async deletePipelinePoints(pipelineId: string, collectionName: string, signal?: AbortSignal) {

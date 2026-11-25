@@ -21,8 +21,7 @@ import {
   TableHeader,
   TableRow,
 } from './ui/table';
-import { useDataset } from '../state/dataset';
-import { usePipelines } from '../state/pipelines';
+import { useRunnerInputs } from '../data/legacyRunner';
 import { type TaskResult, useExperimentResults } from '../state/experimentResults';
 import {
   chunkDocumentsWithConfig,
@@ -33,7 +32,6 @@ import {
 } from '../lib/chunking';
 import { upsertChunks, answerQuestion, judgeAnswers, parseDocument } from '../lib/backend';
 import type { DatasetDocument } from '../types/dataset';
-import type { Pipeline } from '../types/pipeline';
 import type {
   AnswerDetail,
   ExperimentPipelineResult,
@@ -95,22 +93,6 @@ const formatTimestamp = () =>
     timeStyle: 'short',
   });
 
-const DEFAULT_PIPELINE: Pipeline = {
-  id: 'default-pipeline',
-  name: 'Default Pipeline',
-  parsing: { strategy: 'llama-parse' },
-  chunking: {
-    strategy: 'recursive',
-    chunkSize: 500,
-    overlap: 50,
-  },
-  embedding: { model: 'text-embedding-3-small' },
-  retriever: { topK: 5, deduplicate: false },
-  reranker: { enabled: false, model: 'cohere-rerank' },
-  llm: { model: 'gpt-4o-mini', temperature: 0.3, maxTokens: 512 },
-  judge: { model: 'gpt-4o-mini' },
-};
-
 const getEmbeddingVectorDim = (model: string) => {
   const normalized = model.toLowerCase();
   if (normalized.includes('large')) {
@@ -123,17 +105,16 @@ const getEmbeddingVectorDim = (model: string) => {
 };
 
 export function ExperimentsPage() {
-  const { documents, setDocuments, tasks } = useDataset();
-  const { pipelines } = usePipelines();
+  const { documents, tasks, pipelines, unavailable } = useRunnerInputs();
   const {
     latestRun, setLatestRun, stage, setStage, statusLog, setStatusLog,
     taskResultsByPipeline, setTaskResultsByPipeline, progress, setProgress,
     error, setError, isRunning, setIsRunning,
   } = useExperimentResults();
 
-  const experimentPipelines = pipelines.length ? pipelines : [DEFAULT_PIPELINE];
+  const experimentPipelines = pipelines;
   const baselinePipelineId =
-    pipelines.find((pipeline) => pipeline.isBaseline)?.id ?? experimentPipelines[0].id;
+    pipelines.find((pipeline) => pipeline.isBaseline)?.id ?? experimentPipelines[0]?.id ?? '';
   const baselinePipeline =
     pipelines.find((pipeline) => pipeline.id === baselinePipelineId) ?? experimentPipelines[0];
 
@@ -301,7 +282,6 @@ export function ExperimentsPage() {
     let latestDocuments: DatasetDocument[] = documents;
     const applyDocuments = (updater: (prev: DatasetDocument[]) => DatasetDocument[]) => {
       latestDocuments = updater(latestDocuments);
-      setDocuments(updater);
     };
 
     appendLog(`Experiment started at ${formatTimestamp()}.`);
@@ -479,8 +459,8 @@ export function ExperimentsPage() {
 
       for (const [index, entry] of pipelineOverview.entries()) {
         const { pipeline: currentPipeline, id: pipelineId, name: pipelineName } = entry;
-        const chunkConfig = currentPipeline.chunking ?? DEFAULT_PIPELINE.chunking;
-        const retrieverK = currentPipeline.retriever?.topK ?? DEFAULT_PIPELINE.retriever.topK;
+        const chunkConfig = currentPipeline.chunking;
+        const retrieverK = currentPipeline.retriever?.topK;
         const pipelineEmbeddingModel = currentPipeline.embedding?.model;
 
         setStage('chunking');
@@ -560,7 +540,9 @@ export function ExperimentsPage() {
             pipelineId,
             question: task.question,
             topK: retrieverK,
-            model: currentPipeline.llm?.model,
+            model: currentPipeline.llm.model,
+            temperature: currentPipeline.llm.temperature,
+            maxTokens: currentPipeline.llm.maxTokens,
             embeddingModel: pipelineEmbeddingModel,
           });
 
@@ -678,7 +660,7 @@ export function ExperimentsPage() {
         }));
 
         const totalQuestions = readyTasks.length;
-        const embeddingModelName = pipelineEmbeddingModel ?? 'text-embedding-3-small';
+        const embeddingModelName = pipelineEmbeddingModel ?? '';
         const vectorDim = getEmbeddingVectorDim(embeddingModelName);
         const totalEmbeddingTokens = chunks.reduce((sum, chunk) => sum + chunk.tokenEstimate, 0);
 
@@ -711,7 +693,7 @@ export function ExperimentsPage() {
           completionTokens: judgeCompletionTokens,
         };
 
-        const answerModel = currentPipeline.llm?.model ?? 'gpt-4o-mini';
+        const answerModel = currentPipeline.llm?.model ?? '';
         const judgeModel = currentPipeline.judge?.model ?? answerModel;
 
         const answerCost = estimateChatCost(answerModel, answerUsageTotals);
@@ -838,12 +820,13 @@ export function ExperimentsPage() {
               Upload documents, embed them with Qdrant, and evaluate answers with the LLM.
             </p>
           </div>
-          <Button onClick={runExperiment} size="lg" className="gap-2" disabled={isRunning}>
+          <Button onClick={runExperiment} size="lg" className="gap-2" disabled={isRunning || !!unavailable}>
             <Play size={20} />
             {isRunning ? 'Running…' : 'Start Experiment'}
           </Button>
         </div>
 
+        {unavailable && <p role="status">{unavailable}</p>}
         {error && (
           <Card role="alert" className="border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950 text-red-700 dark:text-red-300">
             <CardContent className="py-4 text-sm">{error}</CardContent>

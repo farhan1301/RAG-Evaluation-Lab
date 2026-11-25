@@ -24,11 +24,10 @@ jobs:
         shell: bash
         env:
           NODE_ENV: test
-          OPENAI_API_KEY: startup-fixture
-          QDRANT_URL: http://qdrant.invalid
+          DATABASE_PATH: ":memory:"
           PORT: 17070
         run: |
           node backend/dist/index.js &
           pid=$!
           trap 'kill "$pid"' EXIT
-          curl --fail --retry 10 --retry-connrefused --retry-delay 1 http://127.0.0.1:17070/health | jq -e '.status == "ok"'
+          curl --fail --retry 10 --retry-connrefused --retry-delay 1 http://127.0.0.1:17070/health/ready | jq -e '.status == "ok"'

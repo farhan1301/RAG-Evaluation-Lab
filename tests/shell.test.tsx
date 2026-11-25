@@ -1,10 +1,9 @@
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { createMemoryRouter, RouterProvider } from 'react-router';
 import { describe, expect, it } from 'vitest';
 import { createRoutes } from '../frontend/src/App';
-import { DatasetProvider } from '../frontend/src/state/dataset';
 import { ExperimentResultsProvider } from '../frontend/src/state/experimentResults';
-import { PipelineProvider } from '../frontend/src/state/pipelines';
 
 async function openPage(path: string) {
   const router = createMemoryRouter(createRoutes(), { initialEntries: [path] });
@@ -23,20 +22,18 @@ async function openPage(path: string) {
 
 function markup(router: ReturnType<typeof createMemoryRouter>) {
   return renderToStaticMarkup(
-    <DatasetProvider>
-      <PipelineProvider>
-        <ExperimentResultsProvider>
-          <RouterProvider router={router} />
-        </ExperimentResultsProvider>
-      </PipelineProvider>
-    </DatasetProvider>,
+    <QueryClientProvider client={new QueryClient()}>
+      <ExperimentResultsProvider>
+        <RouterProvider router={router} />
+      </ExperimentResultsProvider>
+    </QueryClientProvider>,
   );
 }
 
 describe('application shell', () => {
   it.each([
     ['/', 'Compare retrieval pipelines', '/'],
-    ['/datasets', 'Document Upload', '/datasets'],
+    ['/datasets', 'Load sample dataset', '/datasets'],
     ['/pipelines', 'Pipeline Configuration', '/pipelines'],
     ['/experiments', 'Experiment Progress', '/experiments'],
     ['/reports', 'No experiment results yet', '/reports'],

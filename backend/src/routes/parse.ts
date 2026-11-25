@@ -16,7 +16,7 @@ export const createParseHandler = (llamaParse: Pick<LlamaParseClient, 'isConfigu
 
     const { filename, mimeType, contentBase64 } = req.body ?? {};
     const outputFormat = normalizeFormat(req.body?.outputFormat);
-    const requestId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const requestId = res.locals?.requestId;
 
     logInfo('parse-route incoming request', {
       requestId,
