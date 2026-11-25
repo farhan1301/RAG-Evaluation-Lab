@@ -1048,9 +1048,282 @@ export const runListQuery = z.strictObject({
   limit: z.coerce.number().int().min(1).max(100).default(50),
   cursor: z.string().min(1).max(200).optional(),
   experimentId: id.optional(),
+  datasetId: id.optional(),
+  state: jobState.optional(),
 });
 export const runTasksQuery = z.strictObject({
   limit: z.coerce.number().int().min(1).max(100).default(50),
   cursor: z.coerce.number().int().nonnegative().optional(),
   pipelineId: id.optional(),
 });
+
+// Phase 7: Historical Comparisons, Reporting, Exports, and Derived Documentation
+export const comparisonQuery = z.strictObject({
+  baselineRunId: id,
+  baselinePipelineId: id,
+  candidateRunId: id,
+  candidatePipelineId: id,
+  bootstrapSamples: z.coerce.number().int().min(0).max(5000).default(1000),
+  seed: z.coerce.number().int().min(0).max(2_147_483_647).default(42),
+});
+export type ComparisonQuery = z.infer<typeof comparisonQuery>;
+
+export const comparisonSide = z.strictObject({
+  runId: id,
+  runName: z.string(),
+  runState: jobState,
+  mode: runMode,
+  judgeEnabled: z.boolean(),
+  datasetId: id,
+  datasetRevision: revision,
+  datasetName: z.string(),
+  queuedAt: z.iso.datetime(),
+  completedAt: z.iso.datetime().nullable(),
+  pipelineId: id,
+  pipelineRevision: revision,
+  pipelineName: z.string(),
+  isBaseline: z.boolean(),
+  config: pipelineConfig,
+  configHash: z.string().length(64),
+  resolvedModels: runPipelineSummary.shape.resolvedModels,
+  promptVersion: z.string(),
+  retrievalMetricVersion: z.string(),
+  rubricVersions: z.record(z.string(), z.string()),
+  priceScheduleVersion: z.string(),
+  state: runPipelineState,
+  completedTasks: z.int().nonnegative(),
+  failedTasks: z.int().nonnegative(),
+  totalTasks: z.int().nonnegative(),
+  latency: pipelineLatencySummary,
+  cost: costBreakdown,
+  tokens: tokenBreakdown,
+});
+export type ComparisonSide = z.infer<typeof comparisonSide>;
+
+export const comparisonIncompatibility = z.strictObject({
+  scope: z.enum(['dataset', 'judge', 'metric']),
+  field: z.string(),
+  baselineValue: z.string(),
+  candidateValue: z.string(),
+  reason: z.string(),
+});
+export type ComparisonIncompatibility = z.infer<
+  typeof comparisonIncompatibility
+>;
+
+export const configDiffEntry = z.strictObject({
+  path: z.string(),
+  baseline: z.unknown(),
+  candidate: z.unknown(),
+});
+export type ConfigDiffEntry = z.infer<typeof configDiffEntry>;
+
+export const bootstrapInterval = z.strictObject({
+  lower: z.number(),
+  upper: z.number(),
+  confidenceLevel: z.number().min(0.5).max(0.999),
+  samples: z.int().positive(),
+  seed: z.int().nonnegative(),
+});
+export type BootstrapInterval = z.infer<typeof bootstrapInterval>;
+
+export const resamplingRule = z.strictObject({
+  method: z.literal('seeded_task_paired_bootstrap'),
+  seed: z.int().nonnegative(),
+  samples: z.int().nonnegative(),
+  confidenceLevel: z.number().min(0.5).max(0.999),
+  minPairs: z.int().positive(),
+  description: z.string(),
+});
+export type ResamplingRule = z.infer<typeof resamplingRule>;
+
+export const metricDirection = z.enum([
+  'improved',
+  'regressed',
+  'unchanged',
+  'not_comparable',
+]);
+export type MetricDirection = z.infer<typeof metricDirection>;
+
+export const pairedMetricComparison = z.strictObject({
+  metricId,
+  metricVersion: z.string(),
+  candidateMetricVersion: z.string().nullable(),
+  cutoff: z.int().nonnegative(),
+  evaluationUnit,
+  displayLabel: z.string(),
+  category: z.enum(['retrieval', 'judge', 'abstention']),
+  comparable: z.boolean(),
+  incompatibilityReason: z.string().nullable(),
+  baselineMean: z.number().nullable(),
+  candidateMean: z.number().nullable(),
+  baselineOverallMean: z.number().nullable(),
+  candidateOverallMean: z.number().nullable(),
+  absoluteDelta: z.number().nullable(),
+  direction: metricDirection,
+  pairedCount: z.int().nonnegative(),
+  missingPairs: z.int().nonnegative(),
+  baselineEligibleCount: z.int().nonnegative(),
+  candidateEligibleCount: z.int().nonnegative(),
+  totalTasks: z.int().nonnegative(),
+  bootstrapCi: bootstrapInterval.nullable(),
+  bootstrapNote: z.string().nullable(),
+});
+export type PairedMetricComparison = z.infer<typeof pairedMetricComparison>;
+
+export const pairedTaskMetricDelta = z.strictObject({
+  metricId,
+  metricVersion: z.string(),
+  cutoff: z.int().nonnegative(),
+  evaluationUnit,
+  displayLabel: z.string(),
+  comparable: z.boolean(),
+  baselineStatus: observationStatus.nullable(),
+  candidateStatus: observationStatus.nullable(),
+  baselineValue: z.number().nullable(),
+  candidateValue: z.number().nullable(),
+  delta: z.number().nullable(),
+});
+export type PairedTaskMetricDelta = z.infer<typeof pairedTaskMetricDelta>;
+
+export const pairedTaskComparison = z.strictObject({
+  taskId: id,
+  taskVersionId: id,
+  ordinal: z.int().nonnegative(),
+  question: z.string(),
+  expectedAnswer: z.string(),
+  acceptanceRule: z.string(),
+  referenceFacts: z.array(z.string()),
+  answerable: z.boolean(),
+  pool: z.enum(['complete', 'partial']),
+  qrels: z.array(qrel),
+  differs: z.boolean(),
+  differenceSummary: z.array(z.string()),
+  baseline: runTaskDetail.nullable(),
+  candidate: runTaskDetail.nullable(),
+  metricDeltas: z.array(pairedTaskMetricDelta),
+});
+export type PairedTaskComparison = z.infer<typeof pairedTaskComparison>;
+
+export const comparisonResult = z.strictObject({
+  baseline: comparisonSide,
+  candidate: comparisonSide,
+  compatible: z.boolean(),
+  datasetCompatible: z.boolean(),
+  judgeCompatible: z.boolean(),
+  incompatibilities: z.array(comparisonIncompatibility),
+  configDiff: z.array(configDiffEntry),
+  resamplingRule,
+  metrics: z.array(pairedMetricComparison),
+  tasks: z.array(pairedTaskComparison),
+});
+export type ComparisonResult = z.infer<typeof comparisonResult>;
+
+export const runExportQuery = z.strictObject({
+  format: z.enum(['markdown', 'json']).default('markdown'),
+  baselinePipelineId: id.optional(),
+  candidatePipelineId: id.optional(),
+  compareRunId: id.optional(),
+  comparePipelineId: id.optional(),
+  bootstrapSamples: z.coerce.number().int().min(0).max(5000).default(1000),
+  seed: z.coerce.number().int().min(0).max(2_147_483_647).default(42),
+});
+export type RunExportQuery = z.infer<typeof runExportQuery>;
+
+export const runExportJson = z.strictObject({
+  schemaVersion: z.literal(1),
+  exportedAt: z.iso.datetime(),
+  run: runDetail,
+  comparisons: z.array(comparisonResult),
+  tasks: z.array(runTaskDetail),
+});
+export type RunExportJson = z.infer<typeof runExportJson>;
+
+export const metricDefinitionDoc = z.strictObject({
+  metricId,
+  version: z.string(),
+  category: z.enum(['retrieval', 'judge', 'abstention']),
+  displayLabel: z.string(),
+  evaluationUnit,
+  formula: z.string(),
+  description: z.string(),
+  edgeCases: z.array(z.string()),
+  anchors: z.record(z.string(), z.string()).optional(),
+  passPolicy: z
+    .strictObject({
+      version: z.string(),
+      minScore: z.number(),
+      forbidCriticalContradiction: z.boolean(),
+      requireAcceptanceCriteria: z.boolean(),
+    })
+    .optional(),
+  rubricHash: z.string().optional(),
+});
+export type MetricDefinitionDoc = z.infer<typeof metricDefinitionDoc>;
+
+export const documentationPayload = z.strictObject({
+  softwareVersion: z.string(),
+  capabilities,
+  limits: z.strictObject({
+    jsonLimitBytes: z.int().positive(),
+    documentLimitBytes: z.int().positive(),
+    rateLimit: z.int().positive(),
+    rateWindowMs: z.int().positive(),
+    providerTimeoutMs: z.int().positive(),
+    embedBatchSize: z.int().positive(),
+    workerLeaseMs: z.int().positive(),
+    runMaxTokens: z.int().positive().nullable(),
+    runMaxCostUsd: z.number().positive().nullable(),
+  }),
+  pricing: z.strictObject({
+    version: z.string(),
+    currency: z.literal('USD'),
+    configuredModels: z.array(z.string()),
+  }),
+  ingestion: z.strictObject({
+    localFormats: z.array(z.string()),
+    cloudFormats: z.array(z.string()),
+    chunkingStrategies: z.array(
+      z.strictObject({
+        id: strategy,
+        name: z.string(),
+        description: z.string(),
+      }),
+    ),
+    chunkSizeRange: z.strictObject({
+      min: z.int().positive(),
+      max: z.int().positive(),
+    }),
+    overlapRange: z.strictObject({
+      min: z.int().nonnegative(),
+      max: z.int().positive(),
+    }),
+  }),
+  retrieval: z.strictObject({
+    modes: z.array(
+      z.strictObject({
+        id: retrievalMode,
+        name: z.string(),
+        description: z.string(),
+        requiresDenseStore: z.boolean(),
+        requiresEmbeddingProfile: z.boolean(),
+      }),
+    ),
+    rrfFormula: z.string(),
+    rerankFailurePolicies: z.array(
+      z.strictObject({
+        id: rerankFailurePolicy,
+        description: z.string(),
+      }),
+    ),
+  }),
+  evaluation: z.strictObject({
+    promptVersion: z.string(),
+    retrievalMetricVersion: z.string(),
+    abstentionMetricVersion: z.string(),
+    comparisonRule: z.string(),
+    resamplingRule,
+    metrics: z.array(metricDefinitionDoc),
+  }),
+});
+export type DocumentationPayload = z.infer<typeof documentationPayload>;

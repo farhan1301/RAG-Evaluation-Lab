@@ -84,7 +84,7 @@ function Navigation() {
     return () => document.removeEventListener('keydown', closeOnEscape);
   }, [open]);
   return (
-    <header className="border-b bg-card">
+    <header className="border-b bg-card print:hidden">
       <div className="mx-auto flex max-w-screen-2xl flex-wrap items-center justify-between gap-3 px-4 py-3 lg:px-8">
         <Link
           to="/"
@@ -150,7 +150,7 @@ function Shell() {
     <>
       <a
         href="#main"
-        className="sr-only focus:not-sr-only focus:absolute focus:z-50 focus:bg-card focus:p-3"
+        className="sr-only focus:not-sr-only focus:absolute focus:z-50 focus:bg-card focus:p-3 print:hidden"
       >
         Skip to content
       </a>

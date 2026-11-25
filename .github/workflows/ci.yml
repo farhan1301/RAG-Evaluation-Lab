@@ -54,3 +54,16 @@ jobs:
         env:
           QDRANT_URL: http://127.0.0.1:6333
         run: npm test -- tests/qdrant-integration.test.ts
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.22.3"
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run build
+      - run: npm run test:e2e

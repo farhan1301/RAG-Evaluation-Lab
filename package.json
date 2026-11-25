@@ -16,18 +16,20 @@
     "dev:backend": "npm run dev -w rag-eval-backend",
     "build": "npm run build --workspaces --if-present && node scripts/check-startup.mjs",
     "lint": "biome lint . && biome format .",
-    "typecheck": "tsc -p packages/contracts/tsconfig.json && tsc -p backend/tsconfig.json --noEmit && tsc -p frontend/tsconfig.json && tsc -p frontend/tsconfig.node.json && tsc -p tests/tsconfig.json",
+    "typecheck": "tsc -p packages/contracts/tsconfig.json && tsc -p backend/tsconfig.json --noEmit && tsc -p frontend/tsconfig.json && tsc -p frontend/tsconfig.node.json && tsc -p tests/tsconfig.json && tsc -p e2e/tsconfig.json",
     "test": "vitest run",
+    "test:e2e": "playwright test",
     "format": "biome format --write .",
     "dev:worker": "npm run dev:worker -w rag-eval-backend",
     "start:worker": "npm run start:worker -w rag-eval-backend"
   },
   "devDependencies": {
-    "typescript": "7.0.2",
-    "tsx": "4.23.15",
-    "vitest": "5.1.1",
     "@biomejs/biome": "2.6.9",
-    "@types/node": "26.6.6"
+    "@playwright/test": "1.65.1",
+    "@types/node": "26.6.6",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2",
+    "vitest": "5.1.1"
   },
   "overrides": {
     "@qdrant/js-client-rest": {

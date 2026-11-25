@@ -260,10 +260,15 @@ export function RetrievalPreviewPanel({
             }}
           >
             <div className="grid gap-3 md:grid-cols-4">
-              <label className="block text-sm md:col-span-2">
-                Index generation
+              <div className="md:col-span-2">
+                <label
+                  htmlFor="retrieval-preview-index"
+                  className="block text-sm"
+                >
+                  Index generation
+                </label>
                 <select
-                  aria-label="Preview index generation"
+                  id="retrieval-preview-index"
                   className="mt-1 block w-full rounded border bg-background p-2 text-sm"
                   value={activeIndexId}
                   onChange={(e) => setSelectedIndexId(e.target.value)}
@@ -275,12 +280,17 @@ export function RetrievalPreviewPanel({
                     </option>
                   ))}
                 </select>
-              </label>
+              </div>
 
-              <label className="block text-sm">
-                Search mode
+              <div>
+                <label
+                  htmlFor="retrieval-preview-mode"
+                  className="block text-sm"
+                >
+                  Search mode
+                </label>
                 <select
-                  aria-label="Preview search mode"
+                  id="retrieval-preview-mode"
                   className="mt-1 block w-full rounded border bg-background p-2 text-sm"
                   value={mode}
                   onChange={(e) =>
@@ -301,16 +311,18 @@ export function RetrievalPreviewPanel({
                     Hybrid (RRF)
                   </option>
                 </select>
-              </label>
+              </div>
 
-              <label
-                htmlFor="retrieval-preview-top-k"
-                className="block text-sm"
-              >
-                Top-K
+              <div>
+                <label
+                  htmlFor="retrieval-preview-top-k"
+                  className="block text-sm"
+                >
+                  Top-K
+                </label>
                 <Input
                   id="retrieval-preview-top-k"
-                  aria-label="Preview top-K"
+                  className="mt-1"
                   type="number"
                   min={1}
                   max={20}
@@ -321,12 +333,15 @@ export function RetrievalPreviewPanel({
                     )
                   }
                 />
-              </label>
+              </div>
             </div>
 
             <div className="flex flex-wrap gap-2">
+              <label htmlFor="retrieval-preview-query" className="sr-only">
+                Preview query
+              </label>
               <Input
-                aria-label="Preview query"
+                id="retrieval-preview-query"
                 className="flex-1 min-w-56"
                 placeholder="Enter a test query to inspect ranked chunks…"
                 value={queryText}

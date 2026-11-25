@@ -61,9 +61,17 @@ it('exposes safe capabilities and process/database health with zero credentials'
     c.capabilities.parse((await send(api, 'GET', '/api/v1/capabilities')).body)
       .workerOnline,
   ).toBe(true);
-  expect((await send(api, 'POST', '/api/answer', {})).body).toMatchObject({
-    error: { code: 'missing_capability' },
-  });
+  for (const legacyPath of [
+    '/api/parse',
+    '/api/chunks',
+    '/api/search',
+    '/api/answer',
+    '/api/judge',
+  ]) {
+    const removed = await send(api, 'POST', legacyPath, {});
+    expect(removed.status).toBe(404);
+    expect(removed.body).toMatchObject({ error: { code: 'not_found' } });
+  }
 });
 
 it('supports conditional dataset/task/grade CRUD, archive, revision history and CSV import', async () => {

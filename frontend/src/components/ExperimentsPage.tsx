@@ -314,10 +314,15 @@ export function ExperimentsPage() {
                 )}
               </div>
 
-              <label className="block text-sm">
-                Execution mode
+              <div>
+                <label
+                  htmlFor="experiment-execution-mode"
+                  className="block text-sm"
+                >
+                  Execution mode
+                </label>
                 <select
-                  aria-label="Execution mode"
+                  id="experiment-execution-mode"
                   className="mt-1 block w-full rounded border bg-background p-2 text-sm"
                   value={mode}
                   onChange={(e) => setMode(c.runMode.parse(e.target.value))}
@@ -330,30 +335,36 @@ export function ExperimentsPage() {
                     {!hasChat ? ' — configure chat profile' : ''}
                   </option>
                 </select>
-              </label>
+              </div>
 
-              <label htmlFor="experiment-run-name" className="block text-sm">
-                Run name (optional)
+              <div>
+                <label htmlFor="experiment-run-name" className="block text-sm">
+                  Run name (optional)
+                </label>
                 <Input
                   id="experiment-run-name"
+                  className="mt-1"
                   value={runName}
                   onChange={(e) => setRunName(e.target.value)}
                   placeholder="e.g. Keyword vs Hybrid baseline"
                 />
-              </label>
+              </div>
             </div>
 
             {mode === 'full_rag' && (
-              <label className="flex items-center gap-2 text-sm">
+              <div className="flex items-center gap-2 text-sm">
                 <input
+                  id="experiment-judge-enabled"
                   type="checkbox"
                   checked={judgeEnabled && hasJudge}
                   disabled={!hasJudge}
                   onChange={(e) => setJudgeEnabled(e.target.checked)}
                 />
-                Run structured LLM-judge rubrics
-                {!hasJudge && ' (configure a judge profile to enable)'}
-              </label>
+                <label htmlFor="experiment-judge-enabled">
+                  Run structured LLM-judge rubrics
+                  {!hasJudge && ' (configure a judge profile to enable)'}
+                </label>
+              </div>
             )}
 
             <div className="space-y-2">
@@ -374,13 +385,15 @@ export function ExperimentsPage() {
                   {savedPipelines.map((pl) => {
                     const checked = selectedPipelineIds.includes(pl.id);
                     const isBase = effectiveBaseline === pl.id;
+                    const checkboxId = `experiment-pipeline-${pl.id}`;
                     return (
                       <div
                         key={pl.id}
                         className="flex items-center justify-between gap-2 rounded border p-2.5 text-sm"
                       >
-                        <label className="flex items-center gap-2">
+                        <div className="flex items-center gap-2">
                           <input
+                            id={checkboxId}
                             type="checkbox"
                             checked={checked}
                             onChange={(e) => {
@@ -391,12 +404,15 @@ export function ExperimentsPage() {
                               );
                             }}
                           />
-                          <span>
+                          <label
+                            htmlFor={checkboxId}
+                            className="cursor-pointer"
+                          >
                             <strong>{pl.name}</strong> (r{pl.revision} ·{' '}
                             {pl.config.retriever.mode} · topK{' '}
                             {pl.config.retriever.topK})
-                          </span>
-                        </label>
+                          </label>
+                        </div>
                         {checked && (
                           <Button
                             type="button"
@@ -460,7 +476,9 @@ export function ExperimentsPage() {
                         <RotateCcw size={14} aria-hidden="true" /> Retry run
                       </Button>
                     )}
-                    {activeRun.state === 'succeeded' && (
+                    {['succeeded', 'failed', 'cancelled'].includes(
+                      activeRun.state,
+                    ) && (
                       <Button asChild size="sm" variant="outline">
                         <Link to={reportPath(activeRun.id)} className="gap-1.5">
                           <FileText size={14} aria-hidden="true" /> Open Report
@@ -711,10 +729,10 @@ export function ExperimentsPage() {
             <CardHeader>
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <CardTitle>Per-Task Evidence &amp; Observations</CardTitle>
-                <label className="flex items-center gap-2 text-sm">
-                  Pipeline
+                <div className="flex items-center gap-2 text-sm">
+                  <label htmlFor="experiment-inspect-pipeline">Pipeline</label>
                   <select
-                    aria-label="Inspect pipeline tasks"
+                    id="experiment-inspect-pipeline"
                     className="rounded border bg-background p-1.5 text-sm"
                     value={inspectedPipelineId}
                     onChange={(e) => setInspectedPipelineId(e.target.value)}
@@ -725,7 +743,7 @@ export function ExperimentsPage() {
                       </option>
                     ))}
                   </select>
-                </label>
+                </div>
               </div>
             </CardHeader>
             <CardContent className="space-y-4">

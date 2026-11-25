@@ -34,11 +34,17 @@ export function send(
   }>((resolve, reject) => {
     res.end = (chunk?: Buffer | string | (() => void)) => {
       const text = typeof chunk === 'function' ? '' : chunk?.toString() || '';
+      const contentType = String(res.getHeader('content-type') ?? '');
       try {
+        const body = !text
+          ? undefined
+          : contentType.includes('application/json') || !contentType
+            ? JSON.parse(text)
+            : text;
         resolve({
           status: res.statusCode,
           headers: res.getHeaders(),
-          body: text ? JSON.parse(text) : undefined,
+          body,
         });
       } catch (err) {
         reject(err);

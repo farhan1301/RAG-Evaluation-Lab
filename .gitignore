@@ -10,3 +10,5 @@ coverage/
 *.log
 logs/
 /backend/data/
+playwright-report/
+test-results/

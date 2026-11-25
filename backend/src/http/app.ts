@@ -14,7 +14,7 @@ import { QdrantStore } from '../retrieval/qdrant.js';
 import { RetrievalService } from '../retrieval/service.js';
 import { experimentsRouter } from './experiments.js';
 import { indexesRouter } from './indexes.js';
-import { legacyRouter } from './legacy.js';
+import { reportingRouter } from './reporting.js';
 import { definitionsRouter, InputError } from './routes.js';
 import { uploadsRouter } from './uploads.js';
 
@@ -118,7 +118,7 @@ export function createApp({
         'Access-Control-Allow-Headers':
           'Content-Type, If-Match, Idempotency-Key',
         'Access-Control-Expose-Headers':
-          'ETag, Location, X-Request-ID, Retry-After',
+          'ETag, Location, X-Request-ID, Retry-After, Content-Disposition',
       });
     }
     if (req.method === 'OPTIONS') {
@@ -171,7 +171,8 @@ export function createApp({
         'Expected application/json.',
       );
     const large =
-      req.method === 'POST' && ['/api/chunks', '/api/judge'].includes(req.path);
+      req.method === 'POST' &&
+      /^\/api\/v1\/datasets\/[^/]+\/task-imports$/.test(req.path);
     (large ? documents : regular)(req, res, next);
   });
   app.use(
@@ -180,7 +181,7 @@ export function createApp({
   );
   app.use('/api/v1', indexesRouter(indexes, retrieval, providers, config));
   app.use('/api/v1', experimentsRouter(runs, config));
-  app.use('/api', legacyRouter(config, providers, qdrant));
+  app.use('/api/v1', reportingRouter(runs, datasets, config, now));
   app.use(() => {
     throw new ApiError(404, 'not_found', 'Route not found.');
   });

@@ -54,8 +54,11 @@ export function experimentsRouter(runs: Runs, config: Config) {
   });
 
   router.get('/runs', (req, res) => {
-    const { limit, cursor, experimentId } = parse(c.runListQuery, req.query);
-    res.json(runs.listRuns(limit, cursor, experimentId));
+    const { limit, cursor, experimentId, datasetId, state } = parse(
+      c.runListQuery,
+      req.query,
+    );
+    res.json(runs.listRuns(limit, cursor, { experimentId, datasetId, state }));
   });
 
   router.get('/runs/:id', (req, res) => {

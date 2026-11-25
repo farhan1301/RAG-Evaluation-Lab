@@ -690,12 +690,28 @@ export class Runs {
     });
   }
 
-  listRuns(limit: number, cursor?: string, experimentId?: string) {
+  listRuns(
+    limit: number,
+    cursor?: string,
+    filters?:
+      | string
+      | { experimentId?: string; datasetId?: string; state?: string },
+  ) {
+    const normalized =
+      typeof filters === 'string' ? { experimentId: filters } : (filters ?? {});
     const clauses: string[] = [];
     const params: SQLInputValue[] = [];
-    if (experimentId) {
+    if (normalized.experimentId) {
       clauses.push('experiment_id = ?');
-      params.push(experimentId);
+      params.push(normalized.experimentId);
+    }
+    if (normalized.datasetId) {
+      clauses.push('dataset_id = ?');
+      params.push(normalized.datasetId);
+    }
+    if (normalized.state) {
+      clauses.push('state = ?');
+      params.push(normalized.state);
     }
     if (cursor) {
       const sep = cursor.lastIndexOf('|');
@@ -1145,6 +1161,31 @@ export class Runs {
       items,
       nextCursor: rows.length > limit ? String(cursor + limit) : null,
     };
+  }
+
+  listAllRunTasks(runId: string, pipelineId?: string): RunTaskDetail[] {
+    const exists = this.db
+      .prepare('SELECT 1 FROM runs WHERE id = ?')
+      .get(runId);
+    if (!exists) return missing();
+    const params: SQLInputValue[] = [runId];
+    const clauses = ['rt.run_id = ?'];
+    if (pipelineId) {
+      clauses.push('rt.pipeline_id = ?');
+      params.push(pipelineId);
+    }
+    const rows = this.db
+      .prepare(
+        `SELECT rt.*, rp.pipeline_name AS pipelineName,
+                tv.fields AS taskFields, tv.pool AS taskPool
+         FROM run_tasks rt
+         JOIN run_pipelines rp ON rp.run_id = rt.run_id AND rp.pipeline_id = rt.pipeline_id
+         JOIN task_versions tv ON tv.id = rt.task_version_id
+         WHERE ${clauses.join(' AND ')}
+         ORDER BY rp.ordinal ASC, rt.ordinal ASC`,
+      )
+      .all(...params);
+    return rows.map((r) => this.hydrateRunTask(r));
   }
 
   getRunTask(runId: string, taskOrRunTaskId: string): RunTaskDetail[] {

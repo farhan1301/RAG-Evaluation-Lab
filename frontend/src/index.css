@@ -83,3 +83,101 @@
     @apply mx-auto px-4 py-6 sm:px-8 sm:py-8;
   }
 }
+
+@page {
+  margin: 14mm;
+}
+
+@media print {
+  :root,
+  .dark {
+    color-scheme: light;
+    --canvas: #ffffff;
+    --surface: #ffffff;
+    --ink: #111827;
+    --subtle: #374151;
+    --soft: #f3f4f6;
+    --line: #d1d5db;
+    --control: #6b7280;
+    --brand: #096759;
+    --on-brand: #ffffff;
+    --tint: #e1f1eb;
+    --danger: #991b1b;
+  }
+
+  body {
+    background: #ffffff;
+    color: #111827;
+    font-size: 10pt;
+    line-height: 1.4;
+  }
+
+  header,
+  nav,
+  .no-print {
+    display: none;
+  }
+
+  main {
+    margin: 0;
+    padding: 0;
+  }
+
+  .print-report {
+    padding: 0;
+    background: #ffffff;
+  }
+
+  .print-report .overflow-x-auto {
+    overflow: visible;
+  }
+
+  .print-card {
+    box-shadow: none;
+    border: 1px solid #d1d5db;
+    background: #ffffff;
+  }
+
+  .print-avoid-break {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  .print-page-break {
+    break-before: page;
+    page-break-before: always;
+  }
+
+  .print-only-block {
+    display: block;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    break-after: avoid;
+    page-break-after: avoid;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 8.5pt;
+  }
+
+  thead {
+    display: table-header-group;
+  }
+
+  tr {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  th,
+  td {
+    border-color: #d1d5db;
+    word-break: break-word;
+  }
+}

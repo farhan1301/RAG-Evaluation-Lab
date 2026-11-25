@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { QdrantClient } from '@qdrant/js-client-rest';
 import type { MetadataFilters } from '@rag-eval/contracts';
 import { sha256 } from '../ingestion/chunks.js';
@@ -27,18 +26,6 @@ export interface GenerationVectorPoint {
 export interface DenseSearchHit {
   chunkId: string;
   pointId: string;
-  score: number;
-  payload: Record<string, unknown>;
-}
-
-export interface LegacyPoint {
-  id: string;
-  vector: number[];
-  payload: Record<string, unknown>;
-}
-
-export interface LegacySearchHit {
-  id: string;
   score: number;
   payload: Record<string, unknown>;
 }
@@ -271,14 +258,6 @@ export class QdrantStore {
     return `${base}${suffix}`;
   }
 
-  collectionForLegacyPipeline(dimensions: number, pipelineId: string) {
-    const scope = createHash('sha256')
-      .update(JSON.stringify([this.collectionPrefix, dimensions, pipelineId]))
-      .digest('hex')
-      .slice(0, 32);
-    return `${sanitizeCollection(this.collectionPrefix).slice(0, 31)}-${scope}`;
-  }
-
   private async verifyCollectionDimensions(
     collection: string,
     dimensions: number,
@@ -451,75 +430,5 @@ export class QdrantStore {
 
   async deleteCollection(collectionName: string) {
     await this.client.deleteCollection(sanitizeCollection(collectionName));
-  }
-
-  // Thin legacy adapters for Phase 5 transition (removed with ExperimentsPage orchestration in Phase 6/7).
-  async ensureLegacyCollection(collectionName: string, dimensions: number) {
-    const collection = sanitizeCollection(collectionName);
-    const { exists } = await this.client.collectionExists(collection);
-    if (!exists) {
-      await this.client.createCollection(collection, {
-        vectors: { size: dimensions, distance: 'Cosine' },
-      });
-    }
-    await this.client.createPayloadIndex(collection, {
-      field_name: 'pipelineId',
-      field_schema: 'keyword',
-      wait: true,
-    });
-    return collection;
-  }
-
-  async replaceLegacyPipelinePoints(
-    collectionName: string,
-    pipelineId: string,
-    points: LegacyPoint[],
-  ) {
-    const trimmed = pipelineId.trim();
-    if (!trimmed) {
-      throw new ProviderError(
-        'invalid_input',
-        'A pipelineId filter is required.',
-      );
-    }
-    const collection = sanitizeCollection(collectionName);
-    await this.client.delete(collection, {
-      wait: true,
-      filter: { must: [{ key: 'pipelineId', match: { value: trimmed } }] },
-    });
-    for (let i = 0; i < points.length; i += 100) {
-      await this.client.upsert(collection, {
-        wait: true,
-        points: points.slice(i, i + 100),
-      });
-    }
-  }
-
-  async searchLegacyPipeline(
-    collectionName: string,
-    vector: number[],
-    limit: number,
-    pipelineId: string,
-  ): Promise<LegacySearchHit[]> {
-    const trimmed = pipelineId.trim();
-    if (!trimmed) {
-      throw new ProviderError(
-        'invalid_input',
-        'A pipelineId filter is required.',
-      );
-    }
-    const collection = sanitizeCollection(collectionName);
-    const response = await this.client.query(collection, {
-      query: vector,
-      limit: Math.max(1, Math.min(50, limit)),
-      filter: { must: [{ key: 'pipelineId', match: { value: trimmed } }] },
-      with_payload: true,
-      with_vector: false,
-    });
-    return (response.points ?? []).map((point) => ({
-      id: String(point.id),
-      score: point.score,
-      payload: (point.payload ?? {}) as Record<string, unknown>,
-    }));
   }
 }

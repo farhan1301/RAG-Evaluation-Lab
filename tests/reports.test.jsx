@@ -3,13 +3,17 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, expect, it, vi } from 'vitest';
 import * as c from '@rag-eval/contracts';
+import { readConfig } from '../backend/src/config/env';
+import { buildDocumentationPayload } from '../backend/src/reporting/documentation';
+import { formatRunExportMarkdown } from '../backend/src/reporting/export';
+import { DocumentationPage } from '../frontend/src/components/DocumentationPage';
 import { HistoryPage } from '../frontend/src/components/HistoryPage';
 import { ReportsPage } from '../frontend/src/components/ReportsPage';
 
-const { downloads } = vi.hoisted(() => ({ downloads: [] }));
+const { clicks } = vi.hoisted(() => ({ clicks: [] }));
 vi.mock('../frontend/src/components/ui/button', () => ({
   Button: ({ children, onClick }) => {
-    if (onClick) downloads.push(onClick);
+    if (onClick) clicks.push(onClick);
     return children;
   },
 }));
@@ -257,10 +261,10 @@ function createHydratedClient() {
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
-  downloads.length = 0;
+  clicks.length = 0;
 });
 
-it('retains unavailable judge metrics, coverage and unknown pricing in the report and markdown export', async () => {
+it('retains unavailable judge metrics, coverage and unknown pricing in the report and server-backed markdown/json export', async () => {
   const cache = createHydratedClient();
   const markup = renderToStaticMarkup(
     <QueryClientProvider client={cache}>
@@ -278,8 +282,32 @@ it('retains unavailable judge metrics, coverage and unknown pricing in the repor
   expect(markup).toContain('Unavailable');
   expect(markup).toContain('Unknown');
 
+  const exportPayload = c.runExportJson.parse({
+    schemaVersion: 1,
+    exportedAt: '2026-01-01T00:00:05.000Z',
+    run: fixtureRun,
+    comparisons: [],
+    tasks: [],
+  });
+  const serverMarkdown = formatRunExportMarkdown(exportPayload);
+
   const blobs = [];
-  vi.stubGlobal('window', {});
+  const printSpy = vi.fn();
+  const fetchSpy = vi.fn(async (url) => {
+    if (String(url).includes('format=json')) {
+      return new Response(JSON.stringify(exportPayload), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    return new Response(serverMarkdown, {
+      status: 200,
+      headers: { 'content-type': 'text/markdown; charset=utf-8' },
+    });
+  });
+
+  vi.stubGlobal('fetch', fetchSpy);
+  vi.stubGlobal('window', { print: printSpy });
   vi.stubGlobal('document', {
     createElement: () => ({ click: vi.fn() }),
     body: { appendChild: vi.fn(), removeChild: vi.fn() },
@@ -289,12 +317,32 @@ it('retains unavailable judge metrics, coverage and unknown pricing in the repor
     return 'blob:fixture';
   });
   vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
-  for (const download of downloads) download();
-  expect(blobs.map((blob) => blob.type)).toEqual(['text/markdown']);
+
+  // Trigger Export Markdown, Export JSON, and Print
+  for (const handler of clicks) {
+    await handler();
+  }
+  await vi.waitFor(() => {
+    expect(blobs).toHaveLength(2);
+  });
+  expect(fetchSpy).toHaveBeenCalledWith(
+    expect.stringContaining(`/api/v1/runs/${RUN_ID}/export?format=markdown`),
+  );
+  expect(fetchSpy).toHaveBeenCalledWith(
+    expect.stringContaining(`/api/v1/runs/${RUN_ID}/export?format=json`),
+  );
+  expect(printSpy).toHaveBeenCalledTimes(1);
+  expect(blobs.map((blob) => blob.type)).toEqual([
+    'text/markdown;charset=utf-8',
+    'application/json;charset=utf-8',
+  ]);
   const md = await blobs[0].text();
   expect(md).toContain('Faithfulness / groundedness');
   expect(md).toContain('Unavailable (0/1)');
   expect(md).toContain('Unknown');
+  const json = JSON.parse(await blobs[1].text());
+  expect(json.schemaVersion).toBe(1);
+  expect(json.run.id).toBe(RUN_ID);
   cache.clear();
 });
 
@@ -324,5 +372,25 @@ it('opens the run linked from History and rejects another run ID', () => {
   const missing = renderReport(`/reports/${OTHER_RUN_ID}`);
   expect(missing).toContain('Report unavailable');
   expect(missing).not.toContain('Pipeline Comparison Overview');
+  cache.clear();
+});
+
+it('renders DocumentationPage from derived server configuration and rubrics without hard-coded legacy models', () => {
+  const cache = new QueryClient();
+  cache.setQueryData(
+    ['documentation'],
+    buildDocumentationPayload(readConfig({}), true),
+  );
+  const html = renderToStaticMarkup(
+    <QueryClientProvider client={cache}>
+      <MemoryRouter>
+        <DocumentationPage />
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+  expect(html).toContain('Documentation sections');
+  expect(html).toContain('Reproducible RAG Evaluation Workflow');
+  expect(html).not.toContain('Cohere API Key');
+  expect(html).not.toContain('GPT-4o');
   cache.clear();
 });

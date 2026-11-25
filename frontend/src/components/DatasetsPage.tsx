@@ -23,9 +23,10 @@ function LabelEditor({ dataset, task }: { dataset: c.Dataset; task: c.Task }) {
     <details>
       <summary>Gold documents and relevance grades</summary>
       <fieldset disabled={write.isPending} className="space-y-2 py-2">
-        <label>
-          Labeling pool{' '}
+        <div>
+          <label htmlFor={`${task.id}-labeling-pool`}>Labeling pool</label>{' '}
           <select
+            id={`${task.id}-labeling-pool`}
             value={draft.value.pool}
             onChange={(e) =>
               draft.change({
@@ -37,11 +38,12 @@ function LabelEditor({ dataset, task }: { dataset: c.Dataset; task: c.Task }) {
             <option value="partial">Partial</option>
             <option value="complete">Complete</option>
           </select>
-        </label>
+        </div>
         {dataset.documents.map((doc) => (
-          <label key={doc.id} className="block">
-            {doc.name}{' '}
+          <div key={doc.id}>
+            <label htmlFor={`${task.id}-qrel-${doc.id}`}>{doc.name}</label>{' '}
             <select
+              id={`${task.id}-qrel-${doc.id}`}
               value={
                 draft.value.qrels.find((row) => row.documentId === doc.id)
                   ?.grade ?? ''
@@ -65,7 +67,7 @@ function LabelEditor({ dataset, task }: { dataset: c.Dataset; task: c.Task }) {
                 </option>
               ))}
             </select>
-          </label>
+          </div>
         ))}
         <EditorActions
           draft={draft}
@@ -184,16 +186,19 @@ function TaskEditor({ dataset, task }: { dataset: c.Dataset; task?: c.Task }) {
             }
           />
         </label>
-        <label className="flex items-center gap-2">
+        <div className="flex items-center gap-2">
           <input
+            id={`${task?.id ?? dataset.id}-answerable`}
             type="checkbox"
             checked={draft.value.answerable}
             onChange={(e) =>
               draft.change({ ...draft.value, answerable: e.target.checked })
             }
           />
-          Answerable from this dataset
-        </label>
+          <label htmlFor={`${task?.id ?? dataset.id}-answerable`}>
+            Answerable from this dataset
+          </label>
+        </div>
         <EditorActions
           draft={draft}
           pending={write.isPending}
@@ -264,9 +269,6 @@ function DocumentProgress({
         crypto.randomUUID(),
       );
       cache.setQueryData(['jobs', next.id], next);
-      await cache.invalidateQueries({
-        queryKey: ['runner-document', doc.versionId],
-      });
       return request(c.dataset, `datasets/${dataset.id}`);
     });
   }
@@ -373,9 +375,10 @@ function Documents({ dataset }: { dataset: c.Dataset }) {
         <CardTitle>Document Upload</CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
-        <label>
-          Parser{' '}
+        <div>
+          <label htmlFor={`${dataset.id}-parser`}>Parser</label>{' '}
           <select
+            id={`${dataset.id}-parser`}
             value={parser}
             disabled={write.isPending}
             onChange={(e) => setParser(c.parser.parse(e.target.value))}
@@ -388,7 +391,7 @@ function Documents({ dataset }: { dataset: c.Dataset }) {
               LlamaParse cloud (also supports DOCX)
             </option>
           </select>
-        </label>
+        </div>
         {parser === 'llama-parse' && (
           <p>
             Parsing sends the original document to LlamaParse and may incur a
@@ -697,9 +700,10 @@ export function DatasetsPage() {
           Load sample dataset
         </Button>
         {!!list.data?.length && (
-          <label>
-            Active dataset{' '}
+          <div className="flex items-center gap-2">
+            <label htmlFor="active-dataset-select">Active dataset</label>
             <select
+              id="active-dataset-select"
               className="rounded border p-2"
               value={id}
               onChange={(e) => select(e.target.value)}
@@ -710,7 +714,7 @@ export function DatasetsPage() {
                 </option>
               ))}
             </select>
-          </label>
+          </div>
         )}
       </div>
       {(list.isPending || (id && detail.isPending)) && (

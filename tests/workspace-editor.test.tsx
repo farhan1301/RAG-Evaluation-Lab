@@ -14,7 +14,6 @@ import { createApp } from '../backend/src/http/app';
 import { createLogger } from '../backend/src/lib/logger';
 import { DatasetsPage } from '../frontend/src/components/DatasetsPage';
 import { PipelinesPage } from '../frontend/src/components/PipelinesPage';
-import { useRunnerInputs } from '../frontend/src/data/legacyRunner';
 import {
   request,
   pipelineQuery,
@@ -91,20 +90,6 @@ it('reloads the editors and runner in a fresh Query client after a server restar
       ['capabilities'],
       await request(c.capabilities, 'capabilities'),
     );
-    for (const doc of saved.documents)
-      cache.setQueryData(
-        ['runner-document', doc.versionId],
-        await request(c.document, `datasets/${d.id}/documents/${doc.id}`),
-      );
-    function Runner() {
-      const inputs = useRunnerInputs();
-      return (
-        <p>
-          {inputs.pipelines[0].name} {inputs.documents[0].content}{' '}
-          {inputs.tasks.length} questions
-        </p>
-      );
-    }
     const render = (component: React.ReactNode) =>
       renderToStaticMarkup(
         <QueryClientProvider client={cache}>
@@ -124,16 +109,6 @@ it('reloads the editors and runner in a fresh Query client after a server restar
     await expect(
       request(c.dataset, `datasets/${d.id}`, 'PATCH', { name: 'Stale' }, 1),
     ).rejects.toMatchObject({ code: 'stale_revision' });
-    const runner = render(<Runner />);
-    expect(runner).toContain('Saved pipeline');
-    expect(runner).not.toContain('Unsaved');
-    expect(runner).toContain('10 questions');
-    expect(runner).toContain(
-      cache.getQueryData<c.SavedDocument>([
-        'runner-document',
-        saved.documents[0].versionId,
-      ])?.content,
-    );
     cache.clear();
   } finally {
     db.close();

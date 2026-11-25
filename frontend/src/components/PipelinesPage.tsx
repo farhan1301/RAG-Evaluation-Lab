@@ -65,48 +65,54 @@ function PipelineEditor({
   const selectProfile = (
     role: c.Role,
     stage: 'llm' | 'judge' | 'embedding',
-  ) => (
-    <label className="block">
-      {role === 'chat'
-        ? 'Answer model'
-        : role === 'judge'
-          ? 'Judge model'
-          : 'Embedding model'}
-      <select
-        className="block rounded border p-2"
-        value={config[stage].model}
-        onChange={(e) => {
-          const model = e.target.value,
-            selected = profiles.find(
-              (p) => p.role === role && (!model || p.model === model),
-            );
-          update({
-            [stage]: {
-              ...config[stage],
-              model,
-              ...(stage === 'llm' &&
-                selected &&
-                !selected.options.includes('temperature') && {
-                  temperature: 1,
-                }),
-            },
-          });
-        }}
-      >
-        <option value="">
-          Server default (
-          {profiles.find((p) => p.role === role)?.model ?? 'unconfigured'})
-        </option>
-        {profiles
-          .filter((p) => p.role === role)
-          .map((p) => (
-            <option key={p.name} value={p.model}>
-              {p.name}
-            </option>
-          ))}
-      </select>
-    </label>
-  );
+  ) => {
+    const fieldId = `${saved.id}-${stage}-model`;
+    return (
+      <div>
+        <label htmlFor={fieldId} className="block">
+          {role === 'chat'
+            ? 'Answer model'
+            : role === 'judge'
+              ? 'Judge model'
+              : 'Embedding model'}
+        </label>
+        <select
+          id={fieldId}
+          className="block rounded border p-2"
+          value={config[stage].model}
+          onChange={(e) => {
+            const model = e.target.value,
+              selected = profiles.find(
+                (p) => p.role === role && (!model || p.model === model),
+              );
+            update({
+              [stage]: {
+                ...config[stage],
+                model,
+                ...(stage === 'llm' &&
+                  selected &&
+                  !selected.options.includes('temperature') && {
+                    temperature: 1,
+                  }),
+              },
+            });
+          }}
+        >
+          <option value="">
+            Server default (
+            {profiles.find((p) => p.role === role)?.model ?? 'unconfigured'})
+          </option>
+          {profiles
+            .filter((p) => p.role === role)
+            .map((p) => (
+              <option key={p.name} value={p.model}>
+                {p.name}
+              </option>
+            ))}
+        </select>
+      </div>
+    );
+  };
   return (
     <Card>
       <CardHeader>
@@ -142,9 +148,12 @@ function PipelineEditor({
             <summary>Parsing and chunking</summary>
             <div className="space-y-2 p-2">
               <p>Choose the document parser on the Datasets page.</p>
-              <label>
-                Chunking strategy{' '}
+              <div>
+                <label htmlFor={`${saved.id}-chunking-strategy`}>
+                  Chunking strategy
+                </label>{' '}
                 <select
+                  id={`${saved.id}-chunking-strategy`}
                   value={config.chunking.strategy}
                   onChange={(e) =>
                     update({
@@ -162,7 +171,7 @@ function PipelineEditor({
                   <option value="heading-aware">Heading aware</option>
                   <option value="table-aware">Table aware</option>
                 </select>
-              </label>
+              </div>
               <label
                 htmlFor={`${saved.id}-chunk-size-tokens`}
                 className="block"
@@ -207,9 +216,12 @@ function PipelineEditor({
           <details open>
             <summary>Embedding and retrieval</summary>
             <div className="space-y-2 p-2">
-              <label className="block">
-                Retrieval mode{' '}
+              <div>
+                <label htmlFor={`${saved.id}-retrieval-mode`} className="block">
+                  Retrieval mode
+                </label>
                 <select
+                  id={`${saved.id}-retrieval-mode`}
                   className="block rounded border p-2"
                   value={config.retriever.mode}
                   onChange={(e) =>
@@ -225,7 +237,7 @@ function PipelineEditor({
                   <option value="dense">Dense (Qdrant cosine)</option>
                   <option value="hybrid">Hybrid (RRF fusion)</option>
                 </select>
-              </label>
+              </div>
               {selectProfile('embedding', 'embedding')}
               <label htmlFor={`${saved.id}-top-k-results`} className="block">
                 Top-K results
@@ -245,8 +257,9 @@ function PipelineEditor({
                   }
                 />
               </label>
-              <label className="flex items-center gap-2 text-sm">
+              <div className="flex items-center gap-2 text-sm">
                 <input
+                  id={`${saved.id}-reranker-enabled`}
                   type="checkbox"
                   checked={config.reranker.enabled}
                   disabled={!profiles.some((p) => p.role === 'rerank')}
@@ -259,14 +272,22 @@ function PipelineEditor({
                     })
                   }
                 />
-                Enable HTTP reranker
-                {!profiles.some((p) => p.role === 'rerank') &&
-                  ' (configure RERANK_BASE_URL & RERANK_MODEL)'}
-              </label>
+                <label htmlFor={`${saved.id}-reranker-enabled`}>
+                  Enable HTTP reranker
+                  {!profiles.some((p) => p.role === 'rerank') &&
+                    ' (configure RERANK_BASE_URL & RERANK_MODEL)'}
+                </label>
+              </div>
               {config.reranker.enabled && (
-                <label className="block text-sm">
-                  Rerank failure policy{' '}
+                <div>
+                  <label
+                    htmlFor={`${saved.id}-rerank-failure-policy`}
+                    className="block text-sm"
+                  >
+                    Rerank failure policy
+                  </label>
                   <select
+                    id={`${saved.id}-rerank-failure-policy`}
                     className="block rounded border p-2"
                     value={config.reranker.failurePolicy}
                     onChange={(e) =>
@@ -283,7 +304,7 @@ function PipelineEditor({
                     <option value="fail">Fail request</option>
                     <option value="fallback">Fallback to pre-rerank</option>
                   </select>
-                </label>
+                </div>
               )}
             </div>
           </details>
