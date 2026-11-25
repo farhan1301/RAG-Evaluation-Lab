@@ -20,11 +20,13 @@ import {
 } from '../ingestion/chunks.js';
 
 const parseFields =
-  "id, 'parse' AS kind, version_id AS versionId, parser, NULL AS generationId, NULL AS runId, state, stage, attempt, message, parent_id AS parentId, artifact_id AS artifactId";
+  "id, 'parse' AS kind, version_id AS versionId, parser, NULL AS generationId, NULL AS runId, NULL AS batchId, state, stage, attempt, message, parent_id AS parentId, artifact_id AS artifactId";
 const indexFields =
-  "id, 'index' AS kind, NULL AS versionId, NULL AS parser, generation_id AS generationId, NULL AS runId, state, stage, attempt, message, parent_id AS parentId, NULL AS artifactId";
+  "id, 'index' AS kind, NULL AS versionId, NULL AS parser, generation_id AS generationId, NULL AS runId, NULL AS batchId, state, stage, attempt, message, parent_id AS parentId, NULL AS artifactId";
 const runFields =
-  "id, 'run' AS kind, NULL AS versionId, NULL AS parser, NULL AS generationId, run_id AS runId, state, stage, attempt, message, parent_id AS parentId, NULL AS artifactId";
+  "id, 'run' AS kind, NULL AS versionId, NULL AS parser, NULL AS generationId, run_id AS runId, NULL AS batchId, state, stage, attempt, message, parent_id AS parentId, NULL AS artifactId";
+const generationFields =
+  "id, 'generate' AS kind, NULL AS versionId, NULL AS parser, NULL AS generationId, NULL AS runId, batch_id AS batchId, state, stage, attempt, message, parent_id AS parentId, NULL AS artifactId";
 export interface Lease {
   id: string;
   token: number;
@@ -57,6 +59,10 @@ export class Jobs {
       .prepare(`SELECT ${runFields} FROM run_jobs WHERE id=?`)
       .get(id);
     if (runRow) return this.parseRow(runRow);
+    const genRow = this.db
+      .prepare(`SELECT ${generationFields} FROM generation_jobs WHERE id=?`)
+      .get(id);
+    if (genRow) return this.parseRow(genRow);
     return missing();
   }
 
@@ -67,7 +73,9 @@ export class Jobs {
         ? 'index_job_events'
         : found.kind === 'run'
           ? 'run_job_events'
-          : 'job_events';
+          : found.kind === 'generate'
+            ? 'generation_job_events'
+            : 'job_events';
     return this.db
       .prepare(
         `SELECT seq,state,stage,message,time FROM ${table} WHERE job_id=? AND seq>? ORDER BY seq LIMIT 100`,
@@ -96,6 +104,14 @@ export class Jobs {
     this.db
       .prepare(
         'INSERT INTO run_job_events(job_id,state,stage,message,time) SELECT id,state,stage,message,? FROM run_jobs WHERE id=?',
+      )
+      .run(this.now(), id);
+  }
+
+  private generationEvent(id: string) {
+    this.db
+      .prepare(
+        'INSERT INTO generation_job_events(job_id,state,stage,message,time) SELECT id,state,stage,message,? FROM generation_jobs WHERE id=?',
       )
       .run(this.now(), id);
   }
@@ -209,9 +225,72 @@ export class Jobs {
     return id;
   }
 
+  replayGeneration(key: string | null, hash: string) {
+    if (!key) return;
+    const row = this.db
+      .prepare(
+        'SELECT id,batch_id,request_hash FROM generation_jobs WHERE request_key=?',
+      )
+      .get(key);
+    if (row && row.request_hash !== hash)
+      throw new ApiError(
+        409,
+        'conflict',
+        'Idempotency key was used with different input.',
+      );
+    if (row)
+      return {
+        jobId: String(row.id),
+        batchId: String(row.batch_id),
+      };
+  }
+
+  // Caller owns the write transaction, including generation_batches creation.
+  enqueueGeneration(
+    batchId: string,
+    key: string | null = null,
+    hash: string | null = null,
+    parent: string | null = null,
+  ) {
+    const id = randomUUID(),
+      now = this.now();
+    this.db
+      .prepare(
+        "INSERT INTO generation_jobs(id,batch_id,state,stage,eligible,deadline,parent_id,request_key,request_hash) VALUES (?,?,'queued','waiting',?,?,?,?,?)",
+      )
+      .run(id, batchId, now, now + duration, parent, key, hash);
+    this.generationEvent(id);
+    return id;
+  }
+
   retry(id: string) {
     return transaction(this.db, () => {
       const previous = this.get(id);
+      if (previous.kind === 'generate') {
+        const child = this.db
+          .prepare('SELECT id FROM generation_jobs WHERE parent_id=?')
+          .get(id);
+        if (child) return this.get(String(child.id));
+        if (!['failed', 'cancelled'].includes(previous.state))
+          throw new ApiError(
+            409,
+            'conflict',
+            'Only a failed or cancelled job can be retried.',
+          );
+        const batchId = previous.batchId ?? missing();
+        this.db
+          .prepare(
+            "UPDATE generation_batches SET state='queued',stage='queued',completed_at=NULL,error_message=NULL WHERE id=?",
+          )
+          .run(batchId);
+        this.db
+          .prepare(
+            "UPDATE generation_batch_documents SET state='pending',error_message=NULL WHERE batch_id=? AND state!='succeeded'",
+          )
+          .run(batchId);
+        const next = this.enqueueGeneration(batchId, null, null, id);
+        return this.get(next);
+      }
       if (previous.kind === 'run') {
         const child = this.db
           .prepare('SELECT id FROM run_jobs WHERE parent_id=?')
@@ -322,6 +401,40 @@ export class Jobs {
   cancel(id: string) {
     return transaction(this.db, () => {
       const j = this.get(id);
+      if (j.kind === 'generate') {
+        if (j.state === 'queued' || j.state === 'running') {
+          const nextState =
+            j.state === 'queued' ? 'cancelled' : 'cancellation_requested';
+          this.db
+            .prepare(
+              'UPDATE generation_jobs SET state=?,message=NULL WHERE id=?',
+            )
+            .run(nextState, id);
+          if (j.batchId) {
+            if (j.state === 'queued') {
+              const nowIso = new Date(this.now()).toISOString();
+              this.db
+                .prepare(
+                  "UPDATE generation_batches SET state='cancelled',stage='cancelled',completed_at=?,error_message=? WHERE id=?",
+                )
+                .run(nowIso, 'Generation cancelled.', j.batchId);
+              this.db
+                .prepare(
+                  "UPDATE generation_batch_documents SET state='cancelled' WHERE batch_id=? AND state='pending'",
+                )
+                .run(j.batchId);
+            } else {
+              this.db
+                .prepare(
+                  "UPDATE generation_batches SET state='cancellation_requested' WHERE id=? AND state='running'",
+                )
+                .run(j.batchId);
+            }
+          }
+          this.generationEvent(id);
+        }
+        return this.get(id);
+      }
       if (j.kind === 'run') {
         if (j.state === 'queued' || j.state === 'running') {
           const nextState =
@@ -536,6 +649,61 @@ export class Jobs {
     });
   }
 
+  claimGeneration(): (Job & Lease & { batchId: string }) | undefined {
+    return transaction(this.db, () => {
+      const now = this.now();
+      for (const row of this.db
+        .prepare(`SELECT id,batch_id,state FROM generation_jobs WHERE state IN ('queued','running','cancellation_requested') AND
+        (deadline<=? OR (state!='queued' AND expires<=? AND (attempt>=? OR state='cancellation_requested')))`)
+        .all(now, now, attempts)) {
+        const cancelled = row.state === 'cancellation_requested';
+        const message = cancelled
+          ? null
+          : 'Generation deadline or attempt limit reached.';
+        this.db
+          .prepare('UPDATE generation_jobs SET state=?,message=? WHERE id=?')
+          .run(cancelled ? 'cancelled' : 'failed', message, row.id);
+        this.db
+          .prepare(
+            "UPDATE generation_batches SET state=?,stage=?,completed_at=?,error_message=? WHERE id=? AND state IN ('queued','running','cancellation_requested')",
+          )
+          .run(
+            cancelled ? 'cancelled' : 'failed',
+            cancelled ? 'cancelled' : 'failed',
+            new Date(now).toISOString(),
+            cancelled ? 'Generation cancelled.' : message,
+            row.batch_id,
+          );
+        if (cancelled) {
+          this.db
+            .prepare(
+              "UPDATE generation_batch_documents SET state='cancelled' WHERE batch_id=? AND state='pending'",
+            )
+            .run(row.batch_id);
+        }
+        this.generationEvent(String(row.id));
+      }
+      const row = this.db
+        .prepare(
+          `SELECT id FROM generation_jobs WHERE (state='queued' AND eligible<=?) OR (state='running' AND expires<=?) ORDER BY eligible,rowid LIMIT 1`,
+        )
+        .get(now, now);
+      if (!row) return;
+      const id = String(row.id);
+      const lease = this.db
+        .prepare(
+          "UPDATE generation_jobs SET state='running',message=NULL,attempt=attempt+1,token=token+1,expires=? WHERE id=? RETURNING token,batch_id",
+        )
+        .get(now + this.leaseMs, id);
+      this.generationEvent(id);
+      return {
+        ...this.get(id),
+        batchId: String(lease?.batch_id),
+        token: Number(lease?.token),
+      };
+    });
+  }
+
   private guard(l: Lease) {
     const row = this.db
       .prepare(
@@ -558,6 +726,15 @@ export class Jobs {
     const row = this.db
       .prepare(
         "SELECT 1 FROM run_jobs WHERE id=? AND token=? AND state='running' AND expires>? AND deadline>?",
+      )
+      .get(l.id, l.token, this.now(), this.now());
+    if (!row) throw new LostLease();
+  }
+
+  guardGeneration(l: Lease) {
+    const row = this.db
+      .prepare(
+        "SELECT 1 FROM generation_jobs WHERE id=? AND token=? AND state='running' AND expires>? AND deadline>?",
       )
       .get(l.id, l.token, this.now(), this.now());
     if (!row) throw new LostLease();
@@ -701,6 +878,90 @@ export class Jobs {
           l.id,
         );
       this.runEvent(l.id);
+      return String(updated?.state) === 'failed';
+    });
+  }
+
+  heartbeatGeneration(l: Lease) {
+    return transaction(this.db, () => {
+      const now = this.now();
+      const cancelled = this.db
+        .prepare(
+          "UPDATE generation_jobs SET state='cancelled' WHERE id=? AND token=? AND state='cancellation_requested' AND expires>?",
+        )
+        .run(l.id, l.token, now);
+      if (cancelled.changes) {
+        const row = this.db
+          .prepare('SELECT batch_id FROM generation_jobs WHERE id=?')
+          .get(l.id);
+        if (row?.batch_id) {
+          this.db
+            .prepare(
+              "UPDATE generation_batches SET state='cancelled',stage='cancelled',completed_at=?,error_message=? WHERE id=? AND state IN ('queued','running','cancellation_requested')",
+            )
+            .run(
+              new Date(now).toISOString(),
+              'Generation cancelled.',
+              row.batch_id,
+            );
+          this.db
+            .prepare(
+              "UPDATE generation_batch_documents SET state='cancelled' WHERE batch_id=? AND state='pending'",
+            )
+            .run(row.batch_id);
+        }
+        this.generationEvent(l.id);
+      } else if (
+        this.db
+          .prepare(
+            "UPDATE generation_jobs SET expires=? WHERE id=? AND token=? AND state='running' AND expires>? AND deadline>?",
+          )
+          .run(now + this.leaseMs, l.id, l.token, now, now).changes
+      )
+        return true;
+      return false;
+    });
+  }
+
+  checkpointGeneration(l: Lease, stage: string) {
+    transaction(this.db, () => {
+      this.guardGeneration(l);
+      this.db
+        .prepare('UPDATE generation_jobs SET stage=? WHERE id=?')
+        .run(stage, l.id);
+      this.generationEvent(l.id);
+    });
+  }
+
+  finishGeneration(l: Lease) {
+    transaction(this.db, () => {
+      this.guardGeneration(l);
+      this.db
+        .prepare(
+          "UPDATE generation_jobs SET state='succeeded',stage='complete' WHERE id=?",
+        )
+        .run(l.id);
+      this.generationEvent(l.id);
+    });
+  }
+
+  failGeneration(l: Lease, message: string, delay?: number) {
+    return transaction(this.db, () => {
+      this.guardGeneration(l);
+      const eligible = this.now() + Math.min(delay ?? 0, duration);
+      const updated = this.db
+        .prepare(
+          `UPDATE generation_jobs SET state=CASE WHEN ? AND attempt<? AND deadline>? THEN 'queued' ELSE 'failed' END,message=?,eligible=? WHERE id=? RETURNING state`,
+        )
+        .get(
+          Number(delay !== undefined),
+          attempts,
+          eligible,
+          message,
+          eligible,
+          l.id,
+        );
+      this.generationEvent(l.id);
       return String(updated?.state) === 'failed';
     });
   }

@@ -1,6 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import * as c from '@rag-eval/contracts';
 import type { Datasets } from '../db/datasets.js';
+import type { Generations } from '../db/generations.js';
 import type { Indexes } from '../db/indexes.js';
 import type { Pipelines } from '../db/pipelines.js';
 import type { Runs } from '../db/runs.js';
@@ -58,6 +59,7 @@ export function definitionsRouter(
   capabilities: c.Capabilities,
   indexes?: Indexes,
   runs?: Runs,
+  generations?: Generations,
 ) {
   const router = Router();
   for (const param of ['id', 'taskId', 'docId'])
@@ -308,6 +310,19 @@ export function definitionsRouter(
             );
         }
       }
+    }
+    if (previous.kind === 'generate' && previous.batchId && generations) {
+      const existingBatch = generations.getBatch(previous.batchId);
+      if (
+        !capabilities.profiles.some(
+          (pr) => pr.role === 'chat' && pr.model === existingBatch.model,
+        )
+      )
+        throw new ApiError(
+          422,
+          'missing_capability',
+          'The required chat profile is unavailable for retrying synthetic generation.',
+        );
     }
     const job = datasets.jobs.retry(req.params.id);
     res.location(`/api/v1/jobs/${job.id}`).status(202).json(job);

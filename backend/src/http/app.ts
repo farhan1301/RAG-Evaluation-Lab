@@ -4,6 +4,7 @@ import { trace, SpanStatusCode } from '@opentelemetry/api';
 import type { Logger } from 'pino';
 import type { Config } from '../config/env.js';
 import type { Datasets } from '../db/datasets.js';
+import { Generations } from '../db/generations.js';
 import { Indexes } from '../db/indexes.js';
 import type { Pipelines } from '../db/pipelines.js';
 import { Runs } from '../db/runs.js';
@@ -13,6 +14,7 @@ import { ProviderRegistry } from '../providers/registry.js';
 import { QdrantStore } from '../retrieval/qdrant.js';
 import { RetrievalService } from '../retrieval/service.js';
 import { experimentsRouter } from './experiments.js';
+import { generationsRouter } from './generations.js';
 import { indexesRouter } from './indexes.js';
 import { reportingRouter } from './reporting.js';
 import { definitionsRouter, InputError } from './routes.js';
@@ -24,6 +26,7 @@ interface Dependencies {
   pipelines: Pipelines;
   indexes?: Indexes;
   runs?: Runs;
+  generations?: Generations;
   providers?: ProviderRegistry;
   qdrant?: QdrantStore;
   retrieval?: RetrievalService;
@@ -37,6 +40,7 @@ export function createApp({
   pipelines,
   indexes: providedIndexes,
   runs: providedRuns,
+  generations: providedGenerations,
   providers: providedProviders,
   qdrant: providedQdrant,
   retrieval: providedRetrieval,
@@ -56,6 +60,9 @@ export function createApp({
       datasets.jobs,
       now,
     );
+  const generations =
+    providedGenerations ??
+    new Generations(datasets.database, datasets, indexes, datasets.jobs, now);
   const providers = providedProviders ?? new ProviderRegistry(config);
   const qdrant =
     providedQdrant ??
@@ -177,8 +184,16 @@ export function createApp({
   });
   app.use(
     '/api/v1',
-    definitionsRouter(datasets, pipelines, config.capabilities, indexes, runs),
+    definitionsRouter(
+      datasets,
+      pipelines,
+      config.capabilities,
+      indexes,
+      runs,
+      generations,
+    ),
   );
+  app.use('/api/v1', generationsRouter(generations, config));
   app.use('/api/v1', indexesRouter(indexes, retrieval, providers, config));
   app.use('/api/v1', experimentsRouter(runs, config));
   app.use('/api/v1', reportingRouter(runs, datasets, config, now));

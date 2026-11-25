@@ -241,7 +241,10 @@ describe('Phase 7: paired bootstrap, historical comparisons, exports, documentat
     // At least one task (including the two-document Task 7) must differ with side-by-side evidence
     const differing = comp.tasks.filter((t) => t.differs);
     expect(differing.length).toBeGreaterThan(0);
-    const multiDocTask = comp.tasks.find((t) => t.qrels.length >= 2);
+    const multiDocTask = comp.tasks.find(
+      (t) => t.qrels.filter((q) => q.grade > 0).length >= 2,
+    );
+    expect(multiDocTask).toBeDefined();
     expect(multiDocTask?.differs).toBe(true);
     expect(multiDocTask?.baseline?.retrievedItems.length).toBe(1);
     expect(multiDocTask?.candidate?.retrievedItems.length).toBeGreaterThan(1);

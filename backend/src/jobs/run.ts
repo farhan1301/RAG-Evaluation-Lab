@@ -4,11 +4,13 @@ import { setImmediate, setTimeout as wait } from 'node:timers/promises';
 import { SpanStatusCode, trace } from '@opentelemetry/api';
 import type { Job } from '@rag-eval/contracts';
 import type { Logger } from 'pino';
+import type { Generations } from '../db/generations.js';
 import type { Indexes } from '../db/indexes.js';
 import { type Jobs, LostLease, type Lease } from '../db/jobs.js';
 import type { Runs } from '../db/runs.js';
 import { ApiError } from '../errors.js';
 import type { EvaluationRunner } from '../evaluation/runner.js';
+import type { SyntheticGenerator } from '../generation/generator.js';
 import { mediaType, validateContent } from '../ingestion/blobs.js';
 import {
   chunkArtifact,
@@ -35,6 +37,8 @@ export interface WorkerOptions {
   indexBuilder?: IndexBuilder;
   runs?: Runs;
   evaluationRunner?: EvaluationRunner;
+  generations?: Generations;
+  syntheticGenerator?: SyntheticGenerator;
   signal?: AbortSignal;
   random?: () => number;
   pollMs?: number;
@@ -269,6 +273,93 @@ async function runEvaluationJob(
   return true;
 }
 
+async function runGenerationJob(
+  jobs: Jobs,
+  lease: Job & Lease & { batchId: string },
+  options: WorkerOptions,
+) {
+  if (!options.syntheticGenerator || !options.generations) return false;
+  const span = trace.getTracer('rag-eval.jobs').startSpan('generation.run', {
+    attributes: {
+      'job.id': lease.id,
+      'generation.batch_id': lease.batchId,
+      'job.attempt': lease.attempt,
+    },
+  });
+  const controller = new AbortController();
+  const signal = options.signal
+    ? AbortSignal.any([controller.signal, options.signal])
+    : controller.signal;
+  const timer = setInterval(
+    () => {
+      if (options.signal?.aborted || !jobs.heartbeatGeneration(lease))
+        controller.abort();
+    },
+    Math.floor(jobs.leaseMs / 3),
+  );
+  try {
+    await options.syntheticGenerator.execute(lease.batchId, {
+      signal,
+      guard: () => jobs.guardGeneration(lease),
+      checkpoint: (stage) => jobs.checkpointGeneration(lease, stage),
+      isRetryJob: lease.parentId !== null,
+    });
+    const finalBatch = options.generations.getBatch(lease.batchId);
+    if (finalBatch.state === 'failed') {
+      jobs.failGeneration(
+        lease,
+        finalBatch.errorMessage ?? 'Synthetic generation failed.',
+        undefined,
+      );
+    } else if (finalBatch.state !== 'cancelled') {
+      jobs.finishGeneration(lease);
+    }
+    options.logger?.info(
+      {
+        jobId: lease.id,
+        batchId: lease.batchId,
+        attempt: lease.attempt,
+        state: finalBatch.state,
+      },
+      'generation job complete',
+    );
+  } catch (err) {
+    if (!options.signal?.aborted) {
+      const active = jobs.heartbeatGeneration(lease);
+      if (active && !(err instanceof LostLease) && !signal.aborted) {
+        const backoff =
+          Math.min(maxBackoffMs, 1000 * 2 ** (lease.attempt - 1)) *
+          (0.5 + (options.random ?? Math.random)());
+        const delay =
+          err instanceof ProviderError && err.retryable
+            ? Math.ceil(Math.max(backoff, err.retryAfterMs ?? 0))
+            : undefined;
+        const message =
+          err instanceof ProviderError || err instanceof ApiError
+            ? err.message
+            : 'Synthetic question generation failed. Inspect status and retry.';
+        const terminal = jobs.failGeneration(lease, message, delay);
+        if (terminal)
+          options.generations.markBatchFailed(lease.batchId, message);
+        span.setStatus({ code: SpanStatusCode.ERROR });
+        options.logger?.warn(
+          {
+            jobId: lease.id,
+            batchId: lease.batchId,
+            attempt: lease.attempt,
+            transient: delay !== undefined && !terminal,
+          },
+          'generation job failed',
+        );
+      }
+    }
+  } finally {
+    clearInterval(timer);
+    span.end();
+  }
+  return true;
+}
+
 export async function runOne(jobs: Jobs, options: WorkerOptions) {
   const lease = jobs.claim();
   if (!lease) {
@@ -279,6 +370,10 @@ export async function runOne(jobs: Jobs, options: WorkerOptions) {
     if (options.evaluationRunner && options.runs) {
       const runLease = jobs.claimRun();
       if (runLease) return runEvaluationJob(jobs, runLease, options);
+    }
+    if (options.syntheticGenerator && options.generations) {
+      const genLease = jobs.claimGeneration();
+      if (genLease) return runGenerationJob(jobs, genLease, options);
     }
     return false;
   }

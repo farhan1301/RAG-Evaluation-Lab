@@ -10,6 +10,7 @@ import { Card, CardContent, CardHeader, CardTitle } from './ui/card';
 import { Input } from './ui/input';
 import { Textarea } from './ui/textarea';
 import { EditorActions } from './EditorActions';
+import { SyntheticGenerationPanel } from './SyntheticGenerationPanel';
 
 function LabelEditor({ dataset, task }: { dataset: c.Dataset; task: c.Task }) {
   const draft = useDraft(
@@ -642,6 +643,7 @@ function DatasetEditor({ dataset }: { dataset: c.Dataset }) {
         </CardContent>
       </Card>
       <Documents dataset={dataset} />
+      <SyntheticGenerationPanel dataset={dataset} />
       <Card>
         <CardHeader>
           <CardTitle>Evaluation questions</CardTitle>

@@ -10,6 +10,13 @@ import {
   METRIC_DISPLAY_LABELS,
   RETRIEVAL_METRIC_VERSION,
 } from '../evaluation/metrics.js';
+import {
+  LEAKAGE_MAX_CONTIGUOUS_CHARS,
+  LEAKAGE_MAX_CONTIGUOUS_WORDS,
+  LEAKAGE_MIN_ANSWER_CHARS,
+  LEAKAGE_VERBATIM_RATIO_THRESHOLD,
+  SYNTHETIC_PROMPT_VERSION,
+} from '../generation/validation.js';
 import { loadRubrics } from '../evaluation/rubrics.js';
 import { describeResamplingRule } from './bootstrap.js';
 
@@ -266,6 +273,13 @@ export function buildDocumentationPayload(
         'Paired comparisons align on identical taskVersionId, dataset revision, metric version, evaluation unit, and cutoff. Judge deltas additionally require identical judge provider/model/settings and rubric version. Incompatible runs remain inspectable side by side with incompatibilities highlighted, and no winner is declared from unpaired averages.',
       resamplingRule: describeResamplingRule(),
       metrics: buildMetricDocs(),
+    },
+    generation: {
+      promptVersion: SYNTHETIC_PROMPT_VERSION,
+      leakageVerbatimRatioThreshold: LEAKAGE_VERBATIM_RATIO_THRESHOLD,
+      leakageMaxContiguousChars: LEAKAGE_MAX_CONTIGUOUS_CHARS,
+      leakageMaxContiguousWords: LEAKAGE_MAX_CONTIGUOUS_WORDS,
+      leakageMinAnswerChars: LEAKAGE_MIN_ANSWER_CHARS,
     },
   });
 }

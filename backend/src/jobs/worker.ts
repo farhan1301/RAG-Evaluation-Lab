@@ -2,11 +2,13 @@ import { setTimeout as wait } from 'node:timers/promises';
 import { loadEnvironment, readConfig } from '../config/env.js';
 import { openDatabase } from '../db/database.js';
 import { Datasets } from '../db/datasets.js';
+import { Generations } from '../db/generations.js';
 import { Indexes } from '../db/indexes.js';
 import { Jobs } from '../db/jobs.js';
 import { Pipelines } from '../db/pipelines.js';
 import { Runs } from '../db/runs.js';
 import { EvaluationRunner } from '../evaluation/runner.js';
+import { SyntheticGenerator } from '../generation/generator.js';
 import { blobDirectory } from '../ingestion/blobs.js';
 import { CloudParser } from '../ingestion/cloud.js';
 import { createLogger } from '../lib/logger.js';
@@ -25,6 +27,7 @@ const datasets = new Datasets(db, jobs);
 const pipelines = new Pipelines(db);
 const indexes = new Indexes(db, jobs);
 const runs = new Runs(db, datasets, pipelines, indexes, jobs);
+const generations = new Generations(db, datasets, indexes, jobs);
 const providers = new ProviderRegistry(config);
 const qdrant = config.qdrant
   ? new QdrantStore({
@@ -52,6 +55,11 @@ const evaluationRunner = new EvaluationRunner({
   retrieval,
   providers,
 });
+const syntheticGenerator = new SyntheticGenerator({
+  generations,
+  indexes,
+  providers,
+});
 const controller = new AbortController();
 function stop() {
   controller.abort();
@@ -69,6 +77,8 @@ const options = {
   indexBuilder,
   runs,
   evaluationRunner,
+  generations,
+  syntheticGenerator,
   signal: controller.signal,
   logger,
 };

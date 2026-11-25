@@ -41,9 +41,13 @@ export class Datasets extends Definitions {
 
   private tasksAt(id: string, revision: number, cursor = '', limit = -1) {
     const rows = this.db
+      // Tasks keep creation order (tasks.rowid); task ids are random UUIDs, so
+      // ordering by id would shuffle questions. The cursor stays a task id.
       .prepare(`SELECT t.task_id AS id,t.id AS versionId,t.fields,t.pool FROM revision_tasks r
-      JOIN task_versions t ON r.version_id=t.id WHERE r.dataset_id=? AND r.revision=? AND t.task_id>?
-      ORDER BY t.task_id LIMIT ?`)
+      JOIN task_versions t ON r.version_id=t.id JOIN tasks k ON k.id=t.task_id
+      WHERE r.dataset_id=? AND r.revision=?
+        AND k.rowid>COALESCE((SELECT rowid FROM tasks WHERE id=?),0)
+      ORDER BY k.rowid LIMIT ?`)
       .all(id, revision, cursor, limit);
     const grades =
       this.db.prepare(`SELECT d.document_id AS documentId,q.grade FROM qrels q

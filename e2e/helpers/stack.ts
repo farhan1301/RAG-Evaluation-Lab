@@ -107,6 +107,127 @@ export async function startOpenAIFixtureServer(
     const uniqueChunkIds = Array.from(new Set(chunkIds));
     const lowerUser = userText.toLowerCase();
 
+    if (schemaName === 'synthetic_test_proposals') {
+      const docId = userText.match(/^documentId=([a-f0-9-]{36})$/m)?.[1] ?? '';
+      const docVersionId =
+        userText.match(/^documentVersionId=([a-f0-9-]{36})$/m)?.[1] ?? '';
+      const docName = userText.match(/^documentName=(.+)$/m)?.[1]?.trim() ?? '';
+      const frozenText =
+        userText.match(/Frozen Document Text:\n"""\n([\s\S]*?)\n"""/)?.[1] ??
+        '';
+      const spanOf = (needle: string) => {
+        const start = frozenText.indexOf(needle);
+        if (start >= 0) {
+          return {
+            documentVersionId: docVersionId,
+            start,
+            end: start + needle.length,
+            quote: needle,
+          };
+        }
+        const fallback = frozenText.slice(0, Math.min(48, frozenText.length));
+        return {
+          documentVersionId: docVersionId,
+          start: 0,
+          end: fallback.length,
+          quote: fallback,
+        };
+      };
+
+      if (docName === 'RAG_Best_Practices.txt') {
+        return JSON.stringify({
+          proposals: [
+            {
+              question:
+                'What chunking parameters should teams tune in a RAG workflow?',
+              expectedAnswer:
+                'Teams should calibrate chunk boundary limits and overlap ratios carefully.',
+              acceptanceRule:
+                'Mention both chunking thresholds and overlap configuration.',
+              referenceFacts: ['chunking thresholds', 'overlap configuration'],
+              answerable: true,
+              sourceSpans: [
+                spanOf('proper chunking thresholds, overlap configuration'),
+              ],
+              qrels: [{ documentId: docId, grade: 3 }],
+            },
+            {
+              question:
+                'How should teams keep RAG vector representations current?',
+              expectedAnswer: frozenText,
+              acceptanceRule:
+                'State that embeddings must be kept up to date over time.',
+              referenceFacts: ['maintaining up-to-date embeddings'],
+              answerable: true,
+              sourceSpans: [spanOf('maintaining up-to-date embeddings.')],
+              qrels: [{ documentId: docId, grade: 2 }],
+            },
+          ],
+        });
+      }
+
+      if (docName === 'Embedding_Models_Comparison.txt') {
+        return JSON.stringify({
+          proposals: [
+            {
+              question:
+                'Why is text-embedding-3-small highlighted for general workloads?',
+              expectedAnswer:
+                'It delivers a practical trade-off between spend and retrieval quality.',
+              acceptanceRule:
+                'Explain that it balances cost and performance for general workloads.',
+              referenceFacts: ['balances cost and performance'],
+              answerable: true,
+              sourceSpans: [
+                spanOf('text-embedding-3-small balances cost and performance'),
+              ],
+              qrels: [{ documentId: docId, grade: 3 }],
+            },
+          ],
+        });
+      }
+
+      if (docName === 'Vector_Database_Guide.txt') {
+        return JSON.stringify({
+          proposals: [
+            {
+              question:
+                'Which monthly pricing tier is recommended for vector databases?',
+              expectedAnswer:
+                'The source guide does not specify any monthly pricing tier.',
+              acceptanceRule:
+                'Abstain because pricing tiers are absent from the document.',
+              referenceFacts: [],
+              answerable: false,
+              sourceSpans: [
+                spanOf(
+                  'Selection factors include latency, scalability, filtering, and ecosystem tooling.',
+                ),
+              ],
+              qrels: [{ documentId: docId, grade: 0 }],
+            },
+          ],
+        });
+      }
+
+      const fallbackSpan = spanOf(
+        frozenText.slice(0, Math.min(48, frozenText.length)),
+      );
+      return JSON.stringify({
+        proposals: [
+          {
+            question: `What core topic is introduced in ${docName || 'this document'}?`,
+            expectedAnswer: 'It summarizes the primary concept in the source.',
+            acceptanceRule: 'Summarize the topic in your own words.',
+            referenceFacts: ['primary concept'],
+            answerable: true,
+            sourceSpans: [fallbackSpan],
+            qrels: [{ documentId: docId, grade: 3 }],
+          },
+        ],
+      });
+    }
+
     if (schemaName === 'grounded_answer') {
       if (lowerUser.includes('numeric chunk size')) {
         return JSON.stringify({
@@ -520,4 +641,11 @@ export async function expandEvidence(toggle: Locator) {
       timeout: 1_000,
     });
   }).toPass();
+}
+
+/** Locates a card (dataset summary, generation panel, ...) by its exact title heading. */
+export function cardByTitle(page: Page, name: string) {
+  return page.locator('[data-slot="card"]').filter({
+    has: page.getByRole('heading', { name, exact: true }),
+  });
 }

@@ -7,6 +7,7 @@ const migrations = [
   '002-ingestion.sql',
   '003-retrieval.sql',
   '004-evaluation.sql',
+  '005-generation.sql',
 ];
 
 export function transaction<T>(db: DatabaseSync, work: () => T): T {

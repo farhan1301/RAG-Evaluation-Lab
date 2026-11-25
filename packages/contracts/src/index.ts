@@ -96,7 +96,7 @@ export type Task = z.infer<typeof task>;
 
 export const parser = z.enum(['local', 'llama-parse']);
 export type Parser = z.infer<typeof parser>;
-export const jobKind = z.enum(['parse', 'index', 'run']);
+export const jobKind = z.enum(['parse', 'index', 'run', 'generate']);
 export type JobKind = z.infer<typeof jobKind>;
 export const jobState = z.enum([
   'queued',
@@ -114,6 +114,7 @@ export const job = z.strictObject({
   parser: parser.nullable(),
   generationId: id.nullable().default(null),
   runId: id.nullable().default(null),
+  batchId: id.nullable().default(null),
   state: jobState,
   stage: z.string(),
   attempt: z.int().nonnegative(),
@@ -1325,5 +1326,195 @@ export const documentationPayload = z.strictObject({
     resamplingRule,
     metrics: z.array(metricDefinitionDoc),
   }),
+  generation: z
+    .strictObject({
+      promptVersion: z.string(),
+      leakageVerbatimRatioThreshold: z.number().min(0).max(1),
+      leakageMaxContiguousChars: z.int().positive(),
+      leakageMaxContiguousWords: z.int().positive(),
+      leakageMinAnswerChars: z.int().positive(),
+    })
+    .optional(),
 });
 export type DocumentationPayload = z.infer<typeof documentationPayload>;
+
+// Phase 9: Synthetic Test-Set Generation, Review, Leakage Prevention, and Promotion
+export const proposalReviewStatus = z.enum([
+  'pending',
+  'accepted',
+  'rejected',
+  'promoted',
+]);
+export type ProposalReviewStatus = z.infer<typeof proposalReviewStatus>;
+
+export const proposalReviewDecision = z.enum([
+  'pending',
+  'accepted',
+  'rejected',
+]);
+export type ProposalReviewDecision = z.infer<typeof proposalReviewDecision>;
+
+export const sourceSpan = z
+  .strictObject({
+    documentId: id,
+    documentVersionId: id,
+    documentName: name,
+    start: z.int().nonnegative(),
+    end: z.int().positive(),
+    quote: z.string().min(1).max(16000),
+  })
+  .refine((span) => span.end > span.start, 'Span end must exceed span start.');
+export type SourceSpan = z.infer<typeof sourceSpan>;
+
+export const generatorProvenance = z.strictObject({
+  batchId: id,
+  provider: providerKind,
+  model: z.string().min(1),
+  promptVersion: z.string().min(1),
+  documentVersionIds: z.array(id).min(1),
+  seed: z.int().nonnegative(),
+  params: z.strictObject({
+    temperature: z.number().nullable(),
+    maxTokens: z.int().positive().nullable(),
+    structuredOutput: z.boolean(),
+    targetCount: z.int().positive(),
+    includeUnanswerable: z.boolean(),
+    leakageThreshold: z.number().min(0).max(1),
+  }),
+  rawResponseHash: z.string().length(64),
+  requestId: z.string().nullable(),
+});
+export type GeneratorProvenance = z.infer<typeof generatorProvenance>;
+
+export const syntheticProposal = z.strictObject({
+  id,
+  batchId: id,
+  datasetId: id,
+  datasetRevision: revision,
+  question: taskFields.shape.question,
+  expectedAnswer: prose,
+  acceptanceRule: prose,
+  referenceFacts: z.array(prose.trim().min(1)).max(100),
+  answerable: z.boolean(),
+  sourceSpans: z.array(sourceSpan).min(1),
+  qrels: z.array(qrel),
+  provenance: generatorProvenance,
+  leakageScore: z.number().min(0).max(1),
+  leakageFlagged: z.boolean(),
+  leakageReason: z.string().nullable(),
+  reviewStatus: proposalReviewStatus,
+  edited: z.boolean(),
+  promotedTaskId: id.nullable(),
+  promotedRevision: revision.nullable(),
+  createdAt: z.iso.datetime(),
+  updatedAt: z.iso.datetime(),
+});
+export type SyntheticProposal = z.infer<typeof syntheticProposal>;
+
+export const createGenerationRequest = z.strictObject({
+  datasetRevision: revision.optional(),
+  documentIds: z
+    .array(id)
+    .min(1)
+    .max(100)
+    .refine(
+      (ids) => new Set(ids).size === ids.length,
+      'Document IDs must be unique.',
+    )
+    .optional(),
+  model: name.or(z.literal('')).default(''),
+  count: z.int().min(1).max(50).default(5),
+  seed: z.int().min(0).max(2_147_483_647).default(42),
+  temperature: z.number().min(0).max(2).optional(),
+  maxTokens: z.int().min(256).max(16384).optional(),
+  includeUnanswerable: z.boolean().default(true),
+});
+export type CreateGenerationRequest = z.infer<typeof createGenerationRequest>;
+export type CreateGenerationRequestRaw = z.input<
+  typeof createGenerationRequest
+>;
+
+export const generationBatch = z.strictObject({
+  id,
+  datasetId: id,
+  datasetRevision: revision,
+  state: jobState,
+  stage: z.string(),
+  provider: providerKind,
+  model: z.string(),
+  promptVersion: z.string(),
+  params: z.strictObject({
+    seed: z.int().nonnegative(),
+    temperature: z.number().nullable(),
+    maxTokens: z.int().positive().nullable(),
+    structuredOutput: z.boolean(),
+    targetCount: z.int().positive(),
+    includeUnanswerable: z.boolean(),
+    leakageThreshold: z.number().min(0).max(1),
+    documentIds: z.array(id),
+  }),
+  totalDocuments: z.int().nonnegative(),
+  processedDocuments: z.int().nonnegative(),
+  proposedCount: z.int().nonnegative(),
+  deduplicatedCount: z.int().nonnegative(),
+  invalidSpanCount: z.int().nonnegative(),
+  leakageFlaggedCount: z.int().nonnegative(),
+  jobId: id,
+  workerOnline: z.boolean(),
+  errorMessage: z.string().nullable(),
+  createdAt: z.iso.datetime(),
+  startedAt: z.iso.datetime().nullable(),
+  completedAt: z.iso.datetime().nullable(),
+});
+export type GenerationBatch = z.infer<typeof generationBatch>;
+
+export const createGenerationResult = z.strictObject({
+  batch: generationBatch,
+  job,
+  reused: z.boolean(),
+});
+export type CreateGenerationResult = z.infer<typeof createGenerationResult>;
+
+export const generationListQuery = z.strictObject({
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  cursor: z.string().min(1).max(200).optional(),
+});
+
+export const proposalListQuery = z.strictObject({
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  cursor: z.string().min(1).max(200).optional(),
+  batchId: id.optional(),
+  status: proposalReviewStatus.optional(),
+});
+
+export const reviewProposalPatch = z
+  .strictObject({
+    reviewStatus: proposalReviewDecision.optional(),
+    question: taskFields.shape.question.optional(),
+    expectedAnswer: prose.optional(),
+    acceptanceRule: prose.optional(),
+    referenceFacts: taskFields.shape.referenceFacts.unwrap().optional(),
+    answerable: z.boolean().optional(),
+    qrels: labels.shape.qrels.unwrap().optional(),
+  })
+  .refine(nonemptyPatch, 'Provide at least one change.');
+export type ReviewProposalPatch = z.infer<typeof reviewProposalPatch>;
+
+export const promoteProposalsRequest = z.strictObject({
+  proposalIds: z
+    .array(id)
+    .min(1)
+    .max(200)
+    .refine(
+      (ids) => new Set(ids).size === ids.length,
+      'Proposal IDs must be unique.',
+    ),
+});
+export type PromoteProposalsRequest = z.infer<typeof promoteProposalsRequest>;
+
+export const promoteProposalsResult = z.strictObject({
+  dataset,
+  promotedCount: z.int().positive(),
+  promotedTaskIds: z.array(id),
+});
+export type PromoteProposalsResult = z.infer<typeof promoteProposalsResult>;

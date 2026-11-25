@@ -6,6 +6,7 @@ import * as c from '@rag-eval/contracts';
 import { openDatabase, ready } from '../backend/src/db/database';
 import { Pipelines } from '../backend/src/db/pipelines';
 import { Datasets } from '../backend/src/db/datasets';
+import { examples } from '../backend/src/db/sample';
 
 let dir: string,
   path: string,
@@ -205,4 +206,18 @@ it('upgrades Phase 3 inline uploads and parses them without changing frozen revi
   } finally {
     migrated.close();
   }
+});
+
+it('lists tasks in creation order across pages, not by random task id', () => {
+  const sample = datasets.sample().value;
+  const expected = examples.map((e) => e.question);
+  expect(sample.tasks.map((t) => t.question)).toEqual(expected);
+  const seen: string[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = datasets.listTasks(sample.id, 3, cursor);
+    seen.push(...page.items.map((t) => t.question));
+    cursor = page.nextCursor ?? undefined;
+  } while (cursor);
+  expect(seen).toEqual(expected);
 });
