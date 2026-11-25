@@ -241,9 +241,9 @@ describe('production single-origin static serving, SPA fallback, and env default
     });
   });
 
-  it('aligns root engines.node and setup docs with the highest locked runtime Node floor', () => {
+  it('aligns root engines.node and setup docs with locked runtime and Vitest Node ranges', () => {
     const parseFloor = (range: string): [number, number, number] | null => {
-      const m = range.match(/^>=\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?$/);
+      const m = range.match(/(?:>=|\^)\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?/);
       if (!m) return null;
       return [Number(m[1]), Number(m[2] ?? 0), Number(m[3] ?? 0)];
     };
@@ -251,13 +251,58 @@ describe('production single-origin static serving, SPA fallback, and env default
       a: [number, number, number],
       b: [number, number, number],
     ) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+    const satisfiesComparator = (
+      version: [number, number, number],
+      comp: string,
+    ): boolean => {
+      const caret = comp.match(/^\^(\d+)(?:\.(\d+))?(?:\.(\d+))?$/);
+      if (caret) {
+        const floor: [number, number, number] = [
+          Number(caret[1]),
+          Number(caret[2] ?? 0),
+          Number(caret[3] ?? 0),
+        ];
+        return version[0] === floor[0] && compareSemver(version, floor) >= 0;
+      }
+      const gte = comp.match(/^>=\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?$/);
+      if (gte) {
+        const floor: [number, number, number] = [
+          Number(gte[1]),
+          Number(gte[2] ?? 0),
+          Number(gte[3] ?? 0),
+        ];
+        return compareSemver(version, floor) >= 0;
+      }
+      return false;
+    };
+    const satisfiesRange = (
+      version: [number, number, number],
+      range: string,
+    ): boolean =>
+      range
+        .split('||')
+        .map((part) => part.trim())
+        .some((branch) =>
+          branch
+            .split(/\s+/)
+            .filter(Boolean)
+            .every((comp) => satisfiesComparator(version, comp)),
+        );
 
+    const expectedRange = '^22.22.0 || ^24.0.0 || >=26.0.0';
     const rootPkg = JSON.parse(
       readFileSync(resolve('package.json'), 'utf8'),
     ) as { engines?: { node?: string } };
     const rootRange = rootPkg.engines?.node ?? '';
     const rootFloor = parseFloor(rootRange);
     expect(rootFloor).not.toBeNull();
+
+    // Excludes odd Node majors 23 and 25 rejected by locked Vitest while allowing 22.22+, 24+, and 26+.
+    expect(satisfiesRange([22, 22, 0], rootRange)).toBe(true);
+    expect(satisfiesRange([23, 0, 0], rootRange)).toBe(false);
+    expect(satisfiesRange([24, 0, 0], rootRange)).toBe(true);
+    expect(satisfiesRange([25, 0, 0], rootRange)).toBe(false);
+    expect(satisfiesRange([26, 0, 0], rootRange)).toBe(true);
 
     const lock = JSON.parse(
       readFileSync(resolve('package-lock.json'), 'utf8'),
@@ -274,12 +319,12 @@ describe('production single-origin static serving, SPA fallback, and env default
       ).toBeGreaterThanOrEqual(0);
     }
 
-    expect(rootRange).toBe('>=22.22.0');
+    expect(rootRange).toBe(expectedRange);
     const readme = readFileSync(resolve('README.md'), 'utf8');
     const contributing = readFileSync(resolve('CONTRIBUTING.md'), 'utf8');
-    expect(readme).toContain('>=22.22.0');
+    expect(readme).toContain(expectedRange);
     expect(readme).not.toContain('>=22.18');
-    expect(contributing).toContain('>=22.22.0');
+    expect(contributing).toContain(expectedRange);
     expect(contributing).not.toContain('>=22.18');
   });
 

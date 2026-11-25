@@ -47,7 +47,7 @@ No API keys, cloud accounts, or model downloads are required to run your first c
 
 ## Native Development Setup
 
-Requires **Node.js `>=22.22.0`** (tested on Node 22.22.3 and 26.13.1) and npm workspaces (`packages/contracts`, `backend`, `frontend`).
+Requires **Node.js `^22.22.0 || ^24.0.0 || >=26.0.0`** (tested on Node 22.22.3 and 26.13.1) and npm workspaces (`packages/contracts`, `backend`, `frontend`).
 
 ```bash
 cp .env.example .env.local
@@ -207,6 +207,8 @@ With a chat profile configured, operators can launch a cancellable synthetic gen
 ## Backup, Restore, and Rebuilding Qdrant
 
 SQLite (`workspace.sqlite`) and the private blob directory (`blobs/`) are authoritative for all workspace facts, documents, and reports. Qdrant vectors are derived and rebuildable from SQLite.
+
+Backup and restore serialize concurrent operations per destination with an exclusive lock file (`.rag-eval-backup.lock` / `.rag-eval-restore.lock`), recheck overwrite permission (`--overwrite` / `--force`) under the lock right before swapping, and persist a swap journal (`<database>.restore-journal.json`) during restore so any interrupted swap is automatically rolled back or finished on the next restore or workspace startup (`openDatabase()`).
 
 ### Native Commands
 

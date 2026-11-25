@@ -93,11 +93,21 @@ describe('OpenAI provider adapter', () => {
     });
     const wrongDim = new ProviderRegistry(config, {
       openai: async () =>
-        Response.json({
-          object: 'list',
-          model: 'fixture-embed',
-          data: [{ object: 'embedding', index: 0, embedding: [0.1, 0.2] }],
-        }),
+        new Response(
+          JSON.stringify({
+            object: 'list',
+            model: 'fixture-embed',
+            data: [{ object: 'embedding', index: 0, embedding: [0.1, 0.2] }],
+            usage: { prompt_tokens: 11, total_tokens: 11 },
+          }),
+          {
+            status: 200,
+            headers: {
+              'content-type': 'application/json',
+              'x-request-id': 'req-wrong-dim',
+            },
+          },
+        ),
     });
     await expect(
       wrongDim.resolveEmbedding().provider.embed({
@@ -105,7 +115,13 @@ describe('OpenAI provider adapter', () => {
         inputs: ['hello'],
         expectedDimensions: 4,
       }),
-    ).rejects.toMatchObject({ code: 'dimension_mismatch' });
+    ).rejects.toMatchObject({
+      code: 'dimension_mismatch',
+      callMeta: {
+        requestId: 'req-wrong-dim',
+        usage: { inputTokens: 11, outputTokens: 0, totalTokens: 11 },
+      },
+    });
 
     const configNoPin = readConfig({
       OPENAI_API_KEY: 'fixture-key',
@@ -144,18 +160,34 @@ describe('OpenAI provider adapter', () => {
     });
     const partial = new ProviderRegistry(config, {
       openai: async () =>
-        Response.json({
-          object: 'list',
-          model: 'fixture-embed',
-          data: [{ object: 'embedding', index: 0, embedding: [0.5, 0.5] }],
-        }),
+        new Response(
+          JSON.stringify({
+            object: 'list',
+            model: 'fixture-embed',
+            data: [{ object: 'embedding', index: 0, embedding: [0.5, 0.5] }],
+            usage: { prompt_tokens: 7, total_tokens: 7 },
+          }),
+          {
+            status: 200,
+            headers: {
+              'content-type': 'application/json',
+              'x-request-id': 'req-partial-batch',
+            },
+          },
+        ),
     });
     await expect(
       partial.resolveEmbedding().provider.embed({
         model: 'fixture-embed',
         inputs: ['one', 'two'],
       }),
-    ).rejects.toMatchObject({ code: 'partial_batch' });
+    ).rejects.toMatchObject({
+      code: 'partial_batch',
+      callMeta: {
+        requestId: 'req-partial-batch',
+        usage: { inputTokens: 7, outputTokens: 0, totalTokens: 7 },
+      },
+    });
 
     const duplicateIdx = new ProviderRegistry(config, {
       openai: async () =>
@@ -814,6 +846,33 @@ describe('Grounded answer generation, bounded context, citations, and abstention
         },
       }),
     ).rejects.toMatchObject({ code: 'malformed_response' });
+
+    // Missing required `citations` field in structured mode MUST reject rather than defaulting to [].
+    await expect(
+      generateGroundedAnswer({
+        question: 'Which planet is fourth from the Sun?',
+        items: [],
+        model: 'fixture-chat',
+        provider: {
+          kind: 'openai',
+          capabilities: structuredCapabilities,
+          chat: async () => ({
+            content: JSON.stringify({ answer: 'Mars.', abstained: true }),
+            model: 'fixture-chat',
+            provider: 'openai',
+            requestId: 'req-missing-citations',
+            usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+            effectiveParams: { structuredOutput: true },
+          }),
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: 'malformed_response',
+      callMeta: {
+        requestId: 'req-missing-citations',
+        usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+      },
+    });
 
     // Invalid JSON schema object under structuredOutput MUST also reject.
     await expect(

@@ -45,12 +45,14 @@ export interface RunExecutionHooks {
   signal?: AbortSignal;
   guard?: () => void;
   checkpoint?: (stage: string) => void;
+  jobId?: string;
   isRetryJob?: boolean;
 }
 
 function isRetryableError(err: unknown): boolean {
-  if (err instanceof ProviderError) return err.retryable;
-  if (err instanceof ApiError) return err.status === 502 || err.status === 504;
+  if (err instanceof ProviderError)
+    return err.retryable && err.code !== 'timeout';
+  if (err instanceof ApiError) return err.status === 502;
   return false;
 }
 
@@ -82,7 +84,14 @@ function computeRetrievalKey(
       pipeline.config.retriever.candidateDepth ?? null,
       pipeline.config.retriever.fusionWeights,
       filters ?? null,
-      pipeline.config.reranker,
+      pipeline.config.reranker.enabled
+        ? {
+            ...pipeline.config.reranker,
+            model:
+              pipeline.resolvedModels.rerank?.model ||
+              pipeline.config.reranker.model,
+          }
+        : pipeline.config.reranker,
     ]),
   );
 }
@@ -167,14 +176,18 @@ export class EvaluationRunner {
     let embedding: {
       provider: 'openai' | 'openai-compatible';
       model: string;
+      endpoint?: string | null;
       expectedDimensions?: number;
     } | null = null;
     if (mode === 'dense' || mode === 'hybrid') {
       const frozenEmbedding = pipeline.resolvedModels.embedding;
+      const frozenEmbeddingEndpoint =
+        pipeline.resolvedEndpoints.embedding ?? undefined;
       const resolved = this.providers.findProfile(
         'embedding',
         frozenEmbedding?.model ?? pipeline.config.embedding.model,
         frozenEmbedding?.provider,
+        frozenEmbeddingEndpoint,
       );
       if (
         !resolved?.capabilities.embeddings ||
@@ -182,7 +195,7 @@ export class EvaluationRunner {
           resolved.provider !== 'openai-compatible')
       ) {
         const message = frozenEmbedding
-          ? `Frozen embedding profile "${frozenEmbedding.provider}/${frozenEmbedding.model}" is unavailable or has changed for pipeline "${pipeline.pipelineName}".`
+          ? `Frozen embedding profile "${frozenEmbedding.provider}/${frozenEmbedding.model}" is unavailable or its endpoint has changed for pipeline "${pipeline.pipelineName}".`
           : `Embedding profile is unavailable for pipeline "${pipeline.pipelineName}".`;
         this.runs.markPipelineState(
           plan.runId,
@@ -196,6 +209,7 @@ export class EvaluationRunner {
       embedding = {
         provider: resolved.provider,
         model: resolved.model,
+        endpoint: resolved.endpointIdentity,
         expectedDimensions: resolved.expectedDimensions,
       };
     }
@@ -250,6 +264,7 @@ export class EvaluationRunner {
     for (let attempt = 1; attempt <= 1 + this.maxTransientRetries; attempt++) {
       hooks.signal?.throwIfAborted();
       hooks.guard?.();
+      let sawAmbiguousTimeout = false;
       try {
         await this.indexBuilder.build(generationId, {
           signal: hooks.signal,
@@ -268,6 +283,7 @@ export class EvaluationRunner {
               {
                 stageKeyPrefix: `corpus_embed:${generationId}:batch:${info.batchIndex}`,
                 runId: plan.runId,
+                jobId: hooks.jobId ?? null,
                 pipelineId: pipeline.pipelineId,
                 indexGenerationId: generationId,
                 operation: 'corpus_embed',
@@ -281,6 +297,9 @@ export class EvaluationRunner {
             return started.id;
           },
           onEmbedCall: (audit) => {
+            if (audit.status === 'ambiguous' || audit.errorCode === 'timeout') {
+              sawAmbiguousTimeout = true;
+            }
             if (audit.callId) {
               if (audit.status === 'cancelled') return;
               this.runs.completeProviderCall(
@@ -304,6 +323,7 @@ export class EvaluationRunner {
               {
                 stageKeyPrefix: `corpus_embed:${generationId}:batch:${audit.batchIndex}`,
                 runId: plan.runId,
+                jobId: hooks.jobId ?? null,
                 pipelineId: pipeline.pipelineId,
                 indexGenerationId: generationId,
                 operation: 'corpus_embed',
@@ -344,7 +364,11 @@ export class EvaluationRunner {
         return { generationId };
       } catch (err) {
         if (hooks.signal?.aborted || err instanceof LostLease) throw err;
-        if (attempt <= this.maxTransientRetries && isRetryableError(err)) {
+        if (
+          !sawAmbiguousTimeout &&
+          attempt <= this.maxTransientRetries &&
+          isRetryableError(err)
+        ) {
           const delay =
             err instanceof ProviderError && err.retryAfterMs
               ? Math.min(err.retryAfterMs, this.retryDelayMs * 4)
@@ -495,8 +519,18 @@ export class EvaluationRunner {
     for (let attempt = 1; attempt <= 1 + this.maxTransientRetries; attempt++) {
       hooks.signal?.throwIfAborted();
       hooks.guard?.();
+      let sawAmbiguousTimeout = false;
+      let result: IndexSearchResult;
       try {
-        const result = await this.retrieval.search(
+        const resolvedReranker = pipeline.config.reranker.enabled
+          ? {
+              ...pipeline.config.reranker,
+              model:
+                pipeline.resolvedModels.rerank?.model ||
+                pipeline.config.reranker.model,
+            }
+          : pipeline.config.reranker;
+        result = await this.retrieval.search(
           generationId,
           {
             query: task.question,
@@ -505,19 +539,25 @@ export class EvaluationRunner {
             candidateDepth: pipeline.config.retriever.candidateDepth,
             fusionWeights: pipeline.config.retriever.fusionWeights,
             filters: plan.snapshot.filters ?? undefined,
-            reranker: pipeline.config.reranker,
+            reranker: resolvedReranker,
           },
           hooks.signal,
           {
             expectedEmbeddingProvider:
               pipeline.resolvedModels.embedding?.provider,
+            expectedEmbeddingEndpoint:
+              pipeline.resolvedEndpoints.embedding ?? undefined,
             expectedRerankerProvider: pipeline.resolvedModels.rerank?.provider,
+            expectedRerankerModel: pipeline.resolvedModels.rerank?.model,
+            expectedRerankerEndpoint:
+              pipeline.resolvedEndpoints.rerank ?? undefined,
             onProviderCallStart: (info) => {
               const isRetry = Boolean(hooks.isRetryJob) || attempt > 1;
               return this.runs.beginProviderCall(
                 {
                   stageKeyPrefix: `${info.operation}:${task.runTaskId}`,
                   runId: plan.runId,
+                  jobId: hooks.jobId ?? null,
                   pipelineId: pipeline.pipelineId,
                   runTaskId: task.runTaskId,
                   indexGenerationId: generationId,
@@ -531,6 +571,12 @@ export class EvaluationRunner {
               ).id;
             },
             onProviderCall: (audit) => {
+              if (
+                audit.status === 'ambiguous' ||
+                audit.errorCode === 'timeout'
+              ) {
+                sawAmbiguousTimeout = true;
+              }
               if (audit.callId) {
                 if (audit.status === 'cancelled') return;
                 this.runs.completeProviderCall(
@@ -554,6 +600,7 @@ export class EvaluationRunner {
                 {
                   stageKeyPrefix: `${audit.operation}:${task.runTaskId}`,
                   runId: plan.runId,
+                  jobId: hooks.jobId ?? null,
                   pipelineId: pipeline.pipelineId,
                   runTaskId: task.runTaskId,
                   indexGenerationId: generationId,
@@ -582,49 +629,19 @@ export class EvaluationRunner {
             },
           },
         );
-
-        const observations = evaluateTaskRetrieval({
-          retrievalFailed: false,
-          answerable: task.answerable,
-          pool: task.pool,
-          qrels: task.qrels,
-          retrievedChunks: result.items,
-          evaluatedDepth: result.topK,
-          cutoffs: plan.snapshot.cutoffs,
-        });
-        this.runs.saveTaskRetrieval(
-          {
-            runId: plan.runId,
-            pipelineId: pipeline.pipelineId,
-            taskVersionId: task.taskVersionId,
-            runTaskId: task.runTaskId,
-            retrievalKey,
-            succeeded: true,
-            items: result.items,
-            retrievedDepth: result.topK,
-            rerankStatus: result.stages.rerankStatus,
-            rerankError: result.stages.rerankError,
-            retrievalLatencyMs: result.stages.timingsMs.total,
-            rerankLatencyMs: result.stages.timingsMs.rerank ?? null,
-            observations,
-          },
-          hooks.guard,
-        );
-        return {
-          succeeded: true,
-          retrievalKey,
-          items: result.items,
-          retrievalLatencyMs: result.stages.timingsMs.total,
-          rerankLatencyMs: result.stages.timingsMs.rerank ?? null,
-          searchResult: result,
-        };
       } catch (err) {
         if (hooks.signal?.aborted || err instanceof LostLease) throw err;
-        if (attempt <= this.maxTransientRetries && isRetryableError(err)) {
+        if (
+          !sawAmbiguousTimeout &&
+          attempt <= this.maxTransientRetries &&
+          isRetryableError(err)
+        ) {
           await wait(this.retryDelayMs, undefined, { signal: hooks.signal });
           continue;
         }
-        const message = safeMessageOf(err, 'Retrieval failed.');
+        const message = sawAmbiguousTimeout
+          ? `${safeMessageOf(err, 'Retrieval timed out.')} Outcome is ambiguous after dispatch; explicit retry is required and may incur another provider charge.`
+          : safeMessageOf(err, 'Retrieval failed.');
         const observations = evaluateTaskRetrieval({
           retrievalFailed: true,
           retrievalError: message,
@@ -634,7 +651,11 @@ export class EvaluationRunner {
           retrievedChunks: [],
           evaluatedDepth: pipeline.config.retriever.topK,
           cutoffs: plan.snapshot.cutoffs,
-        });
+        }).map((obs) =>
+          sawAmbiguousTimeout
+            ? { ...obs, metadata: { ...obs.metadata, ambiguousOutcome: true } }
+            : obs,
+        );
         this.runs.saveTaskRetrieval(
           {
             runId: plan.runId,
@@ -649,7 +670,7 @@ export class EvaluationRunner {
             rerankError: null,
             retrievalLatencyMs: 0,
             rerankLatencyMs: null,
-            errorCode: errorCodeOf(err),
+            errorCode: sawAmbiguousTimeout ? 'timeout' : errorCodeOf(err),
             errorMessage: message,
             observations,
           },
@@ -664,6 +685,42 @@ export class EvaluationRunner {
           errorMessage: message,
         };
       }
+
+      const observations = evaluateTaskRetrieval({
+        retrievalFailed: false,
+        answerable: task.answerable,
+        pool: task.pool,
+        qrels: task.qrels,
+        retrievedChunks: result.items,
+        evaluatedDepth: result.topK,
+        cutoffs: plan.snapshot.cutoffs,
+      });
+      this.runs.saveTaskRetrieval(
+        {
+          runId: plan.runId,
+          pipelineId: pipeline.pipelineId,
+          taskVersionId: task.taskVersionId,
+          runTaskId: task.runTaskId,
+          retrievalKey,
+          succeeded: true,
+          items: result.items,
+          retrievedDepth: result.topK,
+          rerankStatus: result.stages.rerankStatus,
+          rerankError: result.stages.rerankError,
+          retrievalLatencyMs: result.stages.timingsMs.total,
+          rerankLatencyMs: result.stages.timingsMs.rerank ?? null,
+          observations,
+        },
+        hooks.guard,
+      );
+      return {
+        succeeded: true,
+        retrievalKey,
+        items: result.items,
+        retrievalLatencyMs: result.stages.timingsMs.total,
+        rerankLatencyMs: result.stages.timingsMs.rerank ?? null,
+        searchResult: result,
+      };
     }
 
     return {
@@ -813,13 +870,20 @@ export class EvaluationRunner {
     const chatModel = resolvedChat?.model ?? pipeline.config.llm.model;
     const chatProviderKind: ProviderKind = resolvedChat?.provider ?? 'openai';
 
-    // If a prior paid answer attempt was already dispatched (ambiguous or succeeded
-    // before the answer row committed), automatic crash recovery MUST NOT re-dispatch
-    // silently because providers cannot deduplicate chat calls. Require explicit retry.
-    if (
-      !hooks.isRetryJob &&
-      this.runs.hasPriorProviderCall(plan.runId, task.runTaskId, 'generate')
-    ) {
+    // If this same job already dispatched a paid answer attempt (including on a
+    // reclaimed retry child), automatic crash recovery MUST NOT re-dispatch silently
+    // because providers cannot deduplicate chat calls. Require explicit retry.
+    const hasPriorAnswerDispatch = hooks.jobId
+      ? this.runs.hasPriorProviderCall(
+          plan.runId,
+          task.runTaskId,
+          'generate',
+          undefined,
+          hooks.jobId,
+        )
+      : !hooks.isRetryJob &&
+        this.runs.hasPriorProviderCall(plan.runId, task.runTaskId, 'generate');
+    if (hasPriorAnswerDispatch) {
       const message =
         'Previous answer generation attempt has an ambiguous outcome after interruption. Explicit retry is required and may incur another provider charge.';
       const abstentionObs = evaluateTaskAbstention({
@@ -827,6 +891,10 @@ export class EvaluationRunner {
         generationFailed: true,
         generationError: message,
       });
+      abstentionObs.metadata = {
+        ...abstentionObs.metadata,
+        ambiguousOutcome: true,
+      };
       this.runs.saveTaskAnswer(
         {
           runId: plan.runId,
@@ -858,13 +926,17 @@ export class EvaluationRunner {
       const startedAt = this.now();
       const isRetry = Boolean(hooks.isRetryJob) || attempt > 1;
       let callId: string | null = null;
+      let result: Awaited<ReturnType<RetrievalService['answerFromSearch']>>;
+      // Limit catch strictly to provider dispatch + response validation so a later
+      // receipt or answer checkpoint DB error can NEVER overwrite a completed receipt.
       try {
-        const result = await this.retrieval.answerFromSearch(
+        result = await this.retrieval.answerFromSearch(
           syntheticSearch,
           {
             question: task.question,
             model: chatModel,
             provider: resolvedChat?.provider,
+            expectedEndpoint: pipeline.resolvedEndpoints.chat ?? undefined,
             expectedStructuredOutput: resolvedChat?.structuredOutput,
             temperature: resolvedChat?.effectiveTemperature ?? undefined,
             maxTokens:
@@ -875,6 +947,7 @@ export class EvaluationRunner {
                 {
                   stageKeyPrefix: `generate:${task.runTaskId}`,
                   runId: plan.runId,
+                  jobId: hooks.jobId ?? null,
                   pipelineId: pipeline.pipelineId,
                   runTaskId: task.runTaskId,
                   operation: 'generate',
@@ -889,68 +962,13 @@ export class EvaluationRunner {
           },
           hooks.signal,
         );
-
-        if (callId) {
-          this.runs.completeProviderCall(
-            callId,
-            {
-              provider: result.provider,
-              model: result.model,
-              requestId: result.requestId,
-              status: 'succeeded',
-              errorCode: null,
-              latencyMs: result.latencyMs,
-              usage: result.usage,
-              priceSchedule: plan.snapshot.priceSchedule,
-            },
-            hooks.guard,
-          );
-        }
-
-        const abstentionObs = evaluateTaskAbstention({
-          answerable: task.answerable,
-          generationFailed: false,
-          abstained: result.abstained,
-        });
-        this.runs.saveTaskAnswer(
-          {
-            runId: plan.runId,
-            pipelineId: pipeline.pipelineId,
-            taskVersionId: task.taskVersionId,
-            runTaskId: task.runTaskId,
-            answerKey,
-            succeeded: true,
-            answer: {
-              answerText: result.answer,
-              abstained: result.abstained,
-              citations: result.citations,
-              invalidCitations: result.invalidCitations,
-              context: result.context,
-              promptVersion: PROMPT_VERSION,
-              provider: result.provider,
-              model: result.model,
-              effectiveParams: result.effectiveParams,
-              requestId: result.requestId,
-              latencyMs: result.latencyMs,
-            },
-            generationLatencyMs: result.latencyMs,
-            abstentionObservation: abstentionObs,
-          },
-          hooks.guard,
-        );
-        return {
-          succeeded: true,
-          answerText: result.answer,
-          abstained: result.abstained,
-          context: result.context,
-          generationLatencyMs: result.latencyMs,
-        };
       } catch (err) {
         // Leave in-flight provider_calls row as 'ambiguous' on lease loss or abort.
         if (err instanceof LostLease || hooks.signal?.aborted) throw err;
         const latencyMs = Math.max(0, this.now() - startedAt);
         const isTimeout =
           err instanceof ProviderError && err.code === 'timeout';
+        const isAmbiguousTimeout = Boolean(callId) && isTimeout;
         const callMeta =
           err instanceof ProviderError ? err.callMeta : undefined;
         if (callId) {
@@ -960,7 +978,11 @@ export class EvaluationRunner {
               provider: callMeta?.provider ?? chatProviderKind,
               model: callMeta?.model ?? chatModel,
               requestId: callMeta?.requestId ?? null,
-              status: isTimeout ? 'timeout' : 'failed',
+              status: isAmbiguousTimeout
+                ? 'ambiguous'
+                : isTimeout
+                  ? 'timeout'
+                  : 'failed',
               errorCode: errorCodeOf(err),
               latencyMs: callMeta?.latencyMs ?? latencyMs,
               usage: callMeta?.usage,
@@ -969,16 +991,28 @@ export class EvaluationRunner {
             hooks.guard,
           );
         }
-        if (attempt <= this.maxTransientRetries && isRetryableError(err)) {
+        if (
+          !isAmbiguousTimeout &&
+          attempt <= this.maxTransientRetries &&
+          isRetryableError(err)
+        ) {
           await wait(this.retryDelayMs, undefined, { signal: hooks.signal });
           continue;
         }
-        const message = safeMessageOf(err, 'Answer generation failed.');
+        const message = isAmbiguousTimeout
+          ? `${safeMessageOf(err, 'Answer generation timed out.')} Outcome is ambiguous after dispatch; explicit retry is required and may incur another provider charge.`
+          : safeMessageOf(err, 'Answer generation failed.');
         const abstentionObs = evaluateTaskAbstention({
           answerable: task.answerable,
           generationFailed: true,
           generationError: message,
         });
+        if (isAmbiguousTimeout) {
+          abstentionObs.metadata = {
+            ...abstentionObs.metadata,
+            ambiguousOutcome: true,
+          };
+        }
         this.runs.saveTaskAnswer(
           {
             runId: plan.runId,
@@ -1003,6 +1037,62 @@ export class EvaluationRunner {
           errorMessage: message,
         };
       }
+
+      if (callId) {
+        this.runs.completeProviderCall(
+          callId,
+          {
+            provider: result.provider,
+            model: result.model,
+            requestId: result.requestId,
+            status: 'succeeded',
+            errorCode: null,
+            latencyMs: result.latencyMs,
+            usage: result.usage,
+            priceSchedule: plan.snapshot.priceSchedule,
+          },
+          hooks.guard,
+        );
+      }
+
+      const abstentionObs = evaluateTaskAbstention({
+        answerable: task.answerable,
+        generationFailed: false,
+        abstained: result.abstained,
+      });
+      this.runs.saveTaskAnswer(
+        {
+          runId: plan.runId,
+          pipelineId: pipeline.pipelineId,
+          taskVersionId: task.taskVersionId,
+          runTaskId: task.runTaskId,
+          answerKey,
+          succeeded: true,
+          answer: {
+            answerText: result.answer,
+            abstained: result.abstained,
+            citations: result.citations,
+            invalidCitations: result.invalidCitations,
+            context: result.context,
+            promptVersion: PROMPT_VERSION,
+            provider: result.provider,
+            model: result.model,
+            effectiveParams: result.effectiveParams,
+            requestId: result.requestId,
+            latencyMs: result.latencyMs,
+          },
+          generationLatencyMs: result.latencyMs,
+          abstentionObservation: abstentionObs,
+        },
+        hooks.guard,
+      );
+      return {
+        succeeded: true,
+        answerText: result.answer,
+        abstained: result.abstained,
+        context: result.context,
+        generationLatencyMs: result.latencyMs,
+      };
     }
 
     return {
@@ -1036,6 +1126,7 @@ export class EvaluationRunner {
       'judge',
       frozenJudge?.model ?? pipeline.config.judge.model,
       frozenJudge?.provider,
+      pipeline.resolvedEndpoints.judge ?? undefined,
     );
     if (
       frozenJudge &&
@@ -1063,15 +1154,22 @@ export class EvaluationRunner {
         continue;
       }
 
-      if (
-        !hooks.isRetryJob &&
-        this.runs.hasPriorProviderCall(
-          plan.runId,
-          task.runTaskId,
-          'judge',
-          `judge:${metricId}:`,
-        )
-      ) {
+      const hasPriorJudgeDispatch = hooks.jobId
+        ? this.runs.hasPriorProviderCall(
+            plan.runId,
+            task.runTaskId,
+            'judge',
+            `judge:${metricId}:`,
+            hooks.jobId,
+          )
+        : !hooks.isRetryJob &&
+          this.runs.hasPriorProviderCall(
+            plan.runId,
+            task.runTaskId,
+            'judge',
+            `judge:${metricId}:`,
+          );
+      if (hasPriorJudgeDispatch) {
         const rubric = getRubric(metricId);
         const obs: ComputedObservation = {
           metricId,
@@ -1088,6 +1186,7 @@ export class EvaluationRunner {
             rubricVersion: rubric.version,
             rubricHash: rubric.hash,
             rawResponseHash: null,
+            ambiguousOutcome: true,
           },
         };
         this.runs.saveTaskJudgeMetric(
@@ -1167,6 +1266,7 @@ export class EvaluationRunner {
             {
               stageKeyPrefix: `judge:${info.metricId}:${info.rubricVersion}`,
               runId: plan.runId,
+              jobId: hooks.jobId ?? null,
               pipelineId: pipeline.pipelineId,
               runTaskId: task.runTaskId,
               operation: 'judge',
@@ -1360,7 +1460,7 @@ export class EvaluationRunner {
           pipelineSucceededTasks += 1;
           continue;
         }
-        if (task.state === 'partial' && !hooks.isRetryJob) {
+        if (task.state === 'partial' && (!hooks.isRetryJob || hooks.jobId)) {
           pipelinePartialTasks += 1;
           continue;
         }
@@ -1539,6 +1639,16 @@ export class EvaluationRunner {
         runId,
         'failed',
         runOutcome.firstErrorMessage ?? 'All evaluation tasks failed.',
+        hooks.guard,
+      );
+      return;
+    }
+    if (runOutcome.hasOutstandingAmbiguousStage) {
+      this.runs.finalizeRun(
+        runId,
+        'failed',
+        runOutcome.ambiguousErrorMessage ??
+          'One or more stages have an ambiguous outcome after interruption or timeout. Explicit retry is required.',
         hooks.guard,
       );
       return;

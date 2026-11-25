@@ -2,7 +2,7 @@ import { realpathSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadEnvironment, readConfig, type Config } from '../config/env.js';
-import { restoreWorkspace } from '../db/backup.js';
+import { canonicalPath, pathsOverlap, restoreWorkspace } from '../db/backup.js';
 import { blobDirectory } from '../ingestion/blobs.js';
 
 export interface RestoreCliArgs {
@@ -56,15 +56,38 @@ export function resolveRestoreTargets(
   args: RestoreCliArgs,
   config: Config,
 ): { databasePath: string; blobDirectory: string } {
+  const configuredDb = config.env.DATABASE_PATH;
+  const configuredBlobs = blobDirectory(config);
   if (args.databasePath) {
+    if (args.blobDir) {
+      return {
+        databasePath: args.databasePath,
+        blobDirectory: args.blobDir,
+      };
+    }
+    const sameDatabase =
+      configuredDb !== ':memory:' &&
+      canonicalPath(args.databasePath) === canonicalPath(configuredDb);
+    if (sameDatabase) {
+      return {
+        databasePath: args.databasePath,
+        blobDirectory: configuredBlobs,
+      };
+    }
+    const implicitBlobs = join(dirname(args.databasePath), 'blobs');
+    if (pathsOverlap(implicitBlobs, configuredBlobs)) {
+      throw new Error(
+        `Implicit blob destination (${resolve(implicitBlobs)}) overlaps the configured workspace blob directory (${resolve(configuredBlobs)}). Pass an explicit distinct --blobs directory.`,
+      );
+    }
     return {
       databasePath: args.databasePath,
-      blobDirectory: args.blobDir ?? join(dirname(args.databasePath), 'blobs'),
+      blobDirectory: implicitBlobs,
     };
   }
   return {
-    databasePath: config.env.DATABASE_PATH,
-    blobDirectory: args.blobDir ?? blobDirectory(config),
+    databasePath: configuredDb,
+    blobDirectory: args.blobDir ?? configuredBlobs,
   };
 }
 

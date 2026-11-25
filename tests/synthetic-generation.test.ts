@@ -1386,4 +1386,95 @@ describe('Phase 9: synthetic test-set generation, validation, dedup, leakage pre
       'accepted',
     );
   });
+
+  it('keeps an all-null inline artifact mapping authoritative on synthetic batches even after a later parse succeeds', async () => {
+    const promptsSeen: string[] = [];
+    const fakeOpenAI: typeof fetch = vi.fn(async (_url, init) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as {
+        model: string;
+        messages: Array<{ role: string; content: string }>;
+      };
+      const userPrompt = body.messages[1]?.content ?? '';
+      promptsSeen.push(userPrompt);
+      const meta = parsePromptMeta(userPrompt);
+      const quote = meta.text.slice(0, 24);
+      return openaiChatResponse(
+        JSON.stringify({
+          proposals: [
+            {
+              question: `Question grounded in ${meta.documentName}?`,
+              expectedAnswer: 'Paraphrased summary of the original inline doc.',
+              acceptanceRule: 'Check summary.',
+              referenceFacts: ['inline doc'],
+              answerable: true,
+              sourceSpans: [
+                {
+                  documentVersionId: meta.documentVersionId,
+                  start: 0,
+                  end: quote.length,
+                  quote,
+                },
+              ],
+              qrels: [{ documentId: meta.documentId, grade: 3 }],
+            },
+          ],
+        }),
+        body.model,
+      );
+    });
+
+    const stack = setupStack(
+      {
+        OPENAI_API_KEY: 'fixture-key',
+        OPENAI_CHAT_MODEL: 'fixture-pin-chat',
+      },
+      { openai: fakeOpenAI },
+    );
+
+    const sample = stack.datasets.sample().value;
+    const targetDoc = sample.documents[0];
+    // Queue a batch against the sample dataset while EVERY document has artifactId === null (inline bytes).
+    const startRes = await send(
+      stack.app,
+      'POST',
+      `/api/v1/datasets/${sample.id}/generations`,
+      { documentIds: [targetDoc.id], count: 1 },
+    );
+    expect(startRes.status).toBe(202);
+    const created = c.createGenerationResult.parse(startRes.body);
+
+    // Record a LATER successful parse artifact with different text for the same document version!
+    const laterArtifactId = 'later-parse-artifact-id-1';
+    const laterText = 'COMPLETELY REPLACED LATER PARSE EXTRACTION TEXT';
+    db.prepare(
+      'INSERT INTO parse_artifacts(id, document_hash, parser_version, text, pages) VALUES (?, ?, ?, ?, ?)',
+    ).run(
+      laterArtifactId,
+      targetDoc.hash,
+      'llamaparse-markdown-v2',
+      laterText,
+      JSON.stringify([{ page: 1, start: 0, end: laterText.length }]),
+    );
+    db.prepare(
+      "INSERT INTO jobs(id, version_id, parser, state, stage, eligible, deadline, artifact_id) VALUES (?, ?, 'llama-parse', 'succeeded', 'complete', 0, 999999999, ?)",
+    ).run(
+      '99999999-9999-4999-8999-999999999999',
+      targetDoc.versionId,
+      laterArtifactId,
+    );
+
+    // Reloading the batch execution plan MUST preserve the frozen all-null inline mapping!
+    const plan = stack.generations.loadExecutionPlan(created.batch.id);
+    const targetSource = plan.revisionSources.find(
+      (s) => s.documentVersionId === targetDoc.versionId,
+    );
+    expect(targetSource?.artifactId).toBeNull();
+    expect(targetSource?.extraction).toBeUndefined();
+
+    // Executing the batch MUST feed the original inline bytes to the provider, NEVER laterText!
+    await stack.drain();
+    expect(promptsSeen).toHaveLength(1);
+    expect(promptsSeen[0]).not.toContain(laterText);
+    expect(promptsSeen[0]).toContain(targetDoc.content ?? '');
+  });
 });

@@ -65,6 +65,7 @@ export async function rebuildQdrantFromSqlite(
     const { profile, provider } = providers.resolveEmbedding(
       gen.embeddingModel,
       gen.embeddingProvider ?? undefined,
+      gen.embeddingEndpoint ?? undefined,
     );
     const embedded = await provider.embed({
       model: profile.model,

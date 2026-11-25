@@ -42,6 +42,10 @@ import {
 } from '../backend/src/retrieval/qdrant';
 import { rebuildQdrantFromSqlite } from '../backend/src/retrieval/rebuild';
 import { RetrievalService } from '../backend/src/retrieval/service';
+import {
+  resolveRestoreTargets,
+  parseRestoreArgs,
+} from '../backend/src/ops/restore';
 import { runComposeSmoke } from '../scripts/compose-smoke.mjs';
 import { send } from './inProcess';
 
@@ -1033,5 +1037,544 @@ describe('Phase 8 recovery: backup, restore, Qdrant rebuild, worker health, and 
     expect(readFileSync(join(expectedSiblingBlobs, uploadedKey))).toEqual(
       uploadBytes,
     );
+  });
+
+  it('rejects backup/restore overlap for directories starting with ".." like "..live"', async () => {
+    const container = join(rootDir, 'dotdot-container');
+    const liveDir = join(container, '..live');
+    const liveDbPath = join(liveDir, 'workspace.sqlite');
+    const liveBlobDir = join(liveDir, 'blobs');
+    const liveBytes = Buffer.from('Protected ..live workspace bytes.', 'utf8');
+
+    const db = openDatabase(liveDbPath);
+    let blobKey = '';
+    try {
+      const jobs = new Jobs(db);
+      const datasets = new Datasets(db, jobs);
+      const ds = datasets.create('DotDot Live Dataset');
+      const blob = await storeUpload(
+        liveBlobDir,
+        Readable.from([liveBytes]),
+        'text/plain',
+        1024 * 1024,
+      );
+      blobKey = blob.key;
+      datasets.addUpload(ds.id, ds.revision, 'dotdot.txt', blob, 'local', null);
+    } finally {
+      db.close();
+    }
+
+    // Output directory is parent of "..live" -> MUST reject overlap instead of deleting "..live"!
+    await expect(
+      backupWorkspace({
+        databasePath: liveDbPath,
+        blobDirectory: liveBlobDir,
+        outputDir: container,
+        overwrite: true,
+      }),
+    ).rejects.toThrow(/overlap/i);
+
+    expect(existsSync(liveDbPath)).toBe(true);
+    expect(readFileSync(join(liveBlobDir, blobKey))).toEqual(liveBytes);
+
+    // Take a valid backup in a separate dir, then verify restore rejects "..target" inside backupDir.
+    const validBackup = join(rootDir, 'dotdot-backup');
+    await backupWorkspace({
+      databasePath: liveDbPath,
+      blobDirectory: liveBlobDir,
+      outputDir: validBackup,
+    });
+    await expect(
+      restoreWorkspace({
+        backupDir: validBackup,
+        databasePath: join(validBackup, '..target', 'workspace.sqlite'),
+        blobDirectory: join(validBackup, '..target', 'blobs'),
+        force: true,
+      }),
+    ).rejects.toThrow(/overlap/i);
+  });
+
+  it('rejects restore --database without --blobs when implicit sibling blobs overlaps configured workspace blobs', async () => {
+    const workDir = join(rootDir, 'shared-dir');
+    const configuredDbPath = join(workDir, 'live.sqlite');
+    const configuredBlobDir = join(workDir, 'blobs');
+    mkdirSync(configuredBlobDir, { recursive: true });
+    const sentinelPath = join(configuredBlobDir, 'live-sentinel');
+    writeFileSync(sentinelPath, 'LIVE-BLOBS-DO-NOT-CLOBBER', 'utf8');
+
+    const config = readConfig({
+      DATABASE_PATH: configuredDbPath,
+    });
+
+    // Implicit blobs beside /shared-dir/copy.sqlite resolves to /shared-dir/blobs, overlapping live.sqlite's blobs!
+    const copyDbPath = join(workDir, 'copy.sqlite');
+    expect(() =>
+      resolveRestoreTargets(
+        parseRestoreArgs([
+          '--from',
+          join(rootDir, 'any-backup'),
+          '--database',
+          copyDbPath,
+          '--force',
+        ]),
+        config,
+      ),
+    ).toThrow(/--blobs/i);
+
+    // Providing an explicit distinct --blobs succeeds cleanly.
+    const distinctBlobs = join(workDir, 'copy-blobs');
+    expect(
+      resolveRestoreTargets(
+        parseRestoreArgs([
+          '--from',
+          join(rootDir, 'any-backup'),
+          '--database',
+          copyDbPath,
+          '--blobs',
+          distinctBlobs,
+          '--force',
+        ]),
+        config,
+      ),
+    ).toEqual({
+      databasePath: copyDbPath,
+      blobDirectory: distinctBlobs,
+    });
+
+    // Also verify the CLI rejects without modifying configured blobs.
+    const srcDir = join(rootDir, 'src-cli-overlap');
+    const srcDb = openDatabase(join(srcDir, 'workspace.sqlite'));
+    try {
+      new Datasets(srcDb).sample();
+    } finally {
+      srcDb.close();
+    }
+    const backupDir = join(rootDir, 'backup-cli-overlap');
+    await backupWorkspace({
+      databasePath: join(srcDir, 'workspace.sqlite'),
+      blobDirectory: join(srcDir, 'blobs'),
+      outputDir: backupDir,
+    });
+
+    expect(() =>
+      execFileSync(
+        process.execPath,
+        [
+          '--import',
+          'tsx',
+          resolve('backend/src/ops/restore.ts'),
+          '--from',
+          backupDir,
+          '--database',
+          copyDbPath,
+          '--force',
+        ],
+        {
+          env: {
+            ...process.env,
+            NODE_ENV: 'test',
+            DATABASE_PATH: configuredDbPath,
+          },
+          stdio: 'pipe',
+        },
+      ),
+    ).toThrow();
+    expect(readFileSync(sentinelPath, 'utf8')).toBe(
+      'LIVE-BLOBS-DO-NOT-CLOBBER',
+    );
+  });
+
+  it('restores a WAL-header backup from a read-only source directory (Docker :ro mount flow)', async () => {
+    const liveDir = join(rootDir, 'ro-live');
+    const liveDbPath = join(liveDir, 'workspace.sqlite');
+    const liveBlobDir = join(liveDir, 'blobs');
+    const roBackupDir = join(rootDir, 'ro-backup');
+    const restoredDir = join(rootDir, 'ro-restored');
+    const uploadBytes = Buffer.from(
+      'Read-only Docker restore WAL-header test payload.',
+      'utf8',
+    );
+
+    let blobKey = '';
+    const db = openDatabase(liveDbPath);
+    try {
+      const jobs = new Jobs(db);
+      const datasets = new Datasets(db, jobs);
+      const ds = datasets.create('Read-Only Restore Corpus');
+      const blob = await storeUpload(
+        liveBlobDir,
+        Readable.from([uploadBytes]),
+        'text/plain',
+        1024 * 1024,
+      );
+      blobKey = blob.key;
+      datasets.addUpload(ds.id, ds.revision, 'ro.txt', blob, 'local', null);
+
+      // Perform online backup while WAL DB is open so backup retains WAL header (bytes 18-19 = 2, 2).
+      await backupWorkspace({
+        databasePath: liveDbPath,
+        blobDirectory: liveBlobDir,
+        outputDir: roBackupDir,
+      });
+    } finally {
+      db.close();
+    }
+
+    const backupSqlite = join(roBackupDir, 'workspace.sqlite');
+    const header = readFileSync(backupSqlite);
+    expect(header[18]).toBe(2);
+    expect(header[19]).toBe(2);
+    expect(existsSync(`${backupSqlite}-wal`)).toBe(false);
+    expect(existsSync(`${backupSqlite}-shm`)).toBe(false);
+
+    // Lock down backup directory and files to read-only (simulating Docker `:ro` volume mount).
+    const roBlobsDir = join(roBackupDir, 'blobs');
+    const roBlobFile = join(roBlobsDir, blobKey);
+    const roManifest = join(roBackupDir, 'manifest.json');
+    chmodSync(backupSqlite, 0o400);
+    chmodSync(roManifest, 0o400);
+    chmodSync(roBlobFile, 0o400);
+    chmodSync(roBlobsDir, 0o500);
+    chmodSync(roBackupDir, 0o500);
+
+    try {
+      const result = await restoreWorkspace({
+        backupDir: roBackupDir,
+        databasePath: join(restoredDir, 'workspace.sqlite'),
+        blobDirectory: join(restoredDir, 'blobs'),
+      });
+      expect(result.restoredBlobs).toBe(1);
+      expect(readFileSync(join(restoredDir, 'blobs', blobKey))).toEqual(
+        uploadBytes,
+      );
+      const restoredDb = openDatabase(join(restoredDir, 'workspace.sqlite'));
+      try {
+        expect(ready(restoredDb)).toBe(true);
+        expect(new Datasets(restoredDb).list(10).items).toHaveLength(1);
+      } finally {
+        restoredDb.close();
+      }
+    } finally {
+      chmodSync(roBackupDir, 0o700);
+      chmodSync(roBlobsDir, 0o700);
+      chmodSync(roBlobFile, 0o600);
+      chmodSync(roManifest, 0o600);
+      chmodSync(backupSqlite, 0o600);
+    }
+  });
+
+  it('serializes concurrent backup and restore operations per destination and rechecks overwrite permission under lock', async () => {
+    const src1Dir = join(rootDir, 'race-src1');
+    const src2Dir = join(rootDir, 'race-src2');
+    const db1 = openDatabase(join(src1Dir, 'workspace.sqlite'));
+    try {
+      new Datasets(db1).create('Race Source 1');
+    } finally {
+      db1.close();
+    }
+    const db2 = openDatabase(join(src2Dir, 'workspace.sqlite'));
+    try {
+      new Datasets(db2).create('Race Source 2');
+    } finally {
+      db2.close();
+    }
+
+    // Two concurrent backups to the SAME destination without --overwrite:
+    // exactly one MUST succeed and the other MUST fail with an overwrite error.
+    const sharedOut = join(rootDir, 'race-backup-out');
+    const backupResults = await Promise.allSettled([
+      backupWorkspace({
+        databasePath: join(src1Dir, 'workspace.sqlite'),
+        blobDirectory: join(src1Dir, 'blobs'),
+        outputDir: sharedOut,
+        overwrite: false,
+      }),
+      backupWorkspace({
+        databasePath: join(src2Dir, 'workspace.sqlite'),
+        blobDirectory: join(src2Dir, 'blobs'),
+        outputDir: sharedOut,
+        overwrite: false,
+      }),
+    ]);
+    const backupFulfilled = backupResults.filter(
+      (r) => r.status === 'fulfilled',
+    );
+    const backupRejected = backupResults.filter((r) => r.status === 'rejected');
+    expect(backupFulfilled).toHaveLength(1);
+    expect(backupRejected).toHaveLength(1);
+    expect(String((backupRejected[0] as PromiseRejectedResult).reason)).toMatch(
+      /--overwrite/i,
+    );
+
+    // Two concurrent restores to the SAME destination without --force:
+    // exactly one MUST succeed and the other MUST fail with a --force error.
+    const b1 = join(rootDir, 'race-b1');
+    const b2 = join(rootDir, 'race-b2');
+    await backupWorkspace({
+      databasePath: join(src1Dir, 'workspace.sqlite'),
+      blobDirectory: join(src1Dir, 'blobs'),
+      outputDir: b1,
+    });
+    await backupWorkspace({
+      databasePath: join(src2Dir, 'workspace.sqlite'),
+      blobDirectory: join(src2Dir, 'blobs'),
+      outputDir: b2,
+    });
+
+    const sharedRestoreDir = join(rootDir, 'race-restore-target');
+    const sharedRestoreDb = join(sharedRestoreDir, 'workspace.sqlite');
+    const sharedRestoreBlobs = join(sharedRestoreDir, 'blobs');
+    const restoreResults = await Promise.allSettled([
+      restoreWorkspace({
+        backupDir: b1,
+        databasePath: sharedRestoreDb,
+        blobDirectory: sharedRestoreBlobs,
+        force: false,
+      }),
+      restoreWorkspace({
+        backupDir: b2,
+        databasePath: sharedRestoreDb,
+        blobDirectory: sharedRestoreBlobs,
+        force: false,
+      }),
+    ]);
+    const restoreFulfilled = restoreResults.filter(
+      (r) => r.status === 'fulfilled',
+    );
+    const restoreRejected = restoreResults.filter(
+      (r) => r.status === 'rejected',
+    );
+    expect(restoreFulfilled).toHaveLength(1);
+    expect(restoreRejected).toHaveLength(1);
+    expect(
+      String((restoreRejected[0] as PromiseRejectedResult).reason),
+    ).toMatch(/--force/i);
+
+    const checkDb = openDatabase(sharedRestoreDb);
+    try {
+      expect(ready(checkDb)).toBe(true);
+      expect(new Datasets(checkDb).list(10).items).toHaveLength(1);
+    } finally {
+      checkDb.close();
+    }
+  });
+
+  it('recovers an interrupted restore swap journal on workspace open and on next restore', async () => {
+    // 1. Set up original live workspace with a dataset and blob.
+    const liveDir = join(rootDir, 'journal-live');
+    const liveDbPath = join(liveDir, 'workspace.sqlite');
+    const liveBlobDir = join(liveDir, 'blobs');
+    const liveBytes = Buffer.from('Original live workspace payload.', 'utf8');
+    let liveDatasetId = '';
+    let liveBlobKey = '';
+    const db1 = openDatabase(liveDbPath);
+    try {
+      const jobs = new Jobs(db1);
+      const datasets = new Datasets(db1, jobs);
+      const ds = datasets.create('Original Journal Dataset');
+      liveDatasetId = ds.id;
+      const blob = await storeUpload(
+        liveBlobDir,
+        Readable.from([liveBytes]),
+        'text/plain',
+        1024 * 1024,
+      );
+      liveBlobKey = blob.key;
+      datasets.addUpload(ds.id, ds.revision, 'orig.txt', blob, 'local', null);
+    } finally {
+      db1.close();
+    }
+
+    // 2. Build a replacement backup.
+    const replSrcDir = join(rootDir, 'journal-repl-src');
+    const replBytes = Buffer.from('Replacement workspace payload.', 'utf8');
+    let replDatasetId = '';
+    let replBlobKey = '';
+    const db2 = openDatabase(join(replSrcDir, 'workspace.sqlite'));
+    try {
+      const jobs = new Jobs(db2);
+      const datasets = new Datasets(db2, jobs);
+      const ds = datasets.create('Replacement Journal Dataset');
+      replDatasetId = ds.id;
+      const blob = await storeUpload(
+        join(replSrcDir, 'blobs'),
+        Readable.from([replBytes]),
+        'text/plain',
+        1024 * 1024,
+      );
+      replBlobKey = blob.key;
+      datasets.addUpload(ds.id, ds.revision, 'repl.txt', blob, 'local', null);
+    } finally {
+      db2.close();
+    }
+    const replBackup = join(rootDir, 'journal-repl-backup');
+    await backupWorkspace({
+      databasePath: join(replSrcDir, 'workspace.sqlite'),
+      blobDirectory: join(replSrcDir, 'blobs'),
+      outputDir: replBackup,
+    });
+
+    // 3. Simulate a hard crash during swap right AFTER installing replacement blobs
+    // and BEFORE installing replacement SQLite DB (phase: 'swapping').
+    const stageId = 'crash-stage-1';
+    const stagedDbPath = `${liveDbPath}.restore-stage-${stageId}`;
+    const stagedBlobsDir = join(liveDir, `.blobs-restore-stage-${stageId}`);
+    const prevDbPath = `${liveDbPath}.restore-prev-${stageId}`;
+    const prevWalPath = `${liveDbPath}-wal.restore-prev-${stageId}`;
+    const prevShmPath = `${liveDbPath}-shm.restore-prev-${stageId}`;
+    const prevBlobsDir = join(liveDir, `.blobs-restore-prev-${stageId}`);
+    const journalPath = `${liveDbPath}.restore-journal.json`;
+
+    // Move original live files aside, install replacement blobs, leave replacement DB in staging.
+    const { renameSync, copyFileSync } = await import('node:fs');
+    renameSync(liveDbPath, prevDbPath);
+    const hadPrevWal = existsSync(`${liveDbPath}-wal`);
+    if (hadPrevWal) renameSync(`${liveDbPath}-wal`, prevWalPath);
+    const hadPrevShm = existsSync(`${liveDbPath}-shm`);
+    if (hadPrevShm) renameSync(`${liveDbPath}-shm`, prevShmPath);
+    renameSync(liveBlobDir, prevBlobsDir);
+    mkdirSync(liveBlobDir, { recursive: true });
+    copyFileSync(
+      join(replBackup, 'blobs', replBlobKey),
+      join(liveBlobDir, replBlobKey),
+    );
+    copyFileSync(join(replBackup, 'workspace.sqlite'), stagedDbPath);
+
+    writeFileSync(
+      journalPath,
+      JSON.stringify({
+        version: 1,
+        stageId,
+        phase: 'swapping',
+        targetDbPath: liveDbPath,
+        targetBlobsDir: liveBlobDir,
+        stagedDbPath,
+        stagedBlobsDir,
+        prevDbPath,
+        prevWalPath,
+        prevShmPath,
+        prevBlobsDir,
+        hadPrevDb: true,
+        hadPrevWal,
+        hadPrevShm,
+        hadPrevBlobs: true,
+        createdAt: new Date().toISOString(),
+      }),
+      'utf8',
+    );
+
+    // Target DB is currently absent! Opening the workspace MUST roll back from the journal first.
+    expect(existsSync(liveDbPath)).toBe(false);
+    const recoveredDb = openDatabase(liveDbPath);
+    try {
+      expect(ready(recoveredDb)).toBe(true);
+      expect(new Datasets(recoveredDb).get(liveDatasetId).name).toBe(
+        'Original Journal Dataset',
+      );
+    } finally {
+      recoveredDb.close();
+    }
+    expect(existsSync(journalPath)).toBe(false);
+    expect(existsSync(prevDbPath)).toBe(false);
+    expect(existsSync(stagedDbPath)).toBe(false);
+    expect(existsSync(prevBlobsDir)).toBe(false);
+    expect(readFileSync(join(liveBlobDir, liveBlobKey))).toEqual(liveBytes);
+    expect(existsSync(join(liveBlobDir, replBlobKey))).toBe(false);
+
+    // 4. Simulate a crash after 'committed' (replacement is live & verified, old prev files left behind).
+    await restoreWorkspace({
+      backupDir: replBackup,
+      databasePath: liveDbPath,
+      blobDirectory: liveBlobDir,
+      force: true,
+    });
+    const stalePrevDb = `${liveDbPath}.restore-prev-committed-1`;
+    const stalePrevBlobs = join(liveDir, '.blobs-restore-prev-committed-1');
+    writeFileSync(stalePrevDb, 'old-db-leftover', 'utf8');
+    mkdirSync(stalePrevBlobs, { recursive: true });
+    writeFileSync(join(stalePrevBlobs, 'old'), 'old-blob', 'utf8');
+    writeFileSync(
+      journalPath,
+      JSON.stringify({
+        version: 1,
+        stageId: 'committed-1',
+        phase: 'committed',
+        targetDbPath: liveDbPath,
+        targetBlobsDir: liveBlobDir,
+        stagedDbPath: `${liveDbPath}.restore-stage-committed-1`,
+        stagedBlobsDir: join(liveDir, '.blobs-restore-stage-committed-1'),
+        prevDbPath: stalePrevDb,
+        prevWalPath: `${liveDbPath}-wal.restore-prev-committed-1`,
+        prevShmPath: `${liveDbPath}-shm.restore-prev-committed-1`,
+        prevBlobsDir: stalePrevBlobs,
+        hadPrevDb: true,
+        hadPrevWal: false,
+        hadPrevShm: false,
+        hadPrevBlobs: true,
+        createdAt: new Date().toISOString(),
+      }),
+      'utf8',
+    );
+
+    const committedDb = openDatabase(liveDbPath);
+    try {
+      expect(new Datasets(committedDb).get(replDatasetId).name).toBe(
+        'Replacement Journal Dataset',
+      );
+    } finally {
+      committedDb.close();
+    }
+    expect(existsSync(journalPath)).toBe(false);
+    expect(existsSync(stalePrevDb)).toBe(false);
+    expect(existsSync(stalePrevBlobs)).toBe(false);
+    expect(readFileSync(join(liveBlobDir, replBlobKey))).toEqual(replBytes);
+
+    // 5. Simulate an interrupted 'swapping' journal encountered by the NEXT restoreWorkspace() call:
+    // restoreWorkspace MUST roll back the interrupted swap first and then enforce --force!
+    const nextStageId = 'crash-before-next-restore';
+    const nextPrevDb = `${liveDbPath}.restore-prev-${nextStageId}`;
+    const nextPrevBlobs = join(liveDir, `.blobs-restore-prev-${nextStageId}`);
+    const nextStagedDb = `${liveDbPath}.restore-stage-${nextStageId}`;
+    renameSync(liveDbPath, nextPrevDb);
+    rmSync(`${liveDbPath}-wal`, { force: true });
+    rmSync(`${liveDbPath}-shm`, { force: true });
+    renameSync(liveBlobDir, nextPrevBlobs);
+    mkdirSync(liveBlobDir, { recursive: true });
+    writeFileSync(join(liveBlobDir, 'partial-uncommitted'), 'junk', 'utf8');
+    writeFileSync(nextStagedDb, 'uncommitted-db', 'utf8');
+    writeFileSync(
+      journalPath,
+      JSON.stringify({
+        version: 1,
+        stageId: nextStageId,
+        phase: 'swapping',
+        targetDbPath: liveDbPath,
+        targetBlobsDir: liveBlobDir,
+        stagedDbPath: nextStagedDb,
+        stagedBlobsDir: join(liveDir, `.blobs-restore-stage-${nextStageId}`),
+        prevDbPath: nextPrevDb,
+        prevWalPath: `${liveDbPath}-wal.restore-prev-${nextStageId}`,
+        prevShmPath: `${liveDbPath}-shm.restore-prev-${nextStageId}`,
+        prevBlobsDir: nextPrevBlobs,
+        hadPrevDb: true,
+        hadPrevWal: false,
+        hadPrevShm: false,
+        hadPrevBlobs: true,
+        createdAt: new Date().toISOString(),
+      }),
+      'utf8',
+    );
+    await expect(
+      restoreWorkspace({
+        backupDir: replBackup,
+        databasePath: liveDbPath,
+        blobDirectory: liveBlobDir,
+        force: false,
+      }),
+    ).rejects.toThrow(/--force/i);
+    expect(existsSync(journalPath)).toBe(false);
+    expect(existsSync(liveDbPath)).toBe(true);
+    expect(readFileSync(join(liveBlobDir, replBlobKey))).toEqual(replBytes);
+    expect(existsSync(join(liveBlobDir, 'partial-uncommitted'))).toBe(false);
   });
 });

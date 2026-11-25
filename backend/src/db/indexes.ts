@@ -37,6 +37,7 @@ export interface KeywordHitRow {
 
 export interface StoredIndexGeneration extends IndexGeneration {
   qdrantCollection: string | null;
+  embeddingEndpoint: string | null;
 }
 
 const UUID_PATTERN =
@@ -59,6 +60,7 @@ const selectGeneration = `
   SELECT g.id, g.dataset_id AS datasetId, g.dataset_revision AS datasetRevision,
     g.fingerprint, g.state, g.mode, g.chunk_config AS chunkConfig,
     g.embedding_provider AS embeddingProvider, g.embedding_model AS embeddingModel,
+    g.embedding_endpoint AS embeddingEndpoint,
     g.embedding_dimensions AS embeddingDimensions, g.qdrant_collection AS qdrantCollection,
     g.chunk_count AS chunkCount, g.error_message AS errorMessage,
     g.created_at AS createdAt, g.ready_at AS readyAt,
@@ -88,13 +90,15 @@ function decodeGeneration(row: Record<string, unknown>): StoredIndexGeneration {
     ...parsed,
     qdrantCollection:
       typeof row.qdrantCollection === 'string' ? row.qdrantCollection : null,
+    embeddingEndpoint:
+      typeof row.embeddingEndpoint === 'string' ? row.embeddingEndpoint : null,
   };
 }
 
 export function publicGeneration(
   stored: StoredIndexGeneration,
 ): IndexGeneration {
-  const { qdrantCollection: _c, ...rest } = stored;
+  const { qdrantCollection: _c, embeddingEndpoint: _e, ...rest } = stored;
   return rest;
 }
 
@@ -337,6 +341,7 @@ export class Indexes {
     embedding: {
       provider: 'openai' | 'openai-compatible';
       model: string;
+      endpoint?: string | null;
       expectedDimensions?: number;
     } | null,
     idempotencyKey: string | null = null,
@@ -367,6 +372,7 @@ export class Indexes {
               ? {
                   provider: embedding.provider,
                   model: embedding.model,
+                  endpoint: embedding.endpoint ?? null,
                   expectedDimensions: embedding.expectedDimensions ?? null,
                 }
               : null,
@@ -405,8 +411,8 @@ export class Indexes {
         .prepare(
           `INSERT INTO index_generations(
             id, dataset_id, dataset_revision, fingerprint, state, mode,
-            chunk_config, embedding_provider, embedding_model, created_at
-          ) VALUES (?, ?, ?, ?, 'building', ?, ?, ?, ?, ?)`,
+            chunk_config, embedding_provider, embedding_model, embedding_endpoint, created_at
+          ) VALUES (?, ?, ?, ?, 'building', ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           generationId,
@@ -417,6 +423,7 @@ export class Indexes {
           JSON.stringify(request.chunking),
           request.mode === 'keyword' ? null : (embedding?.provider ?? null),
           request.mode === 'keyword' ? null : (embedding?.model ?? null),
+          request.mode === 'keyword' ? null : (embedding?.endpoint ?? null),
           new Date(this.now()).toISOString(),
         );
       const insertPinned = this.db.prepare(

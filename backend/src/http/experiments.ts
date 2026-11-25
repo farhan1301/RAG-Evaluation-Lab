@@ -45,6 +45,7 @@ export function experimentsRouter(runs: Runs, config: Config) {
     const body = parse(c.createRunRequest, req.body ?? {});
     const result = runs.createRun(req.params.id, body, {
       capabilities: config.capabilities,
+      providerProfiles: config.providerProfiles,
       pricing: config.pricing,
       budgets: config.budgets,
       idempotencyKey: requestKey(req),

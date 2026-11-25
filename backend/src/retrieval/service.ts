@@ -41,13 +41,16 @@ export interface RetrievalProviderCallAudit {
   requestId: string | null;
   latencyMs: number;
   usage?: ProviderUsage;
-  status: 'succeeded' | 'failed' | 'timeout' | 'cancelled';
+  status: 'succeeded' | 'failed' | 'timeout' | 'cancelled' | 'ambiguous';
   errorCode: string | null;
 }
 
 export interface SearchAuditHooks {
   expectedEmbeddingProvider?: ProviderKind;
+  expectedEmbeddingEndpoint?: string;
   expectedRerankerProvider?: ProviderKind;
+  expectedRerankerModel?: string;
+  expectedRerankerEndpoint?: string;
   onProviderCallStart?: (call: {
     operation: 'query_embed' | 'rerank';
     provider: ProviderKind;
@@ -112,11 +115,12 @@ export class RetrievalService {
     }
 
     if (request.reranker.enabled) {
-      // Validate reranker capability up front before doing retrieval work.
+      // Validate reranker capability (including frozen default model & endpoint) up front before doing retrieval work.
       try {
         this.providers.resolveReranker(
-          request.reranker.model,
+          audit?.expectedRerankerModel || request.reranker.model,
           audit?.expectedRerankerProvider,
+          audit?.expectedRerankerEndpoint,
         );
       } catch (err) {
         if (err instanceof ProviderError) throw err.toApiError();
@@ -177,6 +181,10 @@ export class RetrievalService {
         audit?.expectedEmbeddingProvider ??
         generation.embeddingProvider ??
         undefined;
+      const expectedEmbedEndpoint =
+        audit?.expectedEmbeddingEndpoint ??
+        generation.embeddingEndpoint ??
+        undefined;
       if (
         audit?.expectedEmbeddingProvider &&
         generation.embeddingProvider &&
@@ -188,11 +196,23 @@ export class RetrievalService {
           `Frozen embedding provider "${audit.expectedEmbeddingProvider}" does not match index generation provider "${generation.embeddingProvider}".`,
         );
       }
+      if (
+        audit?.expectedEmbeddingEndpoint &&
+        generation.embeddingEndpoint &&
+        audit.expectedEmbeddingEndpoint !== generation.embeddingEndpoint
+      ) {
+        throw new ApiError(
+          422,
+          'missing_capability',
+          'Frozen embedding endpoint does not match index generation endpoint.',
+        );
+      }
       const { profile, provider } = (() => {
         try {
           return this.providers.resolveEmbedding(
             generation.embeddingModel,
             expectedEmbedProvider,
+            expectedEmbedEndpoint,
           );
         } catch (err) {
           if (err instanceof ProviderError) throw err.toApiError();
@@ -205,6 +225,7 @@ export class RetrievalService {
           provider: provider.kind,
           model: profile.model,
         }) ?? undefined;
+      let embedAudited = false;
       try {
         const embedded = await provider.embed({
           model: profile.model,
@@ -213,6 +234,34 @@ export class RetrievalService {
           signal,
         });
         const embedLatency = Math.max(0, this.now() - embedStart);
+        if (embedded.vectors.length !== 1) {
+          embedAudited = true;
+          audit?.onProviderCall?.({
+            callId: embedCallId,
+            operation: 'query_embed',
+            provider: embedded.provider,
+            model: embedded.model,
+            requestId: embedded.requestIds[0] ?? null,
+            latencyMs: embedLatency,
+            usage: embedded.usage,
+            status: 'failed',
+            errorCode: 'partial_batch',
+          });
+          throw new ProviderError(
+            'partial_batch',
+            'Query embedding did not return exactly one vector.',
+            {
+              callMeta: {
+                provider: embedded.provider,
+                model: embedded.model,
+                requestId: embedded.requestIds[0] ?? null,
+                usage: embedded.usage,
+                latencyMs: embedLatency,
+              },
+            },
+          );
+        }
+        embedAudited = true;
         audit?.onProviderCall?.({
           callId: embedCallId,
           operation: 'query_embed',
@@ -224,30 +273,28 @@ export class RetrievalService {
           status: 'succeeded',
           errorCode: null,
         });
-        if (embedded.vectors.length !== 1) {
-          throw new ProviderError(
-            'partial_batch',
-            'Query embedding did not return exactly one vector.',
-          );
-        }
         queryVector = embedded.vectors[0];
         embeddingUsage = embedded.usage;
       } catch (err) {
         const embedLatency = Math.max(0, this.now() - embedStart);
-        if (!(err instanceof ProviderError && err.code === 'partial_batch')) {
+        if (!embedAudited) {
           const isTimeout =
             err instanceof ProviderError && err.code === 'timeout';
+          const callMeta =
+            err instanceof ProviderError ? err.callMeta : undefined;
+          embedAudited = true;
           audit?.onProviderCall?.({
             callId: embedCallId,
             operation: 'query_embed',
-            provider: provider.kind,
-            model: profile.model,
-            requestId: null,
-            latencyMs: embedLatency,
+            provider: callMeta?.provider ?? provider.kind,
+            model: callMeta?.model ?? profile.model,
+            requestId: callMeta?.requestId ?? null,
+            latencyMs: callMeta?.latencyMs ?? embedLatency,
+            usage: callMeta?.usage,
             status: signal?.aborted
               ? 'cancelled'
               : isTimeout
-                ? 'timeout'
+                ? 'ambiguous'
                 : 'failed',
             errorCode:
               err instanceof ProviderError ? err.code : 'upstream_failure',
@@ -359,8 +406,9 @@ export class RetrievalService {
       const { profile, provider } = (() => {
         try {
           return this.providers.resolveReranker(
-            request.reranker.model,
+            audit?.expectedRerankerModel || request.reranker.model,
             audit?.expectedRerankerProvider,
+            audit?.expectedRerankerEndpoint,
           );
         } catch (err) {
           if (err instanceof ProviderError) throw err.toApiError();
@@ -373,6 +421,7 @@ export class RetrievalService {
           provider: provider.kind,
           model: profile.model,
         }) ?? undefined;
+      let rerankAudited = false;
       try {
         const result = await provider.rerank({
           model: profile.model,
@@ -382,6 +431,7 @@ export class RetrievalService {
           signal,
         });
         rerankUsage = result.usage;
+        rerankAudited = true;
         audit?.onProviderCall?.({
           callId: rerankCallId,
           operation: 'rerank',
@@ -421,23 +471,26 @@ export class RetrievalService {
         reranked = true;
         rerankStatus = 'applied';
       } catch (err) {
-        const isTimeout =
-          err instanceof ProviderError && err.code === 'timeout';
-        audit?.onProviderCall?.({
-          callId: rerankCallId,
-          operation: 'rerank',
-          provider: provider.kind,
-          model: profile.model,
-          requestId: null,
-          latencyMs: Math.max(0, this.now() - rerankStart),
-          status: signal?.aborted
-            ? 'cancelled'
-            : isTimeout
-              ? 'timeout'
-              : 'failed',
-          errorCode:
-            err instanceof ProviderError ? err.code : 'upstream_failure',
-        });
+        if (!rerankAudited) {
+          const isTimeout =
+            err instanceof ProviderError && err.code === 'timeout';
+          rerankAudited = true;
+          audit?.onProviderCall?.({
+            callId: rerankCallId,
+            operation: 'rerank',
+            provider: provider.kind,
+            model: profile.model,
+            requestId: null,
+            latencyMs: Math.max(0, this.now() - rerankStart),
+            status: signal?.aborted
+              ? 'cancelled'
+              : isTimeout
+                ? 'ambiguous'
+                : 'failed',
+            errorCode:
+              err instanceof ProviderError ? err.code : 'upstream_failure',
+          });
+        }
         const safeMessage =
           err instanceof ProviderError || err instanceof ApiError
             ? err.message
@@ -517,6 +570,7 @@ export class RetrievalService {
       question?: string;
       model?: string;
       provider?: ProviderKind;
+      expectedEndpoint?: string;
       expectedStructuredOutput?: boolean;
       temperature?: number;
       maxTokens?: number;
@@ -531,6 +585,7 @@ export class RetrievalService {
         'chat',
         options.model,
         options.provider,
+        options.expectedEndpoint,
       );
     } catch (err) {
       if (err instanceof ProviderError) throw err.toApiError();

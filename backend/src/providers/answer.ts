@@ -10,7 +10,7 @@ import type { ChatProvider } from './types.js';
 
 const structuredAnswerSchema = z.strictObject({
   answer: z.string().trim().min(1),
-  citations: z.array(z.string().trim().min(1)).default([]),
+  citations: z.array(z.string().trim().min(1)),
   abstained: z.boolean(),
 });
 

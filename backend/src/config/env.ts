@@ -184,7 +184,41 @@ const envSchema = z
 export interface ResolvedProviderProfile extends Profile {
   apiKey?: string;
   baseURL?: string;
+  endpointIdentity: string | null;
   expectedDimensions?: number;
+}
+
+const DEFAULT_PROVIDER_BASE_URLS: Partial<Record<ProviderKind, string>> = {
+  openai: 'https://api.openai.com/v1',
+  anthropic: 'https://api.anthropic.com',
+};
+
+/**
+ * Computes a credential-free normalized endpoint identity for provider pinning
+ * and dense-index reuse (`<provider>:<scheme>//<host><path>`, without API keys,
+ * userinfo, query parameters, fragments, or trailing slashes).
+ */
+export function providerEndpointIdentity(
+  provider: ProviderKind,
+  baseURL?: string,
+): string | null {
+  const raw = baseURL?.trim() || DEFAULT_PROVIDER_BASE_URLS[provider];
+  if (!raw) return null;
+  const parsed = URL.parse(raw);
+  if (!parsed) return null;
+  const normalizedPath = parsed.pathname.replace(/\/+$/, '');
+  return `${provider}:${parsed.protocol}//${parsed.host}${normalizedPath}`;
+}
+
+const capabilitiesProfiles = new WeakMap<
+  Capabilities,
+  ResolvedProviderProfile[]
+>();
+
+export function providerProfilesForCapabilities(
+  caps: Capabilities,
+): ResolvedProviderProfile[] | undefined {
+  return capabilitiesProfiles.get(caps);
 }
 
 function buildOptions(
@@ -229,7 +263,11 @@ export function readConfig(input: NodeJS.ProcessEnv = process.env) {
       options: buildOptions(role, caps),
       capabilities: caps,
     });
-    providerProfiles.push({ ...safe, ...connection });
+    providerProfiles.push({
+      ...safe,
+      ...connection,
+      endpointIdentity: providerEndpointIdentity(provider, connection.baseURL),
+    });
   };
 
   add(
@@ -418,7 +456,13 @@ export function readConfig(input: NodeJS.ProcessEnv = process.env) {
   }
 
   const profiles: Capabilities['profiles'] = providerProfiles.map(
-    ({ apiKey: _k, baseURL: _u, expectedDimensions: _d, ...safe }) => safe,
+    ({
+      apiKey: _k,
+      baseURL: _u,
+      endpointIdentity: _e,
+      expectedDimensions: _d,
+      ...safe
+    }) => safe,
   );
   const llamaParseApiKey = env.LLAMA_CLOUD_API_KEY ?? env.LLAMA_PARSE_API_KEY;
   let pricing: PriceSchedule = priceSchedule.parse({
@@ -438,6 +482,13 @@ export function readConfig(input: NodeJS.ProcessEnv = process.env) {
       );
     }
   }
+  const parsedCapabilities = capabilities.parse({
+    profiles,
+    cloudParser: Boolean(llamaParseApiKey),
+    denseStore: Boolean(env.QDRANT_URL),
+    workerOnline: false,
+  });
+  capabilitiesProfiles.set(parsedCapabilities, providerProfiles);
   return {
     env,
     providerProfiles,
@@ -446,12 +497,7 @@ export function readConfig(input: NodeJS.ProcessEnv = process.env) {
       maxTokens: env.RUN_MAX_TOKENS ?? null,
       maxCostUsd: env.RUN_MAX_COST_USD ?? null,
     },
-    capabilities: capabilities.parse({
-      profiles,
-      cloudParser: Boolean(llamaParseApiKey),
-      denseStore: Boolean(env.QDRANT_URL),
-      workerOnline: false,
-    }),
+    capabilities: parsedCapabilities,
     qdrant: env.QDRANT_URL
       ? {
           url: env.QDRANT_URL.replace(/\/$/, ''),

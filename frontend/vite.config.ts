@@ -41,6 +41,7 @@ export default defineConfig({
   server: {
     host: devHost,
     port: devPort,
+    strictPort: true,
     proxy: {
       // The dev server stands in for the single origin used in production, so
       // rewrite ONLY the dev server's own origin to the backend origin and

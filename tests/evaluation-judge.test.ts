@@ -340,22 +340,50 @@ describe('structured LLM-judge metrics and versioned rubrics', () => {
       reason: 'Policy refusal fixture.',
     });
 
-    // Timeout after retry -> judge_timeout with null value and retry recorded
+    // Post-dispatch timeout MUST NOT auto-retry (provider cannot deduplicate); recorded as ambiguous timeout with null value
     const timedOut = await evaluateJudgeMetric({
       metricId: 'answer_relevance',
       task: sampleTask,
       provider: makeFakeProvider([
         new ProviderError('timeout', 'Timed out.', { retryable: true }),
-        new ProviderError('timeout', 'Timed out again.', { retryable: true }),
+        new ProviderError('timeout', 'Should not be dispatched.', {
+          retryable: true,
+        }),
       ]).provider,
       model: 'judge-model-a',
       maxTransientRetries: 1,
     });
-    expect(timedOut.attempts).toHaveLength(2);
-    expect(timedOut.attempts[1]?.isRetry).toBe(true);
+    expect(timedOut.attempts).toHaveLength(1);
+    expect(timedOut.attempts[0]).toMatchObject({
+      status: 'timeout',
+      callStatus: 'ambiguous',
+      errorCode: 'timeout',
+      isRetry: false,
+    });
     expect(timedOut.observation).toMatchObject({
       status: 'judge_timeout',
       value: null,
+    });
+
+    // Retryable non-timeout upstream rejection (e.g. HTTP 429) STILL retries transiently
+    const throttled = await evaluateJudgeMetric({
+      metricId: 'answer_relevance',
+      task: sampleTask,
+      provider: makeFakeProvider([
+        new ProviderError('upstream_failure', 'Rate limited.', {
+          status: 429,
+          retryable: true,
+        }),
+        JSON.stringify({ refused: false, grade: 4, rationale: 'Good.' }),
+      ]).provider,
+      model: 'judge-model-a',
+      maxTransientRetries: 1,
+    });
+    expect(throttled.attempts).toHaveLength(2);
+    expect(throttled.attempts[1]?.isRetry).toBe(true);
+    expect(throttled.observation).toMatchObject({
+      status: 'scored',
+      value: 1,
     });
 
     // Missing prerequisites never invent zeros (except empty retrieval on context precision/recall)

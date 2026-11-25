@@ -193,21 +193,8 @@ export class AnthropicProvider implements ChatProvider {
       throw mapAnthropicError(err);
     }
 
-    const content = (response.content ?? [])
-      .filter(
-        (block): block is Anthropic.Messages.TextBlock =>
-          block.type === 'text' && typeof block.text === 'string',
-      )
-      .map((block) => block.text)
-      .join('');
-
-    if (!content.trim()) {
-      throw new ProviderError(
-        'malformed_response',
-        'Anthropic returned empty text content.',
-      );
-    }
-
+    const requestId = extractRequestId(response);
+    const responseModel = response.model || request.model;
     let usage: ProviderUsage | undefined;
     if (response.usage) {
       const inputTokens = response.usage.input_tokens ?? 0;
@@ -223,11 +210,34 @@ export class AnthropicProvider implements ChatProvider {
       };
     }
 
+    const content = (response.content ?? [])
+      .filter(
+        (block): block is Anthropic.Messages.TextBlock =>
+          block.type === 'text' && typeof block.text === 'string',
+      )
+      .map((block) => block.text)
+      .join('');
+
+    if (!content.trim()) {
+      throw new ProviderError(
+        'malformed_response',
+        'Anthropic returned empty text content.',
+        {
+          callMeta: {
+            provider: 'anthropic',
+            model: responseModel,
+            requestId,
+            usage,
+          },
+        },
+      );
+    }
+
     return {
       content,
-      model: response.model || request.model,
+      model: responseModel,
       provider: 'anthropic',
-      requestId: extractRequestId(response),
+      requestId,
       usage,
       effectiveParams,
     };

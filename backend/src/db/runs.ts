@@ -40,6 +40,10 @@ import {
   type RunSummary,
   type RunTaskDetail,
 } from '@rag-eval/contracts';
+import {
+  providerProfilesForCapabilities,
+  type ResolvedProviderProfile,
+} from '../config/env.js';
 import { ApiError, missing } from '../errors.js';
 import {
   aggregateMetricObservations,
@@ -69,12 +73,25 @@ import type { Pipelines } from './pipelines.js';
 export const PROMPT_VERSION = 'grounded-answer-v1';
 export const SOFTWARE_VERSION = '1.0.0';
 
+const frozenPipelineEndpointsSchema = z.strictObject({
+  embedding: z.string().nullable(),
+  rerank: z.string().nullable(),
+  chat: z.string().nullable(),
+  judge: z.string().nullable(),
+});
+export type ResolvedPipelineEndpoints = z.infer<
+  typeof frozenPipelineEndpointsSchema
+>;
+
 const frozenSnapshotSchema = z.strictObject({
   softwareVersion: z.string(),
   datasetId: z.uuid(),
   datasetRevision: z.int().positive(),
   datasetName: z.string(),
   documentArtifacts: z.record(z.string(), z.string().nullable()).optional(),
+  pipelineEndpoints: z
+    .record(z.string(), frozenPipelineEndpointsSchema)
+    .optional(),
   mode: z.enum(['retrieval_only', 'full_rag']),
   judgeEnabled: z.boolean(),
   cutoffs: z.array(z.int().positive()),
@@ -102,6 +119,7 @@ export interface ExecutionPlanPipeline {
   config: PipelineConfig;
   configHash: string;
   resolvedModels: ResolvedPipelineModels;
+  resolvedEndpoints: ResolvedPipelineEndpoints;
   indexGenerationId: string | null;
   indexReused: boolean;
   indexTimeMs: number | null;
@@ -152,6 +170,7 @@ export interface ExecutionPlan {
 
 export interface CreateRunOptions {
   capabilities: Capabilities;
+  providerProfiles?: ResolvedProviderProfile[];
   pricing: PriceSchedule;
   budgets: { maxTokens: number | null; maxCostUsd: number | null };
   idempotencyKey?: string | null;
@@ -199,8 +218,15 @@ function resolvePipelineModels(
   mode: RunMode,
   judgeEnabled: boolean,
   capabilities: Capabilities,
-): ResolvedPipelineModels {
+  providerProfiles?: ResolvedProviderProfile[],
+): {
+  resolvedModels: ResolvedPipelineModels;
+  resolvedEndpoints: ResolvedPipelineEndpoints;
+} {
   validatePipelineCapabilities(config, capabilities);
+
+  const detailedProfiles =
+    providerProfiles ?? providerProfilesForCapabilities(capabilities);
 
   const findRole = (
     role: 'embedding' | 'chat' | 'judge' | 'rerank',
@@ -209,8 +235,17 @@ function resolvePipelineModels(
     capabilities.profiles.find(
       (p) => p.role === role && (!model || p.model === model),
     );
+  const findEndpoint = (
+    role: 'embedding' | 'chat' | 'judge' | 'rerank',
+    provider: ProviderKind,
+    model: string,
+  ): string | null =>
+    detailedProfiles?.find(
+      (p) => p.role === role && p.provider === provider && p.model === model,
+    )?.endpointIdentity ?? null;
 
   let embedding: ResolvedPipelineModels['embedding'] = null;
+  let embeddingEndpoint: string | null = null;
   if (config.retriever.mode === 'dense' || config.retriever.mode === 'hybrid') {
     const profile = findRole('embedding', config.embedding.model);
     if (!profile) {
@@ -221,9 +256,15 @@ function resolvePipelineModels(
       );
     }
     embedding = { provider: profile.provider, model: profile.model };
+    embeddingEndpoint = findEndpoint(
+      'embedding',
+      profile.provider,
+      profile.model,
+    );
   }
 
   let rerank: ResolvedPipelineModels['rerank'] = null;
+  let rerankEndpoint: string | null = null;
   if (config.reranker.enabled) {
     const profile = findRole('rerank', config.reranker.model);
     if (!profile) {
@@ -234,10 +275,13 @@ function resolvePipelineModels(
       );
     }
     rerank = { provider: profile.provider, model: profile.model };
+    rerankEndpoint = findEndpoint('rerank', profile.provider, profile.model);
   }
 
   let chat: ResolvedPipelineModels['chat'] = null;
+  let chatEndpoint: string | null = null;
   let judge: ResolvedPipelineModels['judge'] = null;
+  let judgeEndpoint: string | null = null;
 
   if (mode === 'full_rag') {
     const chatProfile = findRole('chat', config.llm.model);
@@ -263,6 +307,11 @@ function resolvePipelineModels(
         : null,
       structuredOutput: chatProfile.capabilities.structuredOutput,
     };
+    chatEndpoint = findEndpoint(
+      'chat',
+      chatProfile.provider,
+      chatProfile.model,
+    );
 
     if (judgeEnabled) {
       const judgeProfile = findRole('judge', config.judge.model);
@@ -279,10 +328,23 @@ function resolvePipelineModels(
         effectiveTemperature: judgeProfile.capabilities.temperature ? 0 : null,
         structuredOutput: judgeProfile.capabilities.structuredOutput,
       };
+      judgeEndpoint = findEndpoint(
+        'judge',
+        judgeProfile.provider,
+        judgeProfile.model,
+      );
     }
   }
 
-  return { embedding, rerank, chat, judge };
+  return {
+    resolvedModels: { embedding, rerank, chat, judge },
+    resolvedEndpoints: {
+      embedding: embeddingEndpoint,
+      rerank: rerankEndpoint,
+      chat: chatEndpoint,
+      judge: judgeEndpoint,
+    },
+  };
 }
 
 export class Runs {
@@ -525,13 +587,14 @@ export class Runs {
             `Pipeline "${pl.name}" has been archived.`,
           );
         }
-        const resolvedModels = resolvePipelineModels(
+        const { resolvedModels, resolvedEndpoints } = resolvePipelineModels(
           pl.config,
           mode,
           judgeEnabled,
           options.capabilities,
+          options.providerProfiles,
         );
-        return { pipeline: pl, resolvedModels };
+        return { pipeline: pl, resolvedModels, resolvedEndpoints };
       });
 
       const baselineEntry = frozenPipelines.find(
@@ -553,6 +616,14 @@ export class Runs {
         ]),
       ).sort((a, b) => a - b);
 
+      const pipelineEndpoints: Record<string, ResolvedPipelineEndpoints> =
+        Object.fromEntries(
+          frozenPipelines.map((entry) => [
+            entry.pipeline.id,
+            entry.resolvedEndpoints,
+          ]),
+        );
+
       const rubrics = rubricVersionMap();
       const snapshot: FrozenRunSnapshot = {
         softwareVersion: SOFTWARE_VERSION,
@@ -560,6 +631,7 @@ export class Runs {
         datasetRevision: frozenDataset.revision,
         datasetName: frozenDataset.name,
         documentArtifacts,
+        pipelineEndpoints,
         mode,
         judgeEnabled: mode === 'full_rag' ? judgeEnabled : false,
         cutoffs,
@@ -749,12 +821,13 @@ export class Runs {
       pipelineId: string | null;
       indexGenerationId: string | null;
       status: string;
+      errorCode: string | null;
     }
   > {
     return this.db
       .prepare(
         `SELECT pipeline_id AS pipelineId, index_generation_id AS indexGenerationId,
-                operation, model, is_retry AS isRetry, status,
+                operation, model, is_retry AS isRetry, status, error_code AS errorCode,
                 input_tokens AS inputTokens, output_tokens AS outputTokens,
                 cache_read_tokens AS cacheReadTokens, cache_creation_tokens AS cacheCreationTokens,
                 total_tokens AS totalTokens, usage_status AS usageStatus,
@@ -774,6 +847,7 @@ export class Runs {
         model: String(row.model),
         isRetry: Number(row.isRetry) === 1,
         status: String(row.status),
+        errorCode: typeof row.errorCode === 'string' ? row.errorCode : null,
         inputTokens: row.inputTokens === null ? null : Number(row.inputTokens),
         outputTokens:
           row.outputTokens === null ? null : Number(row.outputTokens),
@@ -888,7 +962,12 @@ export class Runs {
 
       const pipelineCalls = allCalls.filter((c) => c.pipelineId === pipelineId);
       for (const c of pipelineCalls) {
-        if (c.status === 'timeout') timeoutCount += 1;
+        if (
+          c.status === 'timeout' ||
+          (c.status === 'ambiguous' && c.errorCode === 'timeout')
+        ) {
+          timeoutCount += 1;
+        }
         if (c.status === 'cancelled') cancellationCount += 1;
       }
 
@@ -1234,24 +1313,33 @@ export class Runs {
         'SELECT * FROM run_pipelines WHERE run_id = ? ORDER BY ordinal ASC',
       )
       .all(runId)
-      .map((pRow) => ({
-        pipelineId: String(pRow.pipeline_id),
-        pipelineRevision: Number(pRow.pipeline_revision),
-        ordinal: Number(pRow.ordinal),
-        pipelineName: String(pRow.pipeline_name),
-        isBaseline: Number(pRow.is_baseline) === 1,
-        config: pipelineConfig.parse(JSON.parse(String(pRow.config))),
-        configHash: String(pRow.config_hash),
-        resolvedModels: JSON.parse(String(pRow.resolved_models)),
-        indexGenerationId:
-          typeof pRow.index_generation_id === 'string'
-            ? pRow.index_generation_id
-            : null,
-        indexReused: Number(pRow.index_reused) === 1,
-        indexTimeMs:
-          pRow.index_time_ms === null ? null : Number(pRow.index_time_ms),
-        state: pRow.state as RunPipelineState,
-      }));
+      .map((pRow) => {
+        const pipelineId = String(pRow.pipeline_id);
+        return {
+          pipelineId,
+          pipelineRevision: Number(pRow.pipeline_revision),
+          ordinal: Number(pRow.ordinal),
+          pipelineName: String(pRow.pipeline_name),
+          isBaseline: Number(pRow.is_baseline) === 1,
+          config: pipelineConfig.parse(JSON.parse(String(pRow.config))),
+          configHash: String(pRow.config_hash),
+          resolvedModels: JSON.parse(String(pRow.resolved_models)),
+          resolvedEndpoints: snapshot.pipelineEndpoints?.[pipelineId] ?? {
+            embedding: null,
+            rerank: null,
+            chat: null,
+            judge: null,
+          },
+          indexGenerationId:
+            typeof pRow.index_generation_id === 'string'
+              ? pRow.index_generation_id
+              : null,
+          indexReused: Number(pRow.index_reused) === 1,
+          indexTimeMs:
+            pRow.index_time_ms === null ? null : Number(pRow.index_time_ms),
+          state: pRow.state as RunPipelineState,
+        };
+      });
 
     const qrelStmt = this.db.prepare(
       `SELECT d.document_id AS documentId, q.grade
@@ -1553,6 +1641,8 @@ export class Runs {
       )
       .all(runTaskId);
     const failedStatuses = new Set([
+      'retrieval_failed',
+      'generation_failed',
       'judge_malformed',
       'judge_refused',
       'judge_timeout',
@@ -1579,6 +1669,7 @@ export class Runs {
     input: {
       stageKeyPrefix: string;
       runId: string;
+      jobId?: string | null;
       pipelineId?: string | null;
       runTaskId?: string | null;
       indexGenerationId?: string | null;
@@ -1623,17 +1714,18 @@ export class Runs {
       this.db
         .prepare(
           `INSERT INTO provider_calls(
-            id, stage_key, run_id, pipeline_id, run_task_id, index_generation_id,
+            id, stage_key, run_id, job_id, pipeline_id, run_task_id, index_generation_id,
             operation, provider, model, request_id, attempt_number, is_retry,
             status, error_code, latency_ms,
             input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, total_tokens,
             usage_status, price_version, cost_status, cost_usd, created_at
-          ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         )
         .run(
           id,
           stageKey,
           input.runId,
+          input.jobId ?? null,
           input.pipelineId ?? null,
           input.runTaskId ?? null,
           input.indexGenerationId ?? null,
@@ -1701,14 +1793,17 @@ export class Runs {
                input_tokens = ?, output_tokens = ?, cache_read_tokens = ?,
                cache_creation_tokens = ?, total_tokens = ?,
                usage_status = ?, price_version = ?, cost_status = ?, cost_usd = ?
-           WHERE id = ?`,
+           WHERE id = ? AND status = 'ambiguous' AND error_code = 'dispatch_in_flight'`,
         )
         .run(
           input.provider,
           input.model,
           input.requestId ?? null,
           input.status,
-          input.errorCode ?? null,
+          input.status === 'ambiguous' &&
+            (!input.errorCode || input.errorCode === 'dispatch_in_flight')
+            ? 'ambiguous_outcome'
+            : (input.errorCode ?? null),
           Math.max(0, Math.round(input.latencyMs)),
           input.usage ? input.usage.inputTokens : null,
           input.usage ? input.usage.outputTokens : null,
@@ -1729,25 +1824,30 @@ export class Runs {
     runTaskId: string,
     operation: ProviderOperation,
     stageKeyPrefix?: string,
+    jobId?: string,
   ): boolean {
-    const row = stageKeyPrefix
-      ? this.db
-          .prepare(
-            `SELECT 1 FROM provider_calls
-             WHERE run_id = ? AND run_task_id = ? AND operation = ?
-               AND stage_key LIKE ?
-               AND status IN ('ambiguous', 'succeeded')
-             LIMIT 1`,
-          )
-          .get(runId, runTaskId, operation, `${stageKeyPrefix}%`)
-      : this.db
-          .prepare(
-            `SELECT 1 FROM provider_calls
-             WHERE run_id = ? AND run_task_id = ? AND operation = ?
-               AND status IN ('ambiguous', 'succeeded')
-             LIMIT 1`,
-          )
-          .get(runId, runTaskId, operation);
+    const clauses = [
+      'run_id = ?',
+      'run_task_id = ?',
+      'operation = ?',
+      "status IN ('ambiguous', 'timeout', 'succeeded')",
+    ];
+    const params: SQLInputValue[] = [runId, runTaskId, operation];
+    if (jobId !== undefined) {
+      clauses.push('job_id = ?');
+      params.push(jobId);
+    }
+    if (stageKeyPrefix) {
+      clauses.push('stage_key LIKE ?');
+      params.push(`${stageKeyPrefix}%`);
+    }
+    const row = this.db
+      .prepare(
+        `SELECT 1 FROM provider_calls
+         WHERE ${clauses.join(' AND ')}
+         LIMIT 1`,
+      )
+      .get(...params);
     return Boolean(row);
   }
 
@@ -2252,6 +2352,33 @@ export class Runs {
          ORDER BY rowid ASC LIMIT 1`,
       )
       .get(runId);
+    const ambiguousTask = this.db
+      .prepare(
+        `SELECT error_message AS errorMessage FROM run_tasks
+         WHERE run_id = ? AND state != 'succeeded' AND error_code = 'ambiguous_outcome'
+         ORDER BY rowid ASC LIMIT 1`,
+      )
+      .get(runId);
+    const ambiguousObs = this.db
+      .prepare(
+        `SELECT mo.reason AS reason
+         FROM metric_observations mo
+         JOIN run_tasks rt ON rt.id = mo.run_task_id
+         WHERE mo.run_id = ?
+           AND rt.state != 'succeeded'
+           AND mo.status != 'scored'
+           AND json_extract(mo.metadata, '$.ambiguousOutcome') = 1
+         ORDER BY rt.rowid ASC, mo.rowid ASC
+         LIMIT 1`,
+      )
+      .get(runId);
+    const hasOutstandingAmbiguousStage = Boolean(ambiguousTask || ambiguousObs);
+    const ambiguousErrorMessage =
+      typeof ambiguousTask?.errorMessage === 'string'
+        ? ambiguousTask.errorMessage
+        : typeof ambiguousObs?.reason === 'string'
+          ? ambiguousObs.reason
+          : null;
     return {
       total: Number(row?.total ?? 0),
       completed: Number(row?.completed ?? 0),
@@ -2260,6 +2387,8 @@ export class Runs {
         typeof firstError?.errorMessage === 'string'
           ? firstError.errorMessage
           : null,
+      hasOutstandingAmbiguousStage,
+      ambiguousErrorMessage,
     };
   }
 

@@ -167,7 +167,9 @@ async function runIndexJob(
           Math.min(maxBackoffMs, 1000 * 2 ** (lease.attempt - 1)) *
           (0.5 + (options.random ?? Math.random)());
         const delay =
-          err instanceof ProviderError && err.retryable
+          err instanceof ProviderError &&
+          err.retryable &&
+          err.code !== 'timeout'
             ? Math.ceil(Math.max(backoff, err.retryAfterMs ?? 0))
             : undefined;
         const message =
@@ -234,6 +236,7 @@ async function runEvaluationJob(
       signal,
       guard: () => jobs.guardRun(lease),
       checkpoint: (stage) => jobs.checkpointRun(lease, stage),
+      jobId: lease.id,
       isRetryJob: lease.parentId !== null,
     });
     const finalRun = options.runs.getRun(lease.runId);
@@ -263,7 +266,9 @@ async function runEvaluationJob(
           Math.min(maxBackoffMs, 1000 * 2 ** (lease.attempt - 1)) *
           (0.5 + (options.random ?? Math.random)());
         const delay =
-          err instanceof ProviderError && err.retryable
+          err instanceof ProviderError &&
+          err.retryable &&
+          err.code !== 'timeout'
             ? Math.ceil(Math.max(backoff, err.retryAfterMs ?? 0))
             : undefined;
         const message =
@@ -349,7 +354,9 @@ async function runGenerationJob(
           Math.min(maxBackoffMs, 1000 * 2 ** (lease.attempt - 1)) *
           (0.5 + (options.random ?? Math.random)());
         const delay =
-          err instanceof ProviderError && err.retryable
+          err instanceof ProviderError &&
+          err.retryable &&
+          err.code !== 'timeout'
             ? Math.ceil(Math.max(backoff, err.retryAfterMs ?? 0))
             : undefined;
         const message =

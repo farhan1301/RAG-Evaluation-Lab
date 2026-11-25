@@ -33,6 +33,7 @@ export function indexesRouter(
     let embedding: {
       provider: 'openai' | 'openai-compatible';
       model: string;
+      endpoint?: string | null;
       expectedDimensions?: number;
     } | null = null;
 
@@ -59,6 +60,7 @@ export function indexesRouter(
       embedding = {
         provider: profile.provider,
         model: profile.model,
+        endpoint: profile.endpointIdentity,
         expectedDimensions: profile.expectedDimensions,
       };
     }

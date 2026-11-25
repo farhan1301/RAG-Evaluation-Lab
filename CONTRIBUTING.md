@@ -4,7 +4,7 @@ Thanks for contributing to RAG Evaluation Lab. This guide covers local setup, te
 
 ## Prerequisites & Setup
 
-- **Node.js:** `>=22.22.0` (CI tests Node `22.22.3` and `26.13.1`)
+- **Node.js:** `^22.22.0 || ^24.0.0 || >=26.0.0` (CI tests Node `22.22.3` and `26.13.1`)
 - **npm:** Workspace-aware npm (bundled with Node 22/26)
 - **Docker (optional):** Needed only for real Qdrant integration tests or the Compose smoke test
 

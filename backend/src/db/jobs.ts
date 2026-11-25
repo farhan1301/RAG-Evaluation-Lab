@@ -342,14 +342,14 @@ export class Jobs {
           );
         const orig = this.db
           .prepare(
-            'SELECT dataset_id,dataset_revision,fingerprint,mode,chunk_config,embedding_provider,embedding_model FROM index_generations WHERE id=?',
+            'SELECT dataset_id,dataset_revision,fingerprint,mode,chunk_config,embedding_provider,embedding_model,embedding_endpoint FROM index_generations WHERE id=?',
           )
           .get(previous.generationId ?? missing());
         if (!orig) return missing();
         const nextGenerationId = randomUUID();
         this.db
           .prepare(
-            "INSERT INTO index_generations(id,dataset_id,dataset_revision,fingerprint,state,mode,chunk_config,embedding_provider,embedding_model,created_at) VALUES (?,?,?,?,'building',?,?,?,?,?)",
+            "INSERT INTO index_generations(id,dataset_id,dataset_revision,fingerprint,state,mode,chunk_config,embedding_provider,embedding_model,embedding_endpoint,created_at) VALUES (?,?,?,?,'building',?,?,?,?,?,?)",
           )
           .run(
             nextGenerationId,
@@ -360,6 +360,7 @@ export class Jobs {
             orig.chunk_config,
             orig.embedding_provider,
             orig.embedding_model,
+            orig.embedding_endpoint ?? null,
             new Date(this.now()).toISOString(),
           );
         this.db

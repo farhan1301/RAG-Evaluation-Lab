@@ -24,6 +24,10 @@ import {
   type SourceSpan,
   type SyntheticProposal,
 } from '@rag-eval/contracts';
+import {
+  providerProfilesForCapabilities,
+  type ResolvedProviderProfile,
+} from '../config/env.js';
 import { ApiError, missing } from '../errors.js';
 import {
   computeVerbatimLeakage,
@@ -46,6 +50,7 @@ import type { Jobs } from './jobs.js';
 
 export interface CreateGenerationOptions {
   capabilities: Capabilities;
+  providerProfiles?: ResolvedProviderProfile[];
   idempotencyKey?: string | null;
 }
 
@@ -59,6 +64,7 @@ export interface GenerationBatchDocumentPlan {
 
 export interface GenerationExecutionPlan {
   batch: GenerationBatch;
+  providerEndpoint: string | null;
   documents: GenerationBatchDocumentPlan[];
   revisionSources: RevisionSourceDocument[];
   existingNormalizedQuestions: string[];
@@ -292,15 +298,26 @@ export class Generations {
         documentIds: selectedDocs.map((d) => d.documentId),
       };
 
+      const detailedProfiles =
+        options.providerProfiles ??
+        providerProfilesForCapabilities(options.capabilities);
+      const providerEndpoint =
+        detailedProfiles?.find(
+          (p) =>
+            p.role === 'chat' &&
+            p.provider === chatProfile.provider &&
+            p.model === chatProfile.model,
+        )?.endpointIdentity ?? null;
+
       this.db
         .prepare(
           `INSERT INTO generation_batches(
             id, dataset_id, dataset_revision, state, stage,
-            provider, model, prompt_version, params,
+            provider, model, provider_endpoint, artifact_pin_version, prompt_version, params,
             total_documents, processed_documents, proposed_count,
             deduplicated_count, invalid_span_count, leakage_flagged_count,
             created_at, request_key, request_hash
-          ) VALUES (?, ?, ?, 'queued', 'queued', ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, ?, ?, ?)`,
+          ) VALUES (?, ?, ?, 'queued', 'queued', ?, ?, ?, 1, ?, ?, ?, 0, 0, 0, 0, 0, ?, ?, ?)`,
         )
         .run(
           batchId,
@@ -308,6 +325,7 @@ export class Generations {
           head.revision,
           chatProfile.provider,
           chatProfile.model,
+          providerEndpoint,
           SYNTHETIC_PROMPT_VERSION,
           JSON.stringify(params),
           selectedDocs.length,
@@ -709,6 +727,16 @@ export class Generations {
 
   loadExecutionPlan(batchId: string): GenerationExecutionPlan {
     const batch = this.getBatch(batchId);
+    const batchMeta = this.db
+      .prepare(
+        'SELECT provider_endpoint AS providerEndpoint, artifact_pin_version AS artifactPinVersion FROM generation_batches WHERE id = ?',
+      )
+      .get(batchId);
+    const providerEndpoint =
+      typeof batchMeta?.providerEndpoint === 'string'
+        ? batchMeta.providerEndpoint
+        : null;
+    const artifactPinVersion = Number(batchMeta?.artifactPinVersion ?? 0);
     const docRows = this.db
       .prepare(
         `SELECT document_id AS documentId, document_version_id AS documentVersionId,
@@ -726,9 +754,9 @@ export class Generations {
       state: row.state as GenerationBatchDocumentPlan['state'],
     }));
 
-    const hasPinnedArtifacts = docRows.some(
-      (r) => typeof r.artifactId === 'string',
-    );
+    const hasPinnedArtifacts =
+      artifactPinVersion >= 1 ||
+      docRows.some((r) => typeof r.artifactId === 'string');
     const pinnedArtifacts = hasPinnedArtifacts
       ? Object.fromEntries(
           docRows.map((r) => [
@@ -777,6 +805,7 @@ export class Generations {
 
     return {
       batch,
+      providerEndpoint,
       documents: docs,
       revisionSources,
       existingNormalizedQuestions: Array.from(existingQuestions),

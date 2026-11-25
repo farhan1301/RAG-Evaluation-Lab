@@ -31,6 +31,12 @@ function emitProxyOrigin(incomingOrigin?: string) {
   };
 }
 
+it('locks the Vite dev server to its trusted port with strictPort enabled', () => {
+  expect(config.server?.host).toBe('127.0.0.1');
+  expect(config.server?.port).toBe(3000);
+  expect(config.server?.strictPort).toBe(true);
+});
+
 it('presents the backend Host and Origin together for browser writes through the Vite proxy', () => {
   const loopback = emitProxyOrigin('http://127.0.0.1:3000');
   expect(loopback.changeOrigin).toBe(true);

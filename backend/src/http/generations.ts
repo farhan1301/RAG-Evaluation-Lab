@@ -18,6 +18,7 @@ export function generationsRouter(generations: Generations, config: Config) {
     const body = parse(c.createGenerationRequest, req.body ?? {});
     const result = generations.createBatch(req.params.id, body, {
       capabilities: config.capabilities,
+      providerProfiles: config.providerProfiles,
       idempotencyKey: requestKey(req),
     });
     res.location(`/api/v1/jobs/${result.job.id}`);

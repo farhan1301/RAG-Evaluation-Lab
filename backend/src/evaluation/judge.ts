@@ -99,7 +99,7 @@ export interface JudgeCallAudit {
   requestId: string | null;
   latencyMs: number;
   usage?: ProviderUsage;
-  callStatus: 'succeeded' | 'failed' | 'timeout' | 'cancelled';
+  callStatus: 'succeeded' | 'failed' | 'timeout' | 'cancelled' | 'ambiguous';
   errorCode: string | null;
 }
 
@@ -799,8 +799,9 @@ export async function evaluateJudgeMetric(
         provider: options.provider.kind,
         model: options.model,
       }) ?? undefined;
+    let response: Awaited<ReturnType<ChatProvider['chat']>>;
     try {
-      const response = await options.provider.chat({
+      response = await options.provider.chat({
         model: options.model,
         messages,
         temperature,
@@ -812,100 +813,13 @@ export async function evaluateJudgeMetric(
         },
         signal: options.signal,
       });
-      const latencyMs = Math.max(0, now() - startedAt);
-      const rawHash = sha256(response.content);
-      lastRawContent = response.content;
-      lastRawHash = rawHash;
-      lastModel = response.model;
-
-      const validated = validateMetricOutput(
-        options.metricId,
-        rubric,
-        response.content,
-        options.task,
-      );
-
-      if (validated.ok) {
-        const audit: JudgeCallAudit = {
-          attemptNumber,
-          isRepair,
-          isRetry,
-          provider: response.provider,
-          model: response.model,
-          effectiveParams: response.effectiveParams,
-          status: 'succeeded',
-          reason: null,
-          rawResponseHash: rawHash,
-          parsedOutput: validated.parsedOutput,
-          score: validated.score,
-          requestId: response.requestId,
-          latencyMs,
-          usage: response.usage,
-          callStatus: 'succeeded',
-          errorCode: null,
-        };
-        options.onAfterCall?.(callId, audit);
-        attempts.push(audit);
-        return {
-          metricId: options.metricId,
-          rubricVersion: rubric.version,
-          attempts,
-          observation: {
-            metricId: options.metricId,
-            metricVersion: rubric.version,
-            cutoff: 0,
-            evaluationUnit: rubric.evaluationUnit,
-            status: 'scored',
-            value: validated.score,
-            reason: null,
-            metadata: {
-              judgeModel: response.model,
-              judgeProvider: response.provider,
-              rubricVersion: rubric.version,
-              rubricHash: rubric.hash,
-              rawResponseHash: rawHash,
-              attemptCount: attempts.length,
-              repaired: isRepair,
-              ...(validated.extraMetadata ?? {}),
-            },
-          },
-        };
-      }
-
-      const audit: JudgeCallAudit = {
-        attemptNumber,
-        isRepair,
-        isRetry,
-        provider: response.provider,
-        model: response.model,
-        effectiveParams: response.effectiveParams,
-        status: validated.attemptStatus,
-        reason: validated.reason,
-        rawResponseHash: rawHash,
-        parsedOutput: validated.parsedOutput,
-        score: null,
-        requestId: response.requestId,
-        latencyMs,
-        usage: response.usage,
-        callStatus: 'succeeded',
-        errorCode: validated.attemptStatus,
-      };
-      options.onAfterCall?.(callId, audit);
-      attempts.push(audit);
-
-      lastObservationStatus = validated.observationStatus;
-      lastReason = validated.reason;
-      repairHint = validated.reason;
-
-      // Explicit refusals are final; allow at most one bounded schema/evidence repair attempt.
-      if (validated.attemptStatus === 'refused' || repairUsed) break;
-      repairUsed = true;
     } catch (err) {
       const latencyMs = Math.max(0, now() - startedAt);
       const isTimeout = err instanceof ProviderError && err.code === 'timeout';
       const isMalformed =
         err instanceof ProviderError && err.code === 'malformed_response';
       const isAborted = Boolean(options.signal?.aborted);
+      const callMeta = err instanceof ProviderError ? err.callMeta : undefined;
       const attemptStatus: JudgeAttemptStatus = isTimeout
         ? 'timeout'
         : isMalformed
@@ -916,8 +830,9 @@ export async function evaluateJudgeMetric(
         : isMalformed
           ? 'judge_malformed'
           : 'judge_failed';
-      const reason =
-        err instanceof ProviderError
+      const reason = isTimeout
+        ? `${err.message} Outcome is ambiguous after dispatch; explicit retry is required and may incur another provider charge.`
+        : err instanceof ProviderError
           ? err.message
           : 'Judge provider request failed.';
 
@@ -925,8 +840,8 @@ export async function evaluateJudgeMetric(
         attemptNumber,
         isRepair,
         isRetry,
-        provider: options.provider.kind,
-        model: options.model,
+        provider: callMeta?.provider ?? options.provider.kind,
+        model: callMeta?.model ?? options.model,
         effectiveParams: {
           ...(temperature !== undefined ? { temperature } : {}),
           maxTokens: 1500,
@@ -937,9 +852,14 @@ export async function evaluateJudgeMetric(
         rawResponseHash: null,
         parsedOutput: null,
         score: null,
-        requestId: null,
-        latencyMs,
-        callStatus: isAborted ? 'cancelled' : isTimeout ? 'timeout' : 'failed',
+        requestId: callMeta?.requestId ?? null,
+        latencyMs: callMeta?.latencyMs ?? latencyMs,
+        usage: callMeta?.usage,
+        callStatus: isAborted
+          ? 'cancelled'
+          : isTimeout
+            ? 'ambiguous'
+            : 'failed',
         errorCode: err instanceof ProviderError ? err.code : 'upstream_failure',
       };
       if (!isAborted) {
@@ -951,7 +871,10 @@ export async function evaluateJudgeMetric(
       lastReason = reason;
       lastRawHash = null;
       if (isAborted) throw err;
+      // Do NOT automatically re-dispatch after a post-dispatch timeout because
+      // chat/judge providers cannot deduplicate requests.
       if (
+        !isTimeout &&
         err instanceof ProviderError &&
         err.retryable &&
         transientRetriesUsed < maxTransientRetries
@@ -961,6 +884,95 @@ export async function evaluateJudgeMetric(
       }
       break;
     }
+
+    const latencyMs = Math.max(0, now() - startedAt);
+    const rawHash = sha256(response.content);
+    lastRawContent = response.content;
+    lastRawHash = rawHash;
+    lastModel = response.model;
+
+    const validated = validateMetricOutput(
+      options.metricId,
+      rubric,
+      response.content,
+      options.task,
+    );
+
+    if (validated.ok) {
+      const audit: JudgeCallAudit = {
+        attemptNumber,
+        isRepair,
+        isRetry,
+        provider: response.provider,
+        model: response.model,
+        effectiveParams: response.effectiveParams,
+        status: 'succeeded',
+        reason: null,
+        rawResponseHash: rawHash,
+        parsedOutput: validated.parsedOutput,
+        score: validated.score,
+        requestId: response.requestId,
+        latencyMs,
+        usage: response.usage,
+        callStatus: 'succeeded',
+        errorCode: null,
+      };
+      options.onAfterCall?.(callId, audit);
+      attempts.push(audit);
+      return {
+        metricId: options.metricId,
+        rubricVersion: rubric.version,
+        attempts,
+        observation: {
+          metricId: options.metricId,
+          metricVersion: rubric.version,
+          cutoff: 0,
+          evaluationUnit: rubric.evaluationUnit,
+          status: 'scored',
+          value: validated.score,
+          reason: null,
+          metadata: {
+            judgeModel: response.model,
+            judgeProvider: response.provider,
+            rubricVersion: rubric.version,
+            rubricHash: rubric.hash,
+            rawResponseHash: rawHash,
+            attemptCount: attempts.length,
+            repaired: isRepair,
+            ...(validated.extraMetadata ?? {}),
+          },
+        },
+      };
+    }
+
+    const audit: JudgeCallAudit = {
+      attemptNumber,
+      isRepair,
+      isRetry,
+      provider: response.provider,
+      model: response.model,
+      effectiveParams: response.effectiveParams,
+      status: validated.attemptStatus,
+      reason: validated.reason,
+      rawResponseHash: rawHash,
+      parsedOutput: validated.parsedOutput,
+      score: null,
+      requestId: response.requestId,
+      latencyMs,
+      usage: response.usage,
+      callStatus: 'succeeded',
+      errorCode: validated.attemptStatus,
+    };
+    options.onAfterCall?.(callId, audit);
+    attempts.push(audit);
+
+    lastObservationStatus = validated.observationStatus;
+    lastReason = validated.reason;
+    repairHint = validated.reason;
+
+    // Explicit refusals are final; allow at most one bounded schema/evidence repair attempt.
+    if (validated.attemptStatus === 'refused' || repairUsed) break;
+    repairUsed = true;
   }
 
   return {
@@ -982,6 +994,9 @@ export async function evaluateJudgeMetric(
         rubricHash: rubric.hash,
         rawResponseHash: lastRawHash,
         attemptCount: attempts.length,
+        ...(lastObservationStatus === 'judge_timeout'
+          ? { ambiguousOutcome: true }
+          : {}),
       },
     },
   };

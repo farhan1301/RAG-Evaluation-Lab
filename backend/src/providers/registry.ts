@@ -143,13 +143,15 @@ export class ProviderRegistry {
     role: Role,
     requestedModel?: string,
     expectedProvider?: ProviderKind,
+    expectedEndpoint?: string,
   ) {
     const model = requestedModel?.trim() || '';
     return this.profiles.find(
       (p) =>
         p.role === role &&
         (!model || p.model === model) &&
-        (!expectedProvider || p.provider === expectedProvider),
+        (!expectedProvider || p.provider === expectedProvider) &&
+        (!expectedEndpoint || p.endpointIdentity === expectedEndpoint),
     );
   }
 
@@ -157,17 +159,23 @@ export class ProviderRegistry {
     role: 'chat' | 'judge',
     requestedModel?: string,
     expectedProvider?: ProviderKind,
+    expectedEndpoint?: string,
   ): { profile: ResolvedProviderProfile; provider: ChatProvider } {
-    const found = this.findProfile(role, requestedModel, expectedProvider);
+    const found = this.findProfile(
+      role,
+      requestedModel,
+      expectedProvider,
+      expectedEndpoint,
+    );
     if (!found?.capabilities.chat) {
       throw new ProviderError(
         'missing_capability',
-        expectedProvider
-          ? `Frozen ${role} profile "${expectedProvider}/${requestedModel ?? ''}" is unavailable or has changed.`
+        expectedProvider || expectedEndpoint
+          ? `Frozen ${role} profile "${expectedProvider ?? 'configured'}/${requestedModel ?? ''}" is unavailable or its endpoint has changed.`
           : `Configure a ${role} profile before running ${role} operations.`,
       );
     }
-    const key = `${found.role}:${found.provider}:${found.model}`;
+    const key = `${found.role}:${found.provider}:${found.model}:${found.endpointIdentity ?? ''}`;
     let provider = this.chatCache.get(key);
     if (!provider) {
       if (found.provider === 'anthropic') {
@@ -213,6 +221,7 @@ export class ProviderRegistry {
   resolveEmbedding(
     requestedModel?: string,
     expectedProvider?: ProviderKind,
+    expectedEndpoint?: string,
   ): {
     profile: ResolvedProviderProfile;
     provider: EmbeddingProvider;
@@ -221,6 +230,7 @@ export class ProviderRegistry {
       'embedding',
       requestedModel,
       expectedProvider,
+      expectedEndpoint,
     );
     if (
       !found?.capabilities.embeddings ||
@@ -228,12 +238,12 @@ export class ProviderRegistry {
     ) {
       throw new ProviderError(
         'missing_capability',
-        expectedProvider
-          ? `Frozen embedding profile "${expectedProvider}/${requestedModel ?? ''}" is unavailable or has changed.`
+        expectedProvider || expectedEndpoint
+          ? `Frozen embedding profile "${expectedProvider ?? 'configured'}/${requestedModel ?? ''}" is unavailable or its endpoint has changed.`
           : 'Configure an embedding profile before indexing or searching dense vectors.',
       );
     }
-    const key = `${found.provider}:${found.model}`;
+    const key = `${found.provider}:${found.model}:${found.endpointIdentity ?? ''}`;
     let provider = this.embedCache.get(key);
     if (!provider) {
       provider = new OpenAIProvider({
@@ -257,11 +267,17 @@ export class ProviderRegistry {
   resolveReranker(
     requestedModel?: string,
     expectedProvider?: ProviderKind,
+    expectedEndpoint?: string,
   ): {
     profile: ResolvedProviderProfile;
     provider: RerankProvider;
   } {
-    const found = this.findProfile('rerank', requestedModel, expectedProvider);
+    const found = this.findProfile(
+      'rerank',
+      requestedModel,
+      expectedProvider,
+      expectedEndpoint,
+    );
     if (
       !found?.capabilities.rerank ||
       found.provider !== 'http' ||
@@ -269,12 +285,12 @@ export class ProviderRegistry {
     ) {
       throw new ProviderError(
         'missing_capability',
-        expectedProvider
-          ? `Frozen reranker profile "${expectedProvider}/${requestedModel ?? ''}" is unavailable or has changed.`
+        expectedProvider || expectedEndpoint
+          ? `Frozen reranker profile "${expectedProvider ?? 'http'}/${requestedModel ?? ''}" is unavailable or its endpoint has changed.`
           : 'Configure an HTTP reranker profile before enabling reranking.',
       );
     }
-    const key = `${found.model}:${found.baseURL}`;
+    const key = `${found.model}:${found.endpointIdentity ?? found.baseURL}`;
     let provider = this.rerankCache.get(key);
     if (!provider) {
       provider = new HttpRerankProvider({

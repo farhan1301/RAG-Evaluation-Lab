@@ -164,8 +164,9 @@ function stripJsonFence(raw: string): string {
 }
 
 function isRetryableError(err: unknown): boolean {
-  if (err instanceof ProviderError) return err.retryable;
-  if (err instanceof ApiError) return err.status === 502 || err.status === 504;
+  if (err instanceof ProviderError)
+    return err.retryable && err.code !== 'timeout';
+  if (err instanceof ApiError) return err.status === 502;
   return false;
 }
 
@@ -244,6 +245,7 @@ export class SyntheticGenerator {
     expectedProvider: ReturnType<
       ProviderRegistry['resolveChat']
     >['provider']['kind'],
+    expectedEndpoint: string | undefined,
     messages: ChatMessage[],
     params: {
       temperature: number | null;
@@ -266,6 +268,7 @@ export class SyntheticGenerator {
       'chat',
       model,
       expectedProvider,
+      expectedEndpoint,
     );
     let repairUsed = false;
     let lastRawContent = '';
@@ -459,6 +462,7 @@ export class SyntheticGenerator {
         const generated = await this.requestStructuredProposals(
           batch.model,
           batch.provider,
+          plan.providerEndpoint ?? undefined,
           messages,
           {
             temperature: batch.params.temperature,

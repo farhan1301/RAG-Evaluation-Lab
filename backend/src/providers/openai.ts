@@ -17,6 +17,7 @@ import {
   isAbortOrTimeout,
   parseRetryAfterMs,
   ProviderError,
+  type ProviderCallMeta,
 } from './errors.js';
 
 export interface OpenAIAdapterOptions {
@@ -159,6 +160,23 @@ export class OpenAIProvider implements ChatProvider, EmbeddingProvider {
 
       const reqId = extractRequestId(response);
       if (reqId) requestIds.push(reqId);
+      const batchUsage: ProviderUsage | undefined =
+        response.usage && typeof response.usage.prompt_tokens === 'number'
+          ? {
+              inputTokens: response.usage.prompt_tokens,
+              outputTokens: 0,
+              totalTokens:
+                typeof response.usage.total_tokens === 'number'
+                  ? response.usage.total_tokens
+                  : response.usage.prompt_tokens,
+            }
+          : undefined;
+      const callMeta: ProviderCallMeta = {
+        provider: this.kind,
+        model: response.model || request.model,
+        requestId: reqId,
+        usage: batchUsage,
+      };
 
       const items: OpenAI.Embeddings.Embedding[] | null = Array.isArray(
         response?.data,
@@ -169,6 +187,7 @@ export class OpenAIProvider implements ChatProvider, EmbeddingProvider {
         throw new ProviderError(
           'partial_batch',
           `Embedding batch size mismatch: expected ${batch.length}, received ${items?.length ?? 0}.`,
+          { callMeta },
         );
       }
 
@@ -183,6 +202,7 @@ export class OpenAIProvider implements ChatProvider, EmbeddingProvider {
           throw new ProviderError(
             'partial_batch',
             'Embedding batch returned invalid or duplicate item indices.',
+            { callMeta },
           );
         }
         const vec = entry?.embedding;
@@ -194,6 +214,7 @@ export class OpenAIProvider implements ChatProvider, EmbeddingProvider {
           throw new ProviderError(
             'malformed_response',
             'Embedding provider returned an invalid vector.',
+            { callMeta },
           );
         }
         if (expectedDim === undefined) expectedDim = vec.length;
@@ -201,6 +222,7 @@ export class OpenAIProvider implements ChatProvider, EmbeddingProvider {
           throw new ProviderError(
             'dimension_mismatch',
             `Embedding dimension mismatch: expected ${expectedDim}, received ${vec.length}.`,
+            { callMeta },
           );
         }
         ordered[idx] = vec;
@@ -211,17 +233,15 @@ export class OpenAIProvider implements ChatProvider, EmbeddingProvider {
           throw new ProviderError(
             'partial_batch',
             'Embedding batch was missing one or more vectors.',
+            { callMeta },
           );
         }
         vectors.push(vec);
       }
 
-      if (response.usage && typeof response.usage.prompt_tokens === 'number') {
-        promptTokens += response.usage.prompt_tokens;
-        totalTokens +=
-          typeof response.usage.total_tokens === 'number'
-            ? response.usage.total_tokens
-            : response.usage.prompt_tokens;
+      if (batchUsage) {
+        promptTokens += batchUsage.inputTokens;
+        totalTokens += batchUsage.totalTokens;
       } else {
         allBatchesHadUsage = false;
       }
@@ -340,14 +360,8 @@ export class OpenAIProvider implements ChatProvider, EmbeddingProvider {
       throw mapOpenAIError(err);
     }
 
-    const content = response.choices?.[0]?.message?.content;
-    if (typeof content !== 'string' || !content.trim()) {
-      throw new ProviderError(
-        'malformed_response',
-        'Chat provider returned empty content.',
-      );
-    }
-
+    const requestId = extractRequestId(response);
+    const responseModel = response.model || request.model;
     let usage: ProviderUsage | undefined;
     if (response.usage) {
       const inputTokens = response.usage.prompt_tokens ?? 0;
@@ -363,11 +377,27 @@ export class OpenAIProvider implements ChatProvider, EmbeddingProvider {
       };
     }
 
+    const content = response.choices?.[0]?.message?.content;
+    if (typeof content !== 'string' || !content.trim()) {
+      throw new ProviderError(
+        'malformed_response',
+        'Chat provider returned empty content.',
+        {
+          callMeta: {
+            provider: this.kind,
+            model: responseModel,
+            requestId,
+            usage,
+          },
+        },
+      );
+    }
+
     return {
       content,
-      model: response.model || request.model,
+      model: responseModel,
       provider: this.kind,
-      requestId: extractRequestId(response),
+      requestId,
       usage,
       effectiveParams,
     };

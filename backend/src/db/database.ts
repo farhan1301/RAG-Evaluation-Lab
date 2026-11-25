@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { recoverInterruptedRestoreSync } from './restoreJournal.js';
 
 const migrations = [
   '001-definitions.sql',
@@ -56,15 +57,23 @@ export function checkWorkerHealth(
   }
 }
 
-export function openDatabase(path: string, targetVersion = migrations.length) {
+export function openDatabase(
+  path: string,
+  targetVersion = migrations.length,
+  options: { skipRestoreRecovery?: boolean } = {},
+) {
   if (
     !Number.isInteger(targetVersion) ||
     targetVersion < 1 ||
     targetVersion > migrations.length
   )
     throw new RangeError('Invalid migration target.');
-  if (path !== ':memory:')
+  if (path !== ':memory:') {
+    if (!options.skipRestoreRecovery) {
+      recoverInterruptedRestoreSync(path);
+    }
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  }
   const db = new DatabaseSync(path);
   try {
     db.exec(

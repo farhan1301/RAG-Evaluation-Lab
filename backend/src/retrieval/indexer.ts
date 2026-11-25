@@ -27,7 +27,7 @@ export interface EmbedCallAudit {
   requestIds: string[];
   usage?: ProviderUsage;
   latencyMs: number;
-  status: 'succeeded' | 'failed' | 'timeout' | 'cancelled';
+  status: 'succeeded' | 'failed' | 'timeout' | 'cancelled' | 'ambiguous';
   errorCode: string | null;
 }
 
@@ -182,6 +182,7 @@ export class IndexBuilder {
       const { profile, provider } = this.providers.resolveEmbedding(
         generation.embeddingModel,
         generation.embeddingProvider ?? undefined,
+        generation.embeddingEndpoint ?? undefined,
       );
       hooks.signal?.throwIfAborted();
       hooks.guard?.();
@@ -289,17 +290,24 @@ export class IndexBuilder {
             const isTimeout =
               err instanceof ProviderError && err.code === 'timeout';
             const isAborted = Boolean(hooks.signal?.aborted);
+            const callMeta =
+              err instanceof ProviderError ? err.callMeta : undefined;
             hooks.onEmbedCall?.({
               callId,
               batchIndex,
-              provider: provider.kind,
-              model: profile.model,
-              requestIds: [],
+              provider:
+                callMeta?.provider === 'openai' ||
+                callMeta?.provider === 'openai-compatible'
+                  ? callMeta.provider
+                  : provider.kind,
+              model: callMeta?.model ?? profile.model,
+              requestIds: callMeta?.requestId ? [callMeta.requestId] : [],
+              usage: callMeta?.usage,
               latencyMs: Math.max(0, this.now() - batchStart),
               status: isAborted
                 ? 'cancelled'
                 : isTimeout
-                  ? 'timeout'
+                  ? 'ambiguous'
                   : 'failed',
               errorCode:
                 err instanceof ProviderError ? err.code : 'upstream_failure',
