@@ -102,13 +102,17 @@ const parseCsv = (content: string): string[][] => {
 
 export const parseTaskCsv = (rawContent: string): ParseTaskCsvResult => {
   const content = rawContent.replace(/^\uFEFF/, '');
-  const rows = parseCsv(content).filter(hasMeaningfulContent);
+  // Keep 1-based spreadsheet row numbers from before blank rows are dropped,
+  // so warnings point at the row users see in their editor.
+  const rows = parseCsv(content)
+    .map((cells, index) => ({ cells, rowNumber: index + 1 }))
+    .filter(({ cells }) => hasMeaningfulContent(cells));
 
   if (rows.length === 0) {
     throw new Error('CSV file is empty.');
   }
 
-  const [rawHeaderRow, ...dataRows] = rows;
+  const [{ cells: rawHeaderRow }, ...dataRows] = rows;
   const headerPositions: Partial<Record<TaskCsvField, number>> = {};
 
   rawHeaderRow.forEach((header, index) => {
@@ -141,8 +145,7 @@ export const parseTaskCsv = (rawContent: string): ParseTaskCsvResult => {
   const warnings: string[] = [];
   const tasks: ParsedTaskCsvRow[] = [];
 
-  dataRows.forEach((row, index) => {
-    const rowNumber = index + 2;
+  dataRows.forEach(({ cells: row, rowNumber }) => {
     const question = (row[questionIndex] ?? '').trim();
     const expectedAnswer = (row[expectedAnswerIndex] ?? '').trim();
     const acceptanceRule = (row[acceptanceRuleIndex] ?? '').trim();
