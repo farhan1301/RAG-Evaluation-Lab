@@ -427,7 +427,7 @@ export class RetrievalService {
           model: profile.model,
           query: request.query,
           documents: bounded.map((c) => c.chunk.content),
-          topN: request.topK,
+          topN: Math.min(request.topK, bounded.length),
           signal,
         });
         rerankUsage = result.usage;
