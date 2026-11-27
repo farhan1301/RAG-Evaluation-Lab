@@ -498,6 +498,66 @@ describe('Keyword retrieval without any provider configured', () => {
 });
 
 describe('Hybrid retrieval, reranking, shared service, failed reindex, and concurrency isolation', () => {
+  it('reranks sparse results while preserving the requested retrieval depth', async () => {
+    const { api, runWorkerOnce } = createHarness(
+      {
+        RERANK_BASE_URL: 'http://rerank.invalid',
+        RERANK_MODEL: 'fixture-reranker',
+      },
+      {
+        rerank: async (_url, init) => {
+          const { documents, top_n } = JSON.parse(String(init?.body)) as {
+            documents: string[];
+            top_n: number;
+          };
+          if (top_n < 1 || top_n > documents.length)
+            return new Response(null, { status: 400 });
+          return Response.json({ results: [{ index: 0, score: 0.9 }] });
+        },
+      },
+    );
+    const dataset = datasets.create('Sparse retrieval fixture');
+    const uploaded = await send(
+      api,
+      'POST',
+      `/api/v1/datasets/${dataset.id}/documents?name=fixture.txt`,
+      undefined,
+      { 'if-match': '"1"', 'content-type': 'text/plain' },
+      'A zephyr is a gentle breeze.',
+    );
+    expect(uploaded.status).toBe(202);
+    expect(await runWorkerOnce()).toBe(true);
+
+    const { index } = c.createIndexResult.parse(
+      (
+        await send(api, 'POST', '/api/v1/indexes', {
+          datasetId: dataset.id,
+          mode: 'keyword',
+        })
+      ).body,
+    );
+    expect(await runWorkerOnce()).toBe(true);
+
+    const response = await send(
+      api,
+      'POST',
+      `/api/v1/indexes/${index.id}/search`,
+      {
+        query: 'zephyr',
+        topK: 5,
+        reranker: { enabled: true, failurePolicy: 'fail' },
+      },
+    );
+    expect(response.status).toBe(200);
+    const result = c.indexSearchResult.parse(response.body);
+    expect(result.topK).toBe(5);
+    expect(result.stages).toMatchObject({
+      keywordCount: 1,
+      rerankStatus: 'applied',
+    });
+    expect(result.items).toMatchObject([{ finalRank: 1, rerankScore: 0.9 }]);
+  });
+
   it('runs hybrid search with RRF, optional reranker apply/fallback/fail, and shares one retrieval service with grounded answers', async () => {
     const fakeQdrant = new InMemoryQdrant();
     let rerankMode: 'ok' | 'malformed' = 'ok';
