@@ -492,7 +492,7 @@ describe('Anthropic provider adapter', () => {
       usage: {
         inputTokens: 18,
         outputTokens: 7,
-        totalTokens: 25,
+        totalTokens: 33,
         cacheReadTokens: 6,
         cacheCreationTokens: 2,
       },

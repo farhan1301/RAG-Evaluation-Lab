@@ -211,7 +211,8 @@ export class AnthropicProvider implements ChatProvider {
       usage = {
         inputTokens,
         outputTokens,
-        totalTokens: inputTokens + outputTokens,
+        // Anthropic reports cache reads and writes separately from input_tokens.
+        totalTokens: inputTokens + cacheRead + cacheCreation + outputTokens,
         ...(cacheRead > 0 ? { cacheReadTokens: cacheRead } : {}),
         ...(cacheCreation > 0 ? { cacheCreationTokens: cacheCreation } : {}),
       };
