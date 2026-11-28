@@ -23,6 +23,10 @@ import { runOne } from '../backend/src/jobs/run';
 import { createLogger } from '../backend/src/lib/logger';
 import { ProviderRegistry } from '../backend/src/providers/registry';
 import { pairedBootstrapInterval } from '../backend/src/reporting/bootstrap';
+import {
+  buildRunExportJson,
+  formatRunExportMarkdown,
+} from '../backend/src/reporting/export';
 import { IndexBuilder } from '../backend/src/retrieval/indexer';
 import { RetrievalService } from '../backend/src/retrieval/service';
 import { send } from './inProcess';
@@ -506,6 +510,104 @@ describe('Phase 7: paired bootstrap, historical comparisons, exports, documentat
     ).toBe(true);
     // Side-by-side tasks are still present for manual inspection
     expect(revMismatch.tasks.length).toBeGreaterThan(0);
+  });
+
+  it('keeps multi-line names, questions, answers, and judge reasons from breaking the Markdown export structure', async () => {
+    const { datasets, pipelines, runs, config, drain } = setup();
+    const sample = datasets.sample().value;
+    const pl = pipelines.create({
+      name: 'Keyword top-3',
+      config: { retriever: { mode: 'keyword', topK: 3, deduplicate: false } },
+    });
+    const exp = runs.createExperiment({
+      name: 'Multi-line export',
+      datasetId: sample.id,
+      baselinePipelineId: pl.id,
+      pipelineIds: [pl.id],
+      mode: 'retrieval_only',
+    });
+    const submitted = runs.createRun(
+      exp.id,
+      { name: 'Run M' },
+      {
+        capabilities: config.capabilities,
+        pricing: config.pricing,
+        budgets: config.budgets,
+      },
+    );
+    await drain();
+
+    const payload = buildRunExportJson(
+      runs,
+      submitted.run.id,
+      c.runExportQuery.parse({}),
+      () => clock,
+    );
+    expect(payload.comparisons).toEqual([]);
+    const task = payload.tasks[0];
+    payload.run.name = 'Run M\n# Injected run heading';
+    payload.run.pipelines[0].pipelineName = 'Keyword\r\n| injected | row |';
+    task.question = 'First line\r\n## Injected question heading\n\nlast line';
+    task.answer = {
+      answerText: 'Intro.\n\n- injected bullet\n| a | b |\r\n### Injected',
+      abstained: false,
+      citations: [],
+      invalidCitations: [],
+      context: [],
+      promptVersion: 'fixture-prompt',
+      provider: 'openai',
+      model: 'fixture-chat',
+      effectiveParams: {},
+      requestId: null,
+      latencyMs: 1,
+      reusedFromRunTaskId: null,
+    };
+    task.judgeAttempts = [
+      {
+        id: '00000000-0000-4000-8000-000000000001',
+        metricId: 'faithfulness',
+        rubricVersion: 'faithfulness.v1',
+        attemptNumber: 1,
+        isRepair: false,
+        provider: 'openai',
+        model: 'fixture-judge',
+        effectiveParams: {},
+        status: 'malformed',
+        reason: 'Bad JSON\n## Injected reason heading',
+        rawResponseHash: null,
+        parsedOutput: null,
+        score: null,
+        requestId: null,
+        latencyMs: 1,
+        createdAt: new Date(clock).toISOString(),
+      },
+    ];
+
+    const md = formatRunExportMarkdown(c.runExportJson.parse(payload));
+    const lines = md.split('\n');
+
+    expect(md).not.toContain('\r');
+    expect(lines[0]).toBe('# Run M # Injected run heading');
+    expect(
+      lines.filter((l) => /^#+ Injected|^- injected|^\| a \|/.test(l)),
+    ).toEqual([]);
+    expect(md).toContain(
+      `### Q${task.ordinal + 1} (Keyword top-3): First line ## Injected question heading last line`,
+    );
+    expect(md).toContain(
+      '- Answer (openai/fixture-chat): Intro. - injected bullet | a | b | ### Injected',
+    );
+    expect(md).toContain('— Bad JSON ## Injected reason heading');
+    expect(md).toContain('| Keyword \\| injected \\| row \\| (Baseline) |');
+
+    // Every overview table row keeps the header's column count.
+    const tableStart = lines.indexOf('## Pipeline Comparison Overview') + 2;
+    const tableRows = lines.slice(tableStart, tableStart + 3);
+    const columns = (row: string) => row.split(/(?<!\\)\|/).length;
+    expect(tableRows).toHaveLength(3);
+    for (const row of tableRows) {
+      expect(columns(row)).toBe(columns(tableRows[0]));
+    }
   });
 
   it('derives /api/v1/documentation from shipped config, metrics, and rubrics without leaking secrets or URLs', async () => {

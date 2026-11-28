@@ -34,15 +34,24 @@ function formatCostBucket(bucket: CostBucket): string {
   return `Unknown (${bucket.totalCalls} unpriced)`;
 }
 
+/**
+ * Collapses line breaks in free text (names, questions, model answers, judge
+ * reasons) so it cannot start new Markdown headings, list items, or table rows.
+ * The JSON export keeps the original text verbatim.
+ */
+function inline(value: string): string {
+  return value.replace(/[ \t]*(?:\r\n|\r|\n)\s*/g, ' ').trim();
+}
+
 function escapeCell(value: string): string {
-  return value.replaceAll('|', '\\|').replaceAll('\n', ' ');
+  return inline(value).replaceAll('|', '\\|');
 }
 
 function renderTaskSideEvidence(
   label: string,
   task: RunTaskDetail | null,
 ): string[] {
-  const lines: string[] = [`#### ${label}`];
+  const lines: string[] = [`#### ${inline(label)}`];
   if (!task) {
     lines.push('_Task not present on this side._', '');
     return lines;
@@ -55,14 +64,14 @@ function renderTaskSideEvidence(
   }
   if (task.answer) {
     lines.push(
-      `- Answer (${task.answer.provider}/${task.answer.model}${task.answer.abstained ? ', abstained' : ''}): ${task.answer.answerText}`,
+      `- Answer (${task.answer.provider}/${task.answer.model}${task.answer.abstained ? ', abstained' : ''}): ${inline(task.answer.answerText)}`,
     );
     lines.push(
       `- Validated citations: ${task.answer.citations.length > 0 ? task.answer.citations.join(', ') : 'None'}`,
     );
     if (task.answer.invalidCitations.length > 0) {
       lines.push(
-        `- Rejected citations: ${task.answer.invalidCitations.join(', ')}`,
+        `- Rejected citations: ${inline(task.answer.invalidCitations.join(', '))}`,
       );
     }
   }
@@ -89,7 +98,7 @@ function renderTaskSideEvidence(
     lines.push('- Judge audit trail:');
     for (const attempt of task.judgeAttempts) {
       lines.push(
-        `  - ${attempt.metricId} (${attempt.rubricVersion}, attempt #${attempt.attemptNumber}${attempt.isRepair ? ' repair' : ''}, ${attempt.model}): ${attempt.status}${attempt.score !== null ? `, score ${attempt.score.toFixed(3)}` : ''}${attempt.reason ? ` — ${attempt.reason}` : ''}`,
+        `  - ${attempt.metricId} (${attempt.rubricVersion}, attempt #${attempt.attemptNumber}${attempt.isRepair ? ' repair' : ''}, ${attempt.model}): ${attempt.status}${attempt.score !== null ? `, score ${attempt.score.toFixed(3)}` : ''}${attempt.reason ? ` — ${inline(attempt.reason)}` : ''}`,
       );
     }
   }
@@ -170,11 +179,11 @@ export function buildRunExportJson(
 export function formatRunExportMarkdown(payload: RunExportJson): string {
   const { run, comparisons, tasks } = payload;
   const lines: string[] = [
-    `# ${run.name}`,
+    `# ${inline(run.name)}`,
     '',
     `- Run ID: \`${run.id}\``,
     `- State: ${run.state} (stage: ${run.stage})`,
-    `- Dataset: ${run.datasetName} (revision ${run.datasetRevision})`,
+    `- Dataset: ${inline(run.datasetName)} (revision ${run.datasetRevision})`,
     `- Mode: ${run.mode} · Judge enabled: ${run.snapshot.judgeEnabled ? 'yes' : 'no'}`,
     `- Queued: ${run.queuedAt}${run.completedAt ? ` · Completed: ${run.completedAt}` : ''}`,
     `- Snapshot versions: software ${run.snapshot.softwareVersion}, retrieval ${run.snapshot.retrievalMetricVersion}, prompt ${run.snapshot.promptVersion}, pricing ${run.snapshot.priceScheduleVersion}`,
@@ -250,10 +259,10 @@ export function formatRunExportMarkdown(payload: RunExportJson): string {
 
   for (const comp of comparisons) {
     lines.push(
-      `## Paired Comparison: ${comp.baseline.pipelineName} (Baseline) vs ${comp.candidate.pipelineName}`,
+      `## Paired Comparison: ${inline(comp.baseline.pipelineName)} (Baseline) vs ${inline(comp.candidate.pipelineName)}`,
       '',
-      `- Baseline: ${comp.baseline.runName} · ${comp.baseline.pipelineName} (r${comp.baseline.pipelineRevision}, dataset r${comp.baseline.datasetRevision})`,
-      `- Candidate: ${comp.candidate.runName} · ${comp.candidate.pipelineName} (r${comp.candidate.pipelineRevision}, dataset r${comp.candidate.datasetRevision})`,
+      `- Baseline: ${inline(comp.baseline.runName)} · ${inline(comp.baseline.pipelineName)} (r${comp.baseline.pipelineRevision}, dataset r${comp.baseline.datasetRevision})`,
+      `- Candidate: ${inline(comp.candidate.runName)} · ${inline(comp.candidate.pipelineName)} (r${comp.candidate.pipelineRevision}, dataset r${comp.candidate.datasetRevision})`,
       `- Resampling rule: ${comp.resamplingRule.description}`,
       '',
     );
@@ -262,7 +271,7 @@ export function formatRunExportMarkdown(payload: RunExportJson): string {
       lines.push('### Compatibility Warnings', '');
       for (const issue of comp.incompatibilities) {
         lines.push(
-          `- **${issue.field}** (${issue.scope}): baseline \`${issue.baselineValue}\` vs candidate \`${issue.candidateValue}\` — ${issue.reason}`,
+          `- **${issue.field}** (${issue.scope}): baseline \`${inline(issue.baselineValue)}\` vs candidate \`${inline(issue.candidateValue)}\` — ${inline(issue.reason)}`,
         );
       }
       lines.push('');
@@ -312,7 +321,7 @@ export function formatRunExportMarkdown(payload: RunExportJson): string {
     lines.push('### Per-Task Side-by-Side Evidence', '');
     for (const task of comp.tasks) {
       lines.push(
-        `### Q${task.ordinal + 1}: ${task.question}${task.differs ? ' [Differs]' : ''}`,
+        `### Q${task.ordinal + 1}: ${inline(task.question)}${task.differs ? ' [Differs]' : ''}`,
         '',
         `- Answerable: ${task.answerable ? 'yes' : 'no'} · Pool: ${task.pool}${task.differenceSummary.length ? ` · Differences: ${task.differenceSummary.join('; ')}` : ''}`,
         '',
@@ -359,7 +368,7 @@ export function formatRunExportMarkdown(payload: RunExportJson): string {
     lines.push('## Per-Task Evidence', '');
     for (const task of tasks) {
       lines.push(
-        `### Q${task.ordinal + 1} (${task.pipelineName}): ${task.question}`,
+        `### Q${task.ordinal + 1} (${inline(task.pipelineName)}): ${inline(task.question)}`,
         '',
       );
       lines.push(...renderTaskSideEvidence(task.pipelineName, task));
